@@ -218,6 +218,151 @@ mod tests {
         assert_eq!(cpu.regs.get(0), cpu.cpsr.0);
     }
 
+    // ──────── Multiply ────────
+
+    /// MUL r0, r1, r2  →  encoding: cond=E, 0000 00 00, Rd=0, Rn=0, Rs=2, 1001, Rm=1
+    /// = 0xE000_0291
+    #[test]
+    fn mul_basic() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE000_0291]);
+        cpu.regs.set(1, 7);
+        cpu.regs.set(2, 6);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(0), 42);
+    }
+
+    /// MLA r0, r1, r2, r3 (r0 = r1*r2 + r3)
+    /// Encoding: Cond=E, 000000 A=1 S=0, Rd=0, Rn=3, Rs=2, 1001, Rm=1 → 0xE020_3291
+    #[test]
+    fn mla_accumulates() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE020_3291]);
+        cpu.regs.set(1, 5);
+        cpu.regs.set(2, 6);
+        cpu.regs.set(3, 7);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(0), 37);
+    }
+
+    /// UMULL r0, r1, r2, r3  → low=r0, high=r1, r2*r3 unsigned
+    /// Encoding: cond=E, 0000 100 0 (U=0 unsigned, A=0, S=0), RdHi=1, RdLo=0, Rs=3, 1001, Rm=2
+    /// = 0xE081_0392
+    #[test]
+    fn umull_basic() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE081_0392]);
+        cpu.regs.set(2, 0xFFFF_FFFF);
+        cpu.regs.set(3, 2);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(0), 0xFFFF_FFFE);
+        assert_eq!(cpu.regs.get(1), 0x0000_0001);
+    }
+
+    // ──────── LDR / STR ────────
+
+    /// STR r1, [r0, #4]; LDR r2, [r0, #4]  — escreve e lê de volta.
+    /// STR: cond=E, 01 01 1000, Rn=0, Rd=1, off=4 → 0xE580_1004
+    /// LDR: cond=E, 01 01 1001, Rn=0, Rd=2, off=4 → 0xE590_2004
+    #[test]
+    fn str_then_ldr_roundtrip() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE580_1004, 0xE590_2004]);
+        cpu.regs.set(0, 0x0300_0000); // base aponta para IWRAM
+        cpu.regs.set(1, 0xDEAD_BEEF);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(2), 0xDEAD_BEEF);
+    }
+
+    /// STRB / LDRB — escreve um byte e lê de volta.
+    /// STRB r1, [r0]  → 0xE5C0_1000
+    /// LDRB r2, [r0]  → 0xE5D0_2000
+    #[test]
+    fn strb_then_ldrb() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE5C0_1000, 0xE5D0_2000]);
+        cpu.regs.set(0, 0x0300_0010);
+        cpu.regs.set(1, 0xAB);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(2), 0xAB);
+    }
+
+    /// LDR com endereço desalinhado: addr=0x...01 → ROR de 8 bits.
+    /// STR r1, [r0]; LDR r2, [r0, #1] (sem writeback)
+    /// LDR: 0xE590_2001
+    #[test]
+    fn ldr_unaligned_rotates() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE580_1000, 0xE590_2001]);
+        cpu.regs.set(0, 0x0300_0020);
+        cpu.regs.set(1, 0x1234_5678);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        // Ler em offset 1: ROR(0x12345678, 8) = 0x78123456
+        assert_eq!(cpu.regs.get(2), 0x7812_3456);
+    }
+
+    // ──────── Halfword Transfer ────────
+
+    /// STRH r1, [r0]; LDRH r2, [r0]
+    /// STRH: cond=E, 000 P=1 U=1 I=1 W=0 L=0, Rn=0, Rd=1, 0000_1011_0000 → 0xE1C0_10B0
+    /// LDRH: cond=E, 000 P=1 U=1 I=1 W=0 L=1, Rn=0, Rd=2, 0000_1011_0000 → 0xE1D0_20B0
+    #[test]
+    fn strh_then_ldrh() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE1C0_10B0, 0xE1D0_20B0]);
+        cpu.regs.set(0, 0x0300_0030);
+        cpu.regs.set(1, 0xFFFF_BEEF);
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+        // LDRH só carrega 16 bits baixos, zero-extend.
+        assert_eq!(cpu.regs.get(2), 0x0000_BEEF);
+    }
+
+    /// LDRSB r2, [r0] (signed byte). Byte 0xFF → 0xFFFFFFFF após sign-extend.
+    /// STRB r1, [r0]; LDRSB r2, [r0]
+    /// LDRSB encoding: cond=E, 000 P=1 U=1 I=1 W=0 L=1, Rn=0, Rd=2, 0000_1101_0000 → 0xE1D0_20D0
+    #[test]
+    fn ldrsb_sign_extends() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE5C0_1000, 0xE1D0_20D0]);
+        cpu.regs.set(0, 0x0300_0040);
+        cpu.regs.set(1, 0xFF);
+        cpu.step(&mut bus); // STRB
+        cpu.step(&mut bus); // LDRSB
+        assert_eq!(cpu.regs.get(2), 0xFFFF_FFFF);
+    }
+
+    // ──────── Block Data Transfer (LDM/STM) ────────
+
+    /// STMIA r0!, {r1, r2, r3}  e depois LDMIA r0!, {r4, r5, r6}.
+    /// STM: cond=E, 100 P=0 U=1 S=0 W=1 L=0, Rn=0, list={r1,r2,r3}=0x000E → 0xE8A0_000E
+    /// LDM: cond=E, 100 P=0 U=1 S=0 W=1 L=1, Rn=0, list={r4,r5,r6}=0x0070 → 0xE8B0_0070
+    #[test]
+    fn stmia_then_ldmia() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE8A0_000E, 0xE8B0_0070]);
+        cpu.regs.set(0, 0x0300_0080);
+        cpu.regs.set(1, 0x1111);
+        cpu.regs.set(2, 0x2222);
+        cpu.regs.set(3, 0x3333);
+        cpu.step(&mut bus); // STM!
+        assert_eq!(cpu.regs.get(0), 0x0300_008C); // 12 bytes adiantados
+        // Volta o base e recarrega em r4,r5,r6:
+        cpu.regs.set(0, 0x0300_0080);
+        cpu.step(&mut bus); // LDM!
+        assert_eq!(cpu.regs.get(4), 0x1111);
+        assert_eq!(cpu.regs.get(5), 0x2222);
+        assert_eq!(cpu.regs.get(6), 0x3333);
+        assert_eq!(cpu.regs.get(0), 0x0300_008C);
+    }
+
+    // ──────── SWI ────────
+
+    /// SWI #0 → entra em Supervisor, PC=0x08, LR_svc = exec_pc+4.
+    /// Encoding: cond=E, 1111 0000 ... → 0xEF00_0000
+    #[test]
+    fn swi_enters_supervisor_mode() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xEF00_0000]);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.pc(), 0x08);
+        assert_eq!(cpu.cpsr.mode(), CpuMode::Supervisor);
+        assert_eq!(cpu.regs.lr(), 0x0200_0004);
+    }
+
     #[test]
     fn branch_condition_false_skips() {
         // BEQ +8, mas Z=0 → não toma o branch, PC = exec_pc + 4.
