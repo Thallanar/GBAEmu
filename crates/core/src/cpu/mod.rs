@@ -69,11 +69,37 @@ impl Cpu {
 
     /// Executa uma instrução. Retorna ciclos consumidos (placeholder = 1).
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
+        // Atende IRQ pendente ANTES de executar (se permitido pelo CPSR).
+        if bus.io.irq_pending() && !self.cpsr.irq_disabled() {
+            self.enter_irq();
+            return 1;
+        }
+
         if self.cpsr.thumb() {
             self.step_thumb(bus)
         } else {
             self.step_arm(bus)
         }
+    }
+
+    /// Entrada na exceção IRQ.
+    /// Salva CPSR em SPSR_irq, LR_irq = PC + ajuste, PC = 0x18, modo IRQ.
+    fn enter_irq(&mut self) {
+        let return_addr = if self.cpsr.thumb() {
+            self.regs.pc()
+        } else {
+            self.regs.pc().wrapping_sub(4)
+        };
+        let old_cpsr = self.cpsr;
+        self.cpsr.set_mode(CpuMode::Irq);
+        self.cpsr.set_flag(PsrFlags::T, false);
+        self.cpsr.set_flag(PsrFlags::I, true);
+        self.regs.switch_mode(CpuMode::Irq);
+        if let Some(idx) = CpuMode::Irq.spsr_index() {
+            self.spsr[idx] = old_cpsr;
+        }
+        self.regs.set_lr(return_addr);
+        self.set_pc_arm(0x0000_0018);
     }
 
     fn step_arm(&mut self, bus: &mut Bus) -> u32 {
@@ -469,6 +495,36 @@ mod tests {
         cpu.step(&mut bus);
         // PC era 0x0200_0000, ficou +4 (do pipeline) +4 (offset) = 0x0200_0008
         assert_eq!(cpu.regs.pc(), 0x0200_0008);
+    }
+
+    // ──────── IRQ ────────
+
+    /// Quando IE & IF != 0 e IME=1 e CPSR.I=0, a CPU entra em IRQ mode
+    /// no próximo step (vetor 0x18).
+    #[test]
+    fn irq_dispatches_to_vector() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE320_F000]); // NOP (MSR cpsr_c, #0 — no-op safe)
+        // Habilita IRQ globalmente e no CPSR.
+        bus.io.ime = true;
+        bus.io.ie = 0x0008; // TIMER0
+        bus.io.iflag = 0x0008;
+        cpu.cpsr.set_flag(psr::PsrFlags::I, false);
+
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.pc(), 0x18);
+        assert_eq!(cpu.cpsr.mode(), CpuMode::Irq);
+        assert!(cpu.cpsr.irq_disabled(), "I bit deve ser setado ao entrar na exceção");
+    }
+
+    #[test]
+    fn irq_blocked_when_cpsr_i_set() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE320_F000]);
+        bus.io.ime = true;
+        bus.io.ie = 0x0001;
+        bus.io.iflag = 0x0001;
+        cpu.cpsr.set_flag(psr::PsrFlags::I, true);
+        cpu.step(&mut bus);
+        assert_ne!(cpu.regs.pc(), 0x18, "IRQ não deve disparar com I=1");
     }
 
     #[test]

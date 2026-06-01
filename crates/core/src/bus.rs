@@ -16,12 +16,13 @@
 //! | 0xE    | Game Pak SRAM       | 64 KB   |
 
 use crate::cartridge::Cartridge;
+use crate::io::Io;
 
 pub struct Bus {
     pub bios: Vec<u8>,
     pub ewram: Box<[u8; 0x40000]>, // 256 KB
     pub iwram: Box<[u8; 0x8000]>,  // 32 KB
-    pub io: Box<[u8; 0x400]>,      // I/O registers (placeholder)
+    pub io: Io,
     pub palette: Box<[u8; 0x400]>, // 1 KB
     pub vram: Box<[u8; 0x18000]>,  // 96 KB
     pub oam: Box<[u8; 0x400]>,     // 1 KB
@@ -34,7 +35,7 @@ impl Bus {
             bios: Vec::new(),
             ewram: Box::new([0; 0x40000]),
             iwram: Box::new([0; 0x8000]),
-            io: Box::new([0; 0x400]),
+            io: Io::new(),
             palette: Box::new([0; 0x400]),
             vram: Box::new([0; 0x18000]),
             oam: Box::new([0; 0x400]),
@@ -44,13 +45,13 @@ impl Bus {
 
     // ───────────────────── reads ─────────────────────
 
-    pub fn read_u8(&self, addr: u32) -> u8 {
+    pub fn read_u8(&mut self, addr: u32) -> u8 {
         let region = (addr >> 24) & 0xF;
         match region {
             0x0 => self.bios.get(addr as usize).copied().unwrap_or(0),
             0x2 => self.ewram[(addr as usize) & 0x3FFFF],
             0x3 => self.iwram[(addr as usize) & 0x7FFF],
-            0x4 => self.io[(addr as usize) & 0x3FF],
+            0x4 => self.io.read_u8(addr),
             0x5 => self.palette[(addr as usize) & 0x3FF],
             0x6 => self.vram[vram_offset(addr)],
             0x7 => self.oam[(addr as usize) & 0x3FF],
@@ -68,14 +69,14 @@ impl Bus {
         }
     }
 
-    pub fn read_u16(&self, addr: u32) -> u16 {
+    pub fn read_u16(&mut self, addr: u32) -> u16 {
         let a = addr & !1; // alinhamento half-word
         let lo = self.read_u8(a) as u16;
         let hi = self.read_u8(a + 1) as u16;
         lo | (hi << 8)
     }
 
-    pub fn read_u32(&self, addr: u32) -> u32 {
+    pub fn read_u32(&mut self, addr: u32) -> u32 {
         let a = addr & !3; // alinhamento word
         let b0 = self.read_u8(a) as u32;
         let b1 = self.read_u8(a + 1) as u32;
@@ -92,7 +93,7 @@ impl Bus {
             0x0 => { /* BIOS é read-only */ }
             0x2 => self.ewram[(addr as usize) & 0x3FFFF] = val,
             0x3 => self.iwram[(addr as usize) & 0x7FFF] = val,
-            0x4 => self.io[(addr as usize) & 0x3FF] = val,
+            0x4 => self.io.write_u8(addr, val),
             0x5 => self.palette[(addr as usize) & 0x3FF] = val,
             0x6 => self.vram[vram_offset(addr)] = val,
             0x7 => self.oam[(addr as usize) & 0x3FF] = val,

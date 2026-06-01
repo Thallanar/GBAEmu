@@ -30,7 +30,7 @@ pub trait ShinyTarget {
     fn pid_address(&self) -> u32;
 
     /// TID/SID do save (lido uma vez no início).
-    fn trainer_ids(&self, gba: &Gba) -> (u16, u16);
+    fn trainer_ids(&self, gba: &mut Gba) -> (u16, u16);
 
     /// Executa a sequência de inputs para chegar ao encontro
     /// (soft-reset, navegação de menus, etc.).
@@ -73,12 +73,8 @@ impl Default for Hunter {
     }
 }
 
-fn read_u32(gba: &Gba, addr: u32) -> u32 {
-    let b0 = gba.bus.read_u8(addr) as u32;
-    let b1 = gba.bus.read_u8(addr + 1) as u32;
-    let b2 = gba.bus.read_u8(addr + 2) as u32;
-    let b3 = gba.bus.read_u8(addr + 3) as u32;
-    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+fn read_u32(gba: &mut Gba, addr: u32) -> u32 {
+    gba.bus.read_u32(addr)
 }
 
 #[cfg(test)]

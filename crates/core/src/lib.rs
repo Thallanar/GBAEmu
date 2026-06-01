@@ -4,12 +4,14 @@
 //! e é puramente computacional — não faz I/O nem desenha na tela.
 //! Os frontends (desktop, android) consomem esta crate.
 
+pub mod apu;
 pub mod bus;
 pub mod cartridge;
 pub mod cpu;
 pub mod gba;
+pub mod io;
 pub mod ppu;
-pub mod apu;
+pub mod timer;
 
 pub use gba::Gba;
 
