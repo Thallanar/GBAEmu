@@ -4,6 +4,7 @@
 //! visível: ao executar uma instrução ARM, PC já está adiantado em 8 bytes
 //! (duas instruções de 4 bytes pré-buscadas). Em THUMB, adiantado em 4.
 
+pub mod alu;
 pub mod arm;
 pub mod condition;
 pub mod psr;
@@ -84,6 +85,12 @@ impl Cpu {
         self.branched = true;
     }
 
+    /// Retorna o SPSR do modo atual (None em User/System).
+    pub(crate) fn current_spsr(&self) -> Option<psr::Cpsr> {
+        self.cpsr.mode().spsr_index().map(|i| self.spsr[i])
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn set_pc_thumb(&mut self, target: u32) {
         self.regs.set_pc(target & !0x1);
         self.branched = true;
@@ -130,6 +137,85 @@ mod tests {
         cpu.step(&mut bus);
         // LR deve guardar endereço da próxima instrução (exec_pc + 4).
         assert_eq!(cpu.regs.lr(), 0x0200_0004);
+    }
+
+    // ──────── Data Processing ────────
+
+    /// MOV Rd, #imm (S=0). opcode=0xD, I=1.
+    /// Cond=AL(0xE), bits 27..26=00, bit 25=1, opcode=1101, S=0, Rn=0(ignorado), Rd=0, imm=8.
+    /// Encoding: 0xE3A0_0008  (MOV r0, #8)
+    #[test]
+    fn mov_immediate() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE3A0_0008]);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(0), 8);
+    }
+
+    /// ADD r1, r0, #5  →  0xE280_1005
+    #[test]
+    fn add_immediate() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE280_1005]);
+        cpu.regs.set(0, 10);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(1), 15);
+    }
+
+    /// SUBS r0, r0, #1  com r0=0 → resultado 0xFFFFFFFF, N=1, Z=0, C=0 (borrow), V=0.
+    /// Encoding: 0xE250_0001
+    #[test]
+    fn subs_sets_flags_negative_and_borrow() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE250_0001]);
+        cpu.regs.set(0, 0);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(0), 0xFFFF_FFFF);
+        assert!(cpu.cpsr.n());
+        assert!(!cpu.cpsr.z());
+        assert!(!cpu.cpsr.c()); // borrow → C=0 na convenção ARM
+    }
+
+    /// CMP r0, #5 com r0=5 → Z=1, N=0, C=1 (sem borrow).
+    /// CMP = opcode 0xA, S=1, sem write. Encoding: 0xE350_0005.
+    #[test]
+    fn cmp_equal_sets_zero() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE350_0005]);
+        cpu.regs.set(0, 5);
+        cpu.step(&mut bus);
+        assert!(cpu.cpsr.z());
+        assert!(!cpu.cpsr.n());
+        assert!(cpu.cpsr.c());
+        assert_eq!(cpu.regs.get(0), 5, "CMP não deve escrever em Rd");
+    }
+
+    /// MOVS r0, r1, LSL #1 — testa barrel shifter com flag C.
+    /// I=0, opcode=MOV(0xD), S=1, Rd=0, Rm=1, shift LSL #1.
+    /// Encoding: 0xE1B0_0081
+    #[test]
+    fn movs_lsl_sets_carry() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE1B0_0081]);
+        cpu.regs.set(1, 0x8000_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(0), 0);
+        assert!(cpu.cpsr.z());
+        assert!(cpu.cpsr.c(), "LSL #1 sobre bit 31 deve setar C");
+    }
+
+    /// ORR r0, r0, #0xFF — testa lógica + sem alteração de C.
+    /// Encoding: 0xE380_00FF
+    #[test]
+    fn orr_immediate() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE380_00FF]);
+        cpu.regs.set(0, 0xFF00);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(0), 0xFFFF);
+    }
+
+    /// MRS r0, CPSR — copia CPSR para R0.
+    /// Encoding: 0xE10F_0000
+    #[test]
+    fn mrs_reads_cpsr() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE10F_0000]);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(0), cpu.cpsr.0);
     }
 
     #[test]

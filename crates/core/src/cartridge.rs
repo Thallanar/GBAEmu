@@ -1,7 +1,8 @@
 //! Cartridge — ROM + save backing (SRAM/Flash/EEPROM).
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum SaveType {
+    #[default]
     None,
     Sram,
     Flash64K,
@@ -14,12 +15,6 @@ pub struct Cartridge {
     pub rom: Vec<u8>,
     pub save_type: SaveType,
     pub save_data: Vec<u8>,
-}
-
-impl Default for SaveType {
-    fn default() -> Self {
-        SaveType::None
-    }
 }
 
 impl Cartridge {
