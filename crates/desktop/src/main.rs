@@ -5,8 +5,23 @@
 
 use std::path::PathBuf;
 
+use auroragba_core::joypad::Button;
 use auroragba_core::{Gba, SCREEN_HEIGHT, SCREEN_WIDTH};
 use eframe::egui;
+
+/// Mapeamento teclado → botões do GBA.
+const KEY_MAP: &[(egui::Key, Button)] = &[
+    (egui::Key::Z, Button::A),
+    (egui::Key::X, Button::B),
+    (egui::Key::Enter, Button::Start),
+    (egui::Key::Backspace, Button::Select),
+    (egui::Key::ArrowUp, Button::Up),
+    (egui::Key::ArrowDown, Button::Down),
+    (egui::Key::ArrowLeft, Button::Left),
+    (egui::Key::ArrowRight, Button::Right),
+    (egui::Key::A, Button::L),
+    (egui::Key::S, Button::R),
+];
 
 fn main() -> eframe::Result<()> {
     env_logger::init();
@@ -65,6 +80,15 @@ impl AuroraApp {
         }
     }
 
+    /// Lê o teclado e atualiza o estado dos botões do GBA.
+    fn poll_input(&mut self, ctx: &egui::Context) {
+        ctx.input(|i| {
+            for (key, button) in KEY_MAP {
+                self.gba.bus.io.joypad.set_button(*button, i.key_down(*key));
+            }
+        });
+    }
+
     /// Copia o framebuffer da PPU (RGBA8) para a textura egui.
     fn refresh_texture(&mut self) {
         let pixels: &[u8] = &*self.gba.bus.ppu.framebuffer;
@@ -89,6 +113,7 @@ impl eframe::App for AuroraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Avança 1 frame por update se rodando.
         if self.running {
+            self.poll_input(ctx);
             self.gba.run_frame();
             self.refresh_texture();
             ctx.request_repaint();

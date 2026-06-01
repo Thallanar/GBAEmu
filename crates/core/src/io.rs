@@ -8,11 +8,14 @@
 //! Acessos de 8/16/32 bits vão por aqui; o bus apenas faz delegação para
 //! [`Io::read_u8`] e companhia.
 
+use crate::joypad::Joypad;
 use crate::timer::Timers;
 
 pub const IE_ADDR: u32 = 0x0400_0200;
 pub const IF_ADDR: u32 = 0x0400_0202;
 pub const IME_ADDR: u32 = 0x0400_0208;
+pub const KEYINPUT_ADDR: u32 = 0x0400_0130;
+pub const KEYCNT_ADDR: u32 = 0x0400_0132;
 
 /// Flags de interrupção (uma a uma — IE/IF compartilham o mesmo layout).
 #[allow(dead_code)]
@@ -42,6 +45,7 @@ pub struct Io {
     /// Interrupt Master Enable (apenas bit 0).
     pub ime: bool,
     pub timers: Timers,
+    pub joypad: Joypad,
 }
 
 impl Io {
@@ -53,6 +57,11 @@ impl Io {
         match addr {
             // Timers
             0x0400_0100..=0x0400_010F => self.timers.read_u8(addr),
+            // Joypad (KEYINPUT read-only, KEYCNT r/w)
+            KEYINPUT_ADDR => self.joypad.keyinput() as u8,
+            a if a == KEYINPUT_ADDR + 1 => (self.joypad.keyinput() >> 8) as u8,
+            KEYCNT_ADDR => self.joypad.keycnt as u8,
+            a if a == KEYCNT_ADDR + 1 => (self.joypad.keycnt >> 8) as u8,
             // IRQ
             IE_ADDR     => self.ie as u8,
             a if a == IE_ADDR + 1 => (self.ie >> 8) as u8,
@@ -66,6 +75,11 @@ impl Io {
     pub fn write_u8(&mut self, addr: u32, val: u8) {
         match addr {
             0x0400_0100..=0x0400_010F => self.timers.write_u8(addr, val),
+            // KEYINPUT é read-only; KEYCNT é gravável.
+            KEYCNT_ADDR => self.joypad.keycnt = (self.joypad.keycnt & 0xFF00) | val as u16,
+            a if a == KEYCNT_ADDR + 1 => {
+                self.joypad.keycnt = (self.joypad.keycnt & 0x00FF) | ((val as u16) << 8)
+            }
             IE_ADDR     => self.ie = (self.ie & 0xFF00) | val as u16,
             a if a == IE_ADDR + 1 => self.ie = (self.ie & 0x00FF) | ((val as u16) << 8),
             // IF é write-1-to-clear.

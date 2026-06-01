@@ -43,7 +43,13 @@ impl Gba {
             self.bus.run_dma_timing(crate::dma::Timing::HBlank);
         }
 
-        let all = timer_irqs | ppu_result.irqs;
+        let key_irq = if self.bus.io.joypad.irq_pending() {
+            crate::io::irq_bits::KEYPAD
+        } else {
+            0
+        };
+
+        let all = timer_irqs | ppu_result.irqs | key_irq;
         if all != 0 {
             self.bus.io.raise(all);
         }
