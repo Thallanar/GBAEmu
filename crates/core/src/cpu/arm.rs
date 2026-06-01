@@ -50,6 +50,19 @@ pub fn execute(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
 
 // ─────────────────────────── Branch ───────────────────────────
 
+/// BX Rn — branch and exchange. Se bit 0 do destino = 1, entra em THUMB.
+fn exec_branch_exchange(cpu: &mut Cpu, instr: u32) {
+    let rn = (instr & 0xF) as usize;
+    let target = cpu.regs.get(rn);
+    let thumb = target & 1 != 0;
+    cpu.cpsr.set_flag(PsrFlags::T, thumb);
+    if thumb {
+        cpu.set_pc_thumb(target & !1);
+    } else {
+        cpu.set_pc_arm(target & !3);
+    }
+}
+
 fn exec_branch(cpu: &mut Cpu, instr: u32) {
     let link = (instr & (1 << 24)) != 0;
     let raw24 = instr & 0x00FF_FFFF;
@@ -72,6 +85,13 @@ fn exec_branch(cpu: &mut Cpu, instr: u32) {
 
 fn exec_group_000(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
     let imm_operand = (instr & (1 << 25)) != 0;
+
+    // BX Rn: cond | 0001_0010_1111_1111_1111_0001 | Rn
+    // Padrão: bits[27:4] == 0x12FFF1
+    if (instr & 0x0FFF_FFF0) == 0x012F_FF10 {
+        exec_branch_exchange(cpu, instr);
+        return;
+    }
 
     // Multiply: bits[27:22]=000000, bits[7:4]=1001 (não-imediato).
     if !imm_operand && (instr & 0x0F00_00F0) == 0x0000_0090 {

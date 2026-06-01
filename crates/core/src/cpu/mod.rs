@@ -363,6 +363,86 @@ mod tests {
         assert_eq!(cpu.regs.lr(), 0x0200_0004);
     }
 
+    // ════════════════ THUMB ════════════════
+    //
+    // Para os testes THUMB, escrevemos as instruções como halfwords na EWRAM
+    // e mudamos a CPU para estado THUMB.
+
+    fn make_gba_thumb(words: &[u16]) -> (Cpu, Bus) {
+        let mut bus = Bus::new();
+        for (i, w) in words.iter().enumerate() {
+            bus.write_u16(0x0200_0000 + (i as u32) * 2, *w);
+        }
+        let mut cpu = Cpu::new();
+        cpu.cpsr.set_flag(psr::PsrFlags::T, true);
+        cpu.regs.set_pc(0x0200_0000);
+        (cpu, bus)
+    }
+
+    /// Fmt 3: MOV r0, #42  → 0010 0 000 00101010 = 0x202A
+    #[test]
+    fn thumb_mov_imm() {
+        let (mut cpu, mut bus) = make_gba_thumb(&[0x202A]);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(0), 42);
+    }
+
+    /// Fmt 2: ADD r2, r0, r1 (op=ADD, I=0) → 0001100 001 000 010 = 0x1842
+    #[test]
+    fn thumb_add_reg() {
+        let (mut cpu, mut bus) = make_gba_thumb(&[0x1842]);
+        cpu.regs.set(0, 10);
+        cpu.regs.set(1, 20);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(2), 30);
+    }
+
+    /// Fmt 1: LSL r1, r0, #4  → 00000 00100 000 001 = 0x0101
+    #[test]
+    fn thumb_lsl_imm() {
+        let (mut cpu, mut bus) = make_gba_thumb(&[0x0101]);
+        cpu.regs.set(0, 0xAB);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(1), 0xAB0);
+    }
+
+    /// Fmt 5: BX r0 — pula para endereço em r0, com troca de estado pelo bit 0.
+    /// op=BX(3), H1=0, H2=0, Rs=0, Rd=0 → 010001 11 0 0 000 000 = 0x4700
+    #[test]
+    fn thumb_bx_to_arm() {
+        let (mut cpu, mut bus) = make_gba_thumb(&[0x4700]);
+        cpu.regs.set(0, 0x0200_0100); // bit 0 = 0 → ARM
+        cpu.step(&mut bus);
+        assert!(!cpu.cpsr.thumb(), "Deve estar em ARM agora");
+        assert_eq!(cpu.regs.pc(), 0x0200_0100);
+    }
+
+    /// Fmt 14: PUSH {r0, r1}; POP {r2, r3}
+    /// PUSH {r0,r1}: 1011 010 0 00000011 = 0xB403
+    /// POP  {r2,r3}: 1011 110 0 00001100 = 0xBC0C
+    #[test]
+    fn thumb_push_pop() {
+        let (mut cpu, mut bus) = make_gba_thumb(&[0xB403, 0xBC0C]);
+        cpu.regs.set(13, 0x0300_7F00); // SP
+        cpu.regs.set(0, 0xAAAA);
+        cpu.regs.set(1, 0xBBBB);
+        cpu.step(&mut bus); // PUSH
+        cpu.step(&mut bus); // POP
+        assert_eq!(cpu.regs.get(2), 0xAAAA);
+        assert_eq!(cpu.regs.get(3), 0xBBBB);
+        assert_eq!(cpu.regs.get(13), 0x0300_7F00);
+    }
+
+    /// Fmt 18: B +4 (unconditional). offset_11 = 0x002 → +4 bytes (2 instr à frente).
+    /// 11100 00000000010 = 0xE002
+    #[test]
+    fn thumb_unconditional_branch() {
+        let (mut cpu, mut bus) = make_gba_thumb(&[0xE002]);
+        cpu.step(&mut bus);
+        // PC era 0x0200_0000, ficou +4 (do pipeline) +4 (offset) = 0x0200_0008
+        assert_eq!(cpu.regs.pc(), 0x0200_0008);
+    }
+
     #[test]
     fn branch_condition_false_skips() {
         // BEQ +8, mas Z=0 → não toma o branch, PC = exec_pc + 4.
