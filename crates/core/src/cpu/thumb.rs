@@ -58,7 +58,7 @@ pub fn execute(cpu: &mut Cpu, bus: &mut Bus, instr: u16) {
             if (instr >> 12) & 1 == 0 {
                 fmt15_multi_load_store(cpu, bus, i)
             } else if (instr >> 8) & 0b1111 == 0b1111 {
-                fmt17_swi(cpu, i)
+                fmt17_swi(cpu, bus, i)
             } else {
                 fmt16_conditional_branch(cpu, i)
             }
@@ -470,8 +470,15 @@ fn fmt16_conditional_branch(cpu: &mut Cpu, i: u32) {
 }
 
 // ──────────────── Format 17: SWI ────────────────
-fn fmt17_swi(cpu: &mut Cpu, _i: u32) {
+fn fmt17_swi(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
     use super::psr::CpuMode;
+    // Com BIOS HLE, emulamos a função em Rust e continuamos na próxima instrução
+    // (sem trocar modo/PC). Número da função: bits 7..0.
+    if bus.hle_bios {
+        super::bios::dispatch(cpu, bus, (i & 0xFF) as u8);
+        return;
+    }
+
     let return_addr = cpu.regs.pc().wrapping_sub(2);
     let old_cpsr = cpu.cpsr;
     cpu.cpsr.set_mode(CpuMode::Supervisor);

@@ -54,7 +54,9 @@ impl AuroraApp {
             Ok(rom) => {
                 self.gba = Gba::new();
                 self.gba.load_rom(rom);
-                // Sem BIOS HLE ainda — entrada direta na ROM.
+                // Direct boot: estado pós-BIOS (modo System, SPs configurados),
+                // entrada na ROM em 0x08000000. Os SWI são tratados por HLE.
+                self.gba.cpu.setup_direct_boot();
                 self.gba.cpu.regs.set_pc(0x0800_0000);
                 self.rom_path = Some(path);
                 self.running = true;

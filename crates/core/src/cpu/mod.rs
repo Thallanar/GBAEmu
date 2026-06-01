@@ -6,6 +6,7 @@
 
 pub mod alu;
 pub mod arm;
+pub mod bios;
 pub mod condition;
 pub mod psr;
 pub mod registers;
@@ -24,6 +25,8 @@ pub struct Cpu {
     pub spsr: [Cpsr; 5],
     /// Sinaliza ao step() que uma instrução causou branch e PC já está no destino.
     pub(crate) branched: bool,
+    /// CPU em estado de Halt (SWI Halt/IntrWait): dorme até IE & IF != 0.
+    pub halted: bool,
     /// Contadores de telemetria — úteis para smoke testing.
     pub stats: CpuStats,
 }
@@ -58,6 +61,7 @@ impl Cpu {
             cpsr: Cpsr::new(),
             spsr: [Cpsr::new(); 5],
             branched: false,
+            halted: false,
             stats: CpuStats::default(),
         };
         // Reset state: Supervisor mode, IRQ/FIQ off, ARM, PC=0 (vetor reset).
@@ -69,6 +73,16 @@ impl Cpu {
 
     /// Executa uma instrução. Retorna ciclos consumidos (placeholder = 1).
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
+        // Halt (SWI Halt/IntrWait): dorme queimando ciclos até IE & IF != 0,
+        // independentemente do IME. O timer/PPU continuam avançando no `Gba::step`.
+        if self.halted {
+            if bus.io.halt_condition_met() {
+                self.halted = false;
+            } else {
+                return 1;
+            }
+        }
+
         // Atende IRQ pendente ANTES de executar (se permitido pelo CPSR).
         if bus.io.irq_pending() && !self.cpsr.irq_disabled() {
             self.enter_irq();
@@ -83,13 +97,13 @@ impl Cpu {
     }
 
     /// Entrada na exceção IRQ.
-    /// Salva CPSR em SPSR_irq, LR_irq = PC + ajuste, PC = 0x18, modo IRQ.
+    /// Salva CPSR em SPSR_irq, PC = 0x18 (trampolim da BIOS), modo IRQ.
+    ///
+    /// `LR_irq = PC + 4`: no momento do check, `pc()` aponta para a próxima
+    /// instrução (N). O trampolim retorna com `SUBS PC, LR, #4` → N, tanto em
+    /// ARM quanto em THUMB (o bit T é restaurado do SPSR).
     fn enter_irq(&mut self) {
-        let return_addr = if self.cpsr.thumb() {
-            self.regs.pc()
-        } else {
-            self.regs.pc().wrapping_sub(4)
-        };
+        let return_addr = self.regs.pc().wrapping_add(4);
         let old_cpsr = self.cpsr;
         self.cpsr.set_mode(CpuMode::Irq);
         self.cpsr.set_flag(PsrFlags::T, false);
@@ -406,15 +420,55 @@ mod tests {
 
     // ──────── SWI ────────
 
-    /// SWI #0 → entra em Supervisor, PC=0x08, LR_svc = exec_pc+4.
+    /// SWI #0 com BIOS oficial → entra em Supervisor, PC=0x08, LR_svc = exec_pc+4.
     /// Encoding: cond=E, 1111 0000 ... → 0xEF00_0000
     #[test]
     fn swi_enters_supervisor_mode() {
         let (mut cpu, mut bus) = make_gba_with_rom(&[0xEF00_0000]);
+        bus.hle_bios = false; // testa o caminho do vetor de exceção real
         cpu.step(&mut bus);
         assert_eq!(cpu.regs.pc(), 0x08);
         assert_eq!(cpu.cpsr.mode(), CpuMode::Supervisor);
         assert_eq!(cpu.regs.lr(), 0x0200_0004);
+    }
+
+    /// SWI 0x06 (Div) com BIOS HLE: 10 / 3 → r0=3 (quociente), r1=1 (resto).
+    /// O fluxo continua na próxima instrução (sem trocar modo/PC).
+    /// Encoding ARM: 0xEF06_0000 (comment = 0x06 nos bits 23..16).
+    #[test]
+    fn hle_swi_div() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xEF06_0000]);
+        cpu.regs.set(0, 10);
+        cpu.regs.set(1, 3);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(0), 3, "quociente");
+        assert_eq!(cpu.regs.get(1), 1, "resto");
+        assert_eq!(cpu.regs.get(3), 3, "|quociente|");
+        assert_eq!(cpu.regs.pc(), 0x0200_0004, "continua na próxima instrução");
+        assert_eq!(cpu.cpsr.mode(), CpuMode::Supervisor, "não troca de modo");
+    }
+
+    /// SWI 0x02 (Halt) com HLE seguido de IRQ acorda a CPU e despacha.
+    #[test]
+    fn hle_swi_halt_then_wakes_on_irq() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xEF02_0000, 0xE320_F000]);
+        cpu.step(&mut bus); // SWI Halt → cpu.halted = true
+        assert!(cpu.halted);
+
+        // Sem IRQ pendente: continua dormindo, PC não avança.
+        let pc = cpu.regs.pc();
+        cpu.step(&mut bus);
+        assert!(cpu.halted);
+        assert_eq!(cpu.regs.pc(), pc);
+
+        // Levanta uma IRQ habilitada: acorda e (com IME+I ok) despacha ao vetor.
+        bus.io.ie = 0x0001;
+        bus.io.iflag = 0x0001;
+        bus.io.ime = true;
+        cpu.cpsr.set_flag(psr::PsrFlags::I, false);
+        cpu.step(&mut bus); // sai do halt e entra em IRQ
+        assert!(!cpu.halted);
+        assert_eq!(cpu.regs.pc(), 0x18);
     }
 
     // ════════════════ THUMB ════════════════

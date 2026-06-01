@@ -33,7 +33,7 @@ pub fn execute(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
         0b111 => {
             // SWI: bits 27..24 = 1111. Coprocessor (não usado no GBA) também cai aqui.
             if (instr >> 24) & 0xF == 0xF {
-                exec_swi(cpu, instr);
+                exec_swi(cpu, bus, instr);
             } else {
                 let pc = cpu.regs.pc().wrapping_sub(8);
                 log::warn!("ARM: coprocessor não suportado @ {:08X}", instr);
@@ -162,33 +162,57 @@ fn exec_data_processing(cpu: &mut Cpu, instr: u32) {
         _ => unreachable!(),
     };
 
-    match result {
-        Logical(v) | LogicalNoWrite(v) => {
-            if matches!(result, Logical(_)) {
-                write_rd(cpu, rd, v);
-            }
+    // Valor a escrever em Rd (None nas variantes de comparação TST/TEQ/CMP/CMN).
+    let write_value = match result {
+        Logical(v) => {
             if set_flags {
                 cpu.cpsr.set_nz(v);
                 cpu.cpsr.set_flag(PsrFlags::C, shifter_carry);
             }
+            Some(v)
         }
-        Arith(o) | ArithNoWrite(o) => {
-            if matches!(result, Arith(_)) {
-                write_rd(cpu, rd, o.value);
+        LogicalNoWrite(v) => {
+            if set_flags {
+                cpu.cpsr.set_nz(v);
+                cpu.cpsr.set_flag(PsrFlags::C, shifter_carry);
             }
+            None
+        }
+        Arith(o) => {
             if set_flags {
                 cpu.cpsr.set_nz(o.value);
                 cpu.cpsr.set_flag(PsrFlags::C, o.carry);
                 cpu.cpsr.set_flag(PsrFlags::V, o.overflow);
             }
+            Some(o.value)
         }
-    }
+        ArithNoWrite(o) => {
+            if set_flags {
+                cpu.cpsr.set_nz(o.value);
+                cpu.cpsr.set_flag(PsrFlags::C, o.carry);
+                cpu.cpsr.set_flag(PsrFlags::V, o.overflow);
+            }
+            None
+        }
+    };
 
+    // Caso especial: Rd=R15 com S=1 → retorno de exceção. Restauramos o CPSR
+    // do SPSR ANTES de fixar o PC, para alinhar de acordo com o bit T restaurado
+    // (THUMB alinha em 2; ARM em 4). É assim que `SUBS PC, LR, #4` retorna.
     if rd == 15 && set_flags {
         if let Some(idx) = cpu.cpsr.mode().spsr_index() {
             cpu.cpsr = cpu.spsr[idx];
             cpu.regs.switch_mode(cpu.cpsr.mode());
         }
+        if let Some(v) = write_value {
+            if cpu.cpsr.thumb() {
+                cpu.set_pc_thumb(v);
+            } else {
+                cpu.set_pc_arm(v);
+            }
+        }
+    } else if let Some(v) = write_value {
+        write_rd(cpu, rd, v);
     }
 }
 
@@ -576,8 +600,16 @@ fn exec_block_data_transfer(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
 
 // ────────────────────── SWI ──────────────────────
 
-fn exec_swi(cpu: &mut Cpu, _instr: u32) {
-    // Entra em Supervisor mode, salva CPSR em SPSR_svc, LR_svc = PC-4, PC=0x08.
+fn exec_swi(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
+    // Com BIOS HLE, o efeito da função é emulado em Rust e o fluxo continua na
+    // próxima instrução (sem trocar modo/PC). O número da função vem dos bits 23..16.
+    if bus.hle_bios {
+        let comment = ((instr >> 16) & 0xFF) as u8;
+        super::bios::dispatch(cpu, bus, comment);
+        return;
+    }
+
+    // BIOS oficial: entra em Supervisor mode, salva CPSR em SPSR_svc, PC=0x08.
     let return_addr = cpu.regs.pc().wrapping_sub(4);
     let old_cpsr = cpu.cpsr;
 

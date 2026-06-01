@@ -76,9 +76,15 @@ impl Io {
         }
     }
 
-    /// Há interrupção pendente?
+    /// Há interrupção pendente? (respeita o master enable IME).
     pub fn irq_pending(&self) -> bool {
         self.ime && (self.ie & self.iflag) != 0
+    }
+
+    /// Condição para sair do Halt: IE & IF != 0, ignorando o IME.
+    /// (O Halt acorda em qualquer IRQ habilitada, mesmo com IME=0.)
+    pub fn halt_condition_met(&self) -> bool {
+        (self.ie & self.iflag) != 0
     }
 
     /// Marca uma IRQ no IF (ela só dispara se IE & IME permitirem).

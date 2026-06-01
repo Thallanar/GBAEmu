@@ -27,8 +27,8 @@ fn main() -> std::io::Result<()> {
     let mut gba = Gba::new();
     gba.load_rom(rom);
 
-    // Jogos começam executando da ROM (0x08000000). Set PC manualmente,
-    // já que ainda não temos BIOS HLE para fazer o boot real.
+    // Direct boot: estado pós-BIOS + entrada na ROM (0x08000000). SWI por HLE.
+    gba.cpu.setup_direct_boot();
     gba.cpu.regs.set_pc(0x0800_0000);
 
     println!("Rodando até {} instruções...", cycles);

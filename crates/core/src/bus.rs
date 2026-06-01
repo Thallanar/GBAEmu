@@ -21,6 +21,9 @@ use crate::ppu::Ppu;
 
 pub struct Bus {
     pub bios: Vec<u8>,
+    /// Quando true, chamadas SWI são tratadas por HLE (BIOS embutida).
+    /// Vira false se uma BIOS oficial for carregada no futuro.
+    pub hle_bios: bool,
     pub ewram: Box<[u8; 0x40000]>, // 256 KB
     pub iwram: Box<[u8; 0x8000]>,  // 32 KB
     pub io: Io,
@@ -34,7 +37,8 @@ pub struct Bus {
 impl Bus {
     pub fn new() -> Self {
         Self {
-            bios: Vec::new(),
+            bios: crate::cpu::bios::builtin_bios(),
+            hle_bios: true,
             ewram: Box::new([0; 0x40000]),
             iwram: Box::new([0; 0x8000]),
             io: Io::new(),
