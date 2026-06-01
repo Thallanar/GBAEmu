@@ -22,9 +22,17 @@ impl Gba {
         self.bus.cartridge.load(rom);
     }
 
-    /// Executa um frame inteiro (placeholder).
+    /// Executa uma única instrução. Retorna ciclos consumidos.
+    pub fn step(&mut self) -> u32 {
+        self.cpu.step(&mut self.bus)
+    }
+
+    /// Executa um frame inteiro (~280896 ciclos). Placeholder.
     pub fn run_frame(&mut self) {
-        // TODO: loop até VBlank (~280896 ciclos por frame)
+        let mut cycles = 0u32;
+        while cycles < 280_896 {
+            cycles += self.step();
+        }
     }
 }
 
