@@ -57,5 +57,24 @@ fn main() -> std::io::Result<()> {
     }
 
     println!("\nPC final: {:08X}", gba.cpu.regs.pc());
+
+    // Resumo do framebuffer: número de cores distintas (sanidade da renderização).
+    let fb = &gba.bus.ppu.framebuffer;
+    let mut colors = std::collections::HashSet::new();
+    for px in fb.chunks_exact(4) {
+        colors.insert([px[0], px[1], px[2]]);
+    }
+    println!("Framebuffer: {} cores distintas", colors.len());
+
+    // Dump opcional para PPM se AURORA_DUMP estiver setado.
+    if let Ok(out) = std::env::var("AURORA_DUMP") {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&out)?;
+        write!(f, "P6\n{} {}\n255\n", 240, 160)?;
+        for px in fb.chunks_exact(4) {
+            f.write_all(&px[0..3])?;
+        }
+        println!("Framebuffer salvo em {out}");
+    }
     Ok(())
 }
