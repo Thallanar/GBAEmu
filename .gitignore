@@ -1,0 +1,31 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDE
+/.idea
+/.vscode
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Binários sensíveis — nunca commitar
+*.gba
+*.bin
+gba_bios.bin
+roms/
+saves/
+*.sav
+*.savestate
+
+# Build artifacts
+*.apk
+*.aab
+/android/build
+/android/.gradle
+
+# Logs
+*.log

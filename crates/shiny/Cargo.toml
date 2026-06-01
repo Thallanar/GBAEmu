@@ -1,0 +1,13 @@
+[package]
+name = "auroragba-shiny"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shiny Hunter automation module for AuroraGBA"
+
+[dependencies]
+auroragba-core = { path = "../core" }
+log.workspace = true
+thiserror.workspace = true

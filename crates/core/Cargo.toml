@@ -1,0 +1,22 @@
+[package]
+name = "auroragba-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core emulation engine for AuroraGBA (CPU, PPU, APU, memory)"
+
+[dependencies]
+log.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, optional = true }
+bitflags.workspace = true
+
+[features]
+default = []
+# Habilita serialização do estado completo (save states)
+save-states = ["dep:serde"]
+
+[lib]
+# Biblioteca pura, sem I/O. Frontends consomem esta crate.

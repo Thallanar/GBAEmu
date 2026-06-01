@@ -1,0 +1,24 @@
+[package]
+name = "auroragba-desktop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Desktop frontend for AuroraGBA"
+
+[[bin]]
+name = "auroragba"
+path = "src/main.rs"
+
+[dependencies]
+auroragba-core = { path = "../core" }
+auroragba-shiny = { path = "../shiny" }
+
+log.workspace = true
+env_logger.workspace = true
+anyhow.workspace = true
+
+eframe.workspace = true
+egui.workspace = true
+gilrs.workspace = true
