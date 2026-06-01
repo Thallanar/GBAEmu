@@ -40,6 +40,17 @@ pub struct Ppu {
     in_hblank: bool,
 }
 
+/// Resultado de um `tick`: IRQs a sinalizar + eventos de fase (para o DMA).
+#[derive(Default)]
+pub struct TickResult {
+    /// Bitmap de IRQs a levantar no IF.
+    pub irqs: u16,
+    /// Entramos no HBlank de uma scanline visível (dispara HBlank-DMA).
+    pub entered_hblank: bool,
+    /// Entramos no VBlank (scanline 160) — dispara VBlank-DMA.
+    pub entered_vblank: bool,
+}
+
 impl Ppu {
     pub fn new() -> Self {
         Self {
@@ -52,10 +63,10 @@ impl Ppu {
         }
     }
 
-    /// Avança `cycles` ciclos. Retorna bitmap de IRQs a sinalizar.
+    /// Avança `cycles` ciclos. Retorna IRQs a sinalizar + eventos de fase.
     /// Recebe slices da VRAM e palette para poder renderizar scanlines.
-    pub fn tick(&mut self, cycles: u32, vram: &[u8], palette: &[u8]) -> u16 {
-        let mut irqs: u16 = 0;
+    pub fn tick(&mut self, cycles: u32, vram: &[u8], palette: &[u8]) -> TickResult {
+        let mut result = TickResult::default();
         self.cycles += cycles;
 
         // Pode haver mais de uma transição de fase num único tick.
@@ -64,11 +75,13 @@ impl Ppu {
                 // Entra em HBlank. Render do scanline atual (se visível).
                 if self.vcount < VISIBLE_SCANLINES {
                     self.render_scanline(self.vcount, vram, palette);
+                    // HBlank-DMA só dispara em scanlines visíveis.
+                    result.entered_hblank = true;
                 }
                 self.in_hblank = true;
                 self.dispstat |= DISPSTAT_HBLANK_FLAG;
                 if self.dispstat & DISPSTAT_HBLANK_IRQ != 0 {
-                    irqs |= irq_bits::HBLANK;
+                    result.irqs |= irq_bits::HBLANK;
                 }
                 continue;
             }
@@ -81,8 +94,9 @@ impl Ppu {
                 // VBlank começa exatamente no scanline 160.
                 if self.vcount == VISIBLE_SCANLINES {
                     self.dispstat |= DISPSTAT_VBLANK_FLAG;
+                    result.entered_vblank = true;
                     if self.dispstat & DISPSTAT_VBLANK_IRQ != 0 {
-                        irqs |= irq_bits::VBLANK;
+                        result.irqs |= irq_bits::VBLANK;
                     }
                 } else if self.vcount == 0 {
                     // Novo frame.
@@ -94,7 +108,7 @@ impl Ppu {
                 if self.vcount == vcount_target {
                     self.dispstat |= DISPSTAT_VCOUNT_FLAG;
                     if self.dispstat & DISPSTAT_VCOUNT_IRQ != 0 {
-                        irqs |= irq_bits::VCOUNT;
+                        result.irqs |= irq_bits::VCOUNT;
                     }
                 } else {
                     self.dispstat &= !DISPSTAT_VCOUNT_FLAG;
@@ -103,7 +117,7 @@ impl Ppu {
             }
             break;
         }
-        irqs
+        result
     }
 
     // ───────────────── Render ─────────────────
@@ -271,7 +285,7 @@ mod tests {
         p.dispstat |= DISPSTAT_VBLANK_IRQ;
         let mut total_irqs = 0u16;
         for _ in 0..160 {
-            total_irqs |= p.tick(CYCLES_PER_SCANLINE, &v, &pal);
+            total_irqs |= p.tick(CYCLES_PER_SCANLINE, &v, &pal).irqs;
         }
         assert_eq!(p.vcount, 160);
         assert!(total_irqs & irq_bits::VBLANK != 0);

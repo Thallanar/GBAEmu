@@ -29,9 +29,21 @@ impl Gba {
 
         let timer_irqs = self.bus.io.timers.tick(cycles);
         // Borrows disjuntos: ppu, vram e palette são campos distintos do bus.
-        let bus = &mut self.bus;
-        let ppu_irqs = bus.ppu.tick(cycles, &*bus.vram, &*bus.palette);
-        let all = timer_irqs | ppu_irqs;
+        let ppu_result = {
+            let bus = &mut self.bus;
+            bus.ppu.tick(cycles, &*bus.vram, &*bus.palette)
+        };
+
+        // DMA disparado por VBlank/HBlank (a transferência precisa do bus inteiro,
+        // então roda fora do borrow da PPU acima).
+        if ppu_result.entered_vblank {
+            self.bus.run_dma_timing(crate::dma::Timing::VBlank);
+        }
+        if ppu_result.entered_hblank {
+            self.bus.run_dma_timing(crate::dma::Timing::HBlank);
+        }
+
+        let all = timer_irqs | ppu_result.irqs;
         if all != 0 {
             self.bus.io.raise(all);
         }
