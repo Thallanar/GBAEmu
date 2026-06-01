@@ -17,12 +17,14 @@
 
 use crate::cartridge::Cartridge;
 use crate::io::Io;
+use crate::ppu::Ppu;
 
 pub struct Bus {
     pub bios: Vec<u8>,
     pub ewram: Box<[u8; 0x40000]>, // 256 KB
     pub iwram: Box<[u8; 0x8000]>,  // 32 KB
     pub io: Io,
+    pub ppu: Ppu,
     pub palette: Box<[u8; 0x400]>, // 1 KB
     pub vram: Box<[u8; 0x18000]>,  // 96 KB
     pub oam: Box<[u8; 0x400]>,     // 1 KB
@@ -36,6 +38,7 @@ impl Bus {
             ewram: Box::new([0; 0x40000]),
             iwram: Box::new([0; 0x8000]),
             io: Io::new(),
+            ppu: Ppu::new(),
             palette: Box::new([0; 0x400]),
             vram: Box::new([0; 0x18000]),
             oam: Box::new([0; 0x400]),
@@ -51,7 +54,14 @@ impl Bus {
             0x0 => self.bios.get(addr as usize).copied().unwrap_or(0),
             0x2 => self.ewram[(addr as usize) & 0x3FFFF],
             0x3 => self.iwram[(addr as usize) & 0x7FFF],
-            0x4 => self.io.read_u8(addr),
+            0x4 => {
+                // PPU regs: 0x04000000..0x04000056. Demais via Io.
+                if addr < 0x0400_0060 {
+                    self.ppu.read_u8(addr)
+                } else {
+                    self.io.read_u8(addr)
+                }
+            }
             0x5 => self.palette[(addr as usize) & 0x3FF],
             0x6 => self.vram[vram_offset(addr)],
             0x7 => self.oam[(addr as usize) & 0x3FF],
@@ -93,7 +103,13 @@ impl Bus {
             0x0 => { /* BIOS é read-only */ }
             0x2 => self.ewram[(addr as usize) & 0x3FFFF] = val,
             0x3 => self.iwram[(addr as usize) & 0x7FFF] = val,
-            0x4 => self.io.write_u8(addr, val),
+            0x4 => {
+                if addr < 0x0400_0060 {
+                    self.ppu.write_u8(addr, val);
+                } else {
+                    self.io.write_u8(addr, val);
+                }
+            }
             0x5 => self.palette[(addr as usize) & 0x3FF] = val,
             0x6 => self.vram[vram_offset(addr)] = val,
             0x7 => self.oam[(addr as usize) & 0x3FF] = val,

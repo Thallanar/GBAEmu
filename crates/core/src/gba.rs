@@ -23,14 +23,15 @@ impl Gba {
     }
 
     /// Executa uma única instrução. Retorna ciclos consumidos.
-    /// Após cada instrução, avança timers e propaga IRQs pendentes para o IF.
+    /// Após cada instrução, avança timers + PPU e propaga IRQs.
     pub fn step(&mut self) -> u32 {
         let cycles = self.cpu.step(&mut self.bus);
 
-        // Avança timers e propaga IRQs solicitadas.
         let timer_irqs = self.bus.io.timers.tick(cycles);
-        if timer_irqs != 0 {
-            self.bus.io.raise(timer_irqs);
+        let ppu_irqs = self.bus.ppu.tick(cycles);
+        let all = timer_irqs | ppu_irqs;
+        if all != 0 {
+            self.bus.io.raise(all);
         }
         cycles
     }
