@@ -11,6 +11,10 @@ description = "Desktop frontend for AuroraGBA"
 name = "auroragba"
 path = "src/main.rs"
 
+[[bin]]
+name = "smoke"
+path = "src/bin/smoke.rs"
+
 [dependencies]
 auroragba-core = { path = "../core" }
 auroragba-shiny = { path = "../shiny" }

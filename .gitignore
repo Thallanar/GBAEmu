@@ -17,6 +17,7 @@ Thumbs.db
 *.bin
 gba_bios.bin
 roms/
+test-roms/
 saves/
 *.sav
 *.savestate

@@ -24,6 +24,31 @@ pub struct Cpu {
     pub spsr: [Cpsr; 5],
     /// Sinaliza ao step() que uma instrução causou branch e PC já está no destino.
     pub(crate) branched: bool,
+    /// Contadores de telemetria — úteis para smoke testing.
+    pub stats: CpuStats,
+}
+
+#[derive(Default)]
+pub struct CpuStats {
+    pub arm_executed: u64,
+    pub thumb_executed: u64,
+    pub arm_unimplemented: u64,
+    pub thumb_unimplemented: u64,
+    /// Últimos N opcodes não implementados (pc, instr, is_thumb).
+    pub recent_unimplemented: Vec<(u32, u32, bool)>,
+}
+
+impl CpuStats {
+    pub fn record_unimpl(&mut self, pc: u32, instr: u32, thumb: bool) {
+        if thumb {
+            self.thumb_unimplemented += 1;
+        } else {
+            self.arm_unimplemented += 1;
+        }
+        if self.recent_unimplemented.len() < 32 {
+            self.recent_unimplemented.push((pc, instr, thumb));
+        }
+    }
 }
 
 impl Cpu {
@@ -33,6 +58,7 @@ impl Cpu {
             cpsr: Cpsr::new(),
             spsr: [Cpsr::new(); 5],
             branched: false,
+            stats: CpuStats::default(),
         };
         // Reset state: Supervisor mode, IRQ/FIQ off, ARM, PC=0 (vetor reset).
         cpu.cpsr = Cpsr(CpuMode::Supervisor as u32 | PsrFlags::I.bits() | PsrFlags::F.bits());
@@ -53,6 +79,7 @@ impl Cpu {
     fn step_arm(&mut self, bus: &mut Bus) -> u32 {
         let exec_pc = self.regs.pc();
         let instr = bus.read_u32(exec_pc);
+        self.stats.arm_executed += 1;
 
         // Pré-adianta PC em +8 ANTES de execute, simulando o pipeline:
         // quando a instrução ler PC, vê exec_pc + 8.
@@ -70,6 +97,7 @@ impl Cpu {
     fn step_thumb(&mut self, bus: &mut Bus) -> u32 {
         let exec_pc = self.regs.pc();
         let instr = bus.read_u16(exec_pc);
+        self.stats.thumb_executed += 1;
         self.regs.set_pc(exec_pc.wrapping_add(4));
         thumb::execute(self, bus, instr);
         if !self.branched {

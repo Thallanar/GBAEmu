@@ -35,15 +35,15 @@ pub fn execute(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
             if (instr >> 24) & 0xF == 0xF {
                 exec_swi(cpu, instr);
             } else {
+                let pc = cpu.regs.pc().wrapping_sub(8);
                 log::warn!("ARM: coprocessor não suportado @ {:08X}", instr);
+                cpu.stats.record_unimpl(pc, instr, false);
             }
         }
         _ => {
-            log::warn!(
-                "ARM: opcode não implementado @ PC={:08X} instr={:08X}",
-                cpu.regs.pc().wrapping_sub(8),
-                instr
-            );
+            let pc = cpu.regs.pc().wrapping_sub(8);
+            log::warn!("ARM: opcode não implementado @ PC={:08X} instr={:08X}", pc, instr);
+            cpu.stats.record_unimpl(pc, instr, false);
         }
     }
 }
