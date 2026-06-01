@@ -96,7 +96,7 @@ impl Ppu {
 
     /// Avança `cycles` ciclos. Retorna IRQs a sinalizar + eventos de fase.
     /// Recebe slices da VRAM e palette para poder renderizar scanlines.
-    pub fn tick(&mut self, cycles: u32, vram: &[u8], palette: &[u8]) -> TickResult {
+    pub fn tick(&mut self, cycles: u32, vram: &[u8], palette: &[u8], oam: &[u8]) -> TickResult {
         let mut result = TickResult::default();
         self.cycles += cycles;
 
@@ -105,7 +105,7 @@ impl Ppu {
             if !self.in_hblank && self.cycles >= HDRAW_CYCLES {
                 // Entra em HBlank. Render do scanline atual (se visível).
                 if self.vcount < VISIBLE_SCANLINES {
-                    self.render_scanline(self.vcount, vram, palette);
+                    self.render_scanline(self.vcount, vram, palette, oam);
                     // Avança os pontos de referência afins para a próxima linha.
                     self.increment_affine_refs();
                     // HBlank-DMA só dispara em scanlines visíveis.
@@ -170,57 +170,54 @@ impl Ppu {
 
     // ───────────────── Render ─────────────────
 
-    fn render_scanline(&mut self, y: u16, vram: &[u8], palette: &[u8]) {
+    fn render_scanline(&mut self, y: u16, vram: &[u8], palette: &[u8], oam: &[u8]) {
+        let yu = y as usize;
         let mode = self.dispcnt & 0b111;
-        let force_blank = self.dispcnt & 0x80 != 0;
 
-        if force_blank {
+        if self.dispcnt & 0x80 != 0 {
             self.fill_scanline_white(y);
             return;
         }
 
-        match mode {
-            0 => self.render_tile_modes(y, vram, palette, &[false, false, false, false]),
-            1 => self.render_tile_modes(y, vram, palette, &[false, false, true, false]),
-            2 => self.render_tile_modes(y, vram, palette, &[false, false, true, true]),
-            3 => self.render_mode3(y, vram),
-            4 => self.render_mode4(y, vram, palette),
-            5 => self.render_mode5(y, vram, palette),
-            _ => self.render_backdrop(y, palette),
-        }
-    }
-
-    /// Compõe os backgrounds habilitados de um modo em tiles.
-    /// `affine[b]` indica se o BG `b` é afim (caso contrário, modo texto).
-    /// BG3 só é afim no modo 2; BG2 é afim nos modos 1 e 2.
-    fn render_tile_modes(&mut self, y: u16, vram: &[u8], palette: &[u8], affine: &[bool; 4]) {
-        let yu = y as usize;
-
-        // Começa com o backdrop (cor 0 da palette).
+        // Buffer de linha + prioridade por pixel (4 = backdrop, atrás de tudo).
         let backdrop = palette_color(palette, 0);
         let mut line = [backdrop; SCREEN_WIDTH];
+        let mut prio = [4u8; SCREEN_WIDTH];
 
-        // Coleta os BGs habilitados com (prioridade, índice, afim).
-        let mut order: [(u16, usize, bool); 4] = [(0, 0, false); 4];
-        let mut count = 0;
-        for (bg, &is_affine) in affine.iter().enumerate() {
-            if self.dispcnt & (1 << (8 + bg)) != 0 {
-                let prio = self.bgcnt[bg] & 0b11;
-                order[count] = (prio, bg, is_affine);
-                count += 1;
-            }
+        match mode {
+            0 => self.render_bgs(
+                yu,
+                vram,
+                palette,
+                &mut line,
+                &mut prio,
+                &[false, false, false, false],
+            ),
+            1 => self.render_bgs(
+                yu,
+                vram,
+                palette,
+                &mut line,
+                &mut prio,
+                &[false, false, true, false],
+            ),
+            2 => self.render_bgs(
+                yu,
+                vram,
+                palette,
+                &mut line,
+                &mut prio,
+                &[false, false, true, true],
+            ),
+            3 => self.render_mode3(yu, vram, &mut line, &mut prio),
+            4 => self.render_mode4(yu, vram, palette, &mut line, &mut prio),
+            5 => self.render_mode5(yu, vram, palette, &mut line, &mut prio),
+            _ => {}
         }
-        // Ordena de trás para frente: maior prioridade-número e maior índice
-        // primeiro; assim o último pintado (prioridade 0, BG0) fica na frente.
-        let active = &mut order[..count];
-        active.sort_by_key(|&(prio, bg, _)| std::cmp::Reverse((prio, bg)));
 
-        for &(_, bg, is_affine) in active.iter() {
-            if is_affine {
-                self.render_affine_bg(bg, yu, vram, palette, &mut line);
-            } else {
-                self.render_text_bg(bg, yu, vram, palette, &mut line);
-            }
+        // Sprites (OBJ) — habilitados pelo bit 12 do DISPCNT.
+        if self.dispcnt & (1 << 12) != 0 {
+            self.render_sprites(yu, vram, palette, oam, &mut line, &mut prio);
         }
 
         for (x, px) in line.iter().enumerate() {
@@ -228,15 +225,53 @@ impl Ppu {
         }
     }
 
-    /// Renderiza uma scanline de um background em modo texto, pintando apenas
-    /// os pixels opacos sobre `line`.
-    fn render_text_bg(
+    /// Compõe os backgrounds habilitados de um modo em tiles, do mais ao fundo
+    /// para o mais à frente. `affine[b]` indica se o BG `b` é afim.
+    fn render_bgs(
         &self,
-        bg: usize,
         y: usize,
         vram: &[u8],
         palette: &[u8],
         line: &mut [[u8; 4]; SCREEN_WIDTH],
+        prio: &mut [u8; SCREEN_WIDTH],
+        affine: &[bool; 4],
+    ) {
+        // Coleta os BGs habilitados com (prioridade, índice, afim).
+        let mut order: [(u8, usize, bool); 4] = [(0, 0, false); 4];
+        let mut count = 0;
+        for (bg, &is_affine) in affine.iter().enumerate() {
+            if self.dispcnt & (1 << (8 + bg)) != 0 {
+                let p = (self.bgcnt[bg] & 0b11) as u8;
+                order[count] = (p, bg, is_affine);
+                count += 1;
+            }
+        }
+        // Ordena de trás para frente: maior prioridade-número e maior índice
+        // primeiro; assim o último pintado (prioridade 0, BG0) fica na frente.
+        let active = &mut order[..count];
+        active.sort_by_key(|&(p, bg, _)| std::cmp::Reverse((p, bg)));
+
+        for &(p, bg, is_affine) in active.iter() {
+            if is_affine {
+                self.render_affine_bg(bg, p, vram, palette, line, prio);
+            } else {
+                self.render_text_bg(bg, y, p, vram, palette, line, prio);
+            }
+        }
+    }
+
+    /// Renderiza uma scanline de um background em modo texto, pintando os pixels
+    /// opacos sobre `line` e registrando a prioridade `p` em `prio`.
+    #[allow(clippy::too_many_arguments)]
+    fn render_text_bg(
+        &self,
+        bg: usize,
+        y: usize,
+        p: u8,
+        vram: &[u8],
+        palette: &[u8],
+        line: &mut [[u8; 4]; SCREEN_WIDTH],
+        prio: &mut [u8; SCREEN_WIDTH],
     ) {
         let cnt = self.bgcnt[bg];
         let char_base = (((cnt >> 2) & 0b11) as usize) * 0x4000;
@@ -256,7 +291,7 @@ impl Ppu {
         let map_y = by / 8;
         let py = by % 8;
 
-        for (x, px) in line.iter_mut().enumerate() {
+        for x in 0..SCREEN_WIDTH {
             let bx = (x + hofs) & (width - 1);
             let map_x = bx / 8;
 
@@ -305,7 +340,8 @@ impl Ppu {
             if color_idx == 0 {
                 continue; // transparente
             }
-            *px = palette_color(palette, color_idx);
+            line[x] = palette_color(palette, color_idx);
+            prio[x] = p;
         }
     }
 
@@ -313,10 +349,11 @@ impl Ppu {
     fn render_affine_bg(
         &self,
         bg: usize,
-        _y: usize,
+        p: u8,
         vram: &[u8],
         palette: &[u8],
         line: &mut [[u8; 4]; SCREEN_WIDTH],
+        prio: &mut [u8; SCREEN_WIDTH],
     ) {
         let k = bg - 2; // BG2 → 0, BG3 → 1
         let cnt = self.bgcnt[bg];
@@ -332,7 +369,7 @@ impl Ppu {
         let mut tex_x = self.bg_cur_x[k];
         let mut tex_y = self.bg_cur_y[k];
 
-        for px in line.iter_mut() {
+        for x in 0..SCREEN_WIDTH {
             let sx = tex_x >> 8;
             let sy = tex_y >> 8;
             tex_x = tex_x.wrapping_add(pa);
@@ -365,73 +402,100 @@ impl Ppu {
             if color_idx == 0 {
                 continue; // transparente
             }
-            *px = palette_color(palette, color_idx);
+            line[x] = palette_color(palette, color_idx);
+            prio[x] = p;
         }
     }
 
+    /// Prioridade efetiva de BG2 (camada onde os modos bitmap desenham).
+    fn bg2_priority(&self) -> u8 {
+        (self.bgcnt[2] & 0b11) as u8
+    }
+
     /// Modo 3: 240×160, BGR555 direto na VRAM (sem double-buffer).
-    fn render_mode3(&mut self, y: u16, vram: &[u8]) {
-        let yu = y as usize;
+    fn render_mode3(
+        &self,
+        y: usize,
+        vram: &[u8],
+        line: &mut [[u8; 4]; SCREEN_WIDTH],
+        prio: &mut [u8; SCREEN_WIDTH],
+    ) {
+        if self.dispcnt & (1 << 10) == 0 {
+            return; // BG2 desabilitado
+        }
+        let p = self.bg2_priority();
         for x in 0..SCREEN_WIDTH {
-            let off = (yu * SCREEN_WIDTH + x) * 2;
+            let off = (y * SCREEN_WIDTH + x) * 2;
             if off + 1 >= vram.len() {
                 break;
             }
             let color = u16::from_le_bytes([vram[off], vram[off + 1]]);
-            self.put_pixel(x, yu, bgr555_to_rgba8(color));
+            line[x] = bgr555_to_rgba8(color);
+            prio[x] = p;
         }
     }
 
     /// Modo 4: 240×160, paletizado 1 byte/pixel, dois frames (selecionado pelo
     /// bit 4 do DISPCNT).
-    fn render_mode4(&mut self, y: u16, vram: &[u8], palette: &[u8]) {
+    fn render_mode4(
+        &self,
+        y: usize,
+        vram: &[u8],
+        palette: &[u8],
+        line: &mut [[u8; 4]; SCREEN_WIDTH],
+        prio: &mut [u8; SCREEN_WIDTH],
+    ) {
+        if self.dispcnt & (1 << 10) == 0 {
+            return;
+        }
+        let p = self.bg2_priority();
         let frame_base = if self.dispcnt & (1 << 4) != 0 {
             0xA000
         } else {
             0
         };
-        let yu = y as usize;
         for x in 0..SCREEN_WIDTH {
-            let off = frame_base + yu * SCREEN_WIDTH + x;
+            let off = frame_base + y * SCREEN_WIDTH + x;
             if off >= vram.len() {
                 break;
             }
             let idx = vram[off] as usize;
-            let color = palette_color(palette, idx);
-            self.put_pixel(x, yu, color);
+            if idx == 0 {
+                continue; // índice 0 = transparente (mostra backdrop)
+            }
+            line[x] = palette_color(palette, idx);
+            prio[x] = p;
         }
     }
 
-    /// Modo 5: 160×128 BGR555 com double-buffer; resto da tela é backdrop.
-    fn render_mode5(&mut self, y: u16, vram: &[u8], palette: &[u8]) {
+    /// Modo 5: 160×128 BGR555 com double-buffer; resto da tela fica como backdrop.
+    fn render_mode5(
+        &self,
+        y: usize,
+        vram: &[u8],
+        _palette: &[u8],
+        line: &mut [[u8; 4]; SCREEN_WIDTH],
+        prio: &mut [u8; SCREEN_WIDTH],
+    ) {
+        if self.dispcnt & (1 << 10) == 0 {
+            return;
+        }
+        let p = self.bg2_priority();
         let frame_base = if self.dispcnt & (1 << 4) != 0 {
             0xA000
         } else {
             0
         };
-        let yu = y as usize;
-        let backdrop = palette_color(palette, 0);
-
-        for x in 0..SCREEN_WIDTH {
-            let pixel = if x < 160 && yu < 128 {
-                let off = frame_base + (yu * 160 + x) * 2;
-                if off + 1 < vram.len() {
-                    bgr555_to_rgba8(u16::from_le_bytes([vram[off], vram[off + 1]]))
-                } else {
-                    backdrop
-                }
-            } else {
-                backdrop
-            };
-            self.put_pixel(x, yu, pixel);
-        }
-    }
-
-    fn render_backdrop(&mut self, y: u16, palette: &[u8]) {
-        let color = palette_color(palette, 0);
-        let yu = y as usize;
-        for x in 0..SCREEN_WIDTH {
-            self.put_pixel(x, yu, color);
+        for x in 0..160.min(SCREEN_WIDTH) {
+            if y >= 128 {
+                break;
+            }
+            let off = frame_base + (y * 160 + x) * 2;
+            if off + 1 >= vram.len() {
+                break;
+            }
+            line[x] = bgr555_to_rgba8(u16::from_le_bytes([vram[off], vram[off + 1]]));
+            prio[x] = p;
         }
     }
 
@@ -440,6 +504,178 @@ impl Ppu {
         for x in 0..SCREEN_WIDTH {
             self.put_pixel(x, yu, [0xFF, 0xFF, 0xFF, 0xFF]);
         }
+    }
+
+    /// Renderiza os sprites (OBJ) que cobrem a scanline `y` e os compõe sobre
+    /// `line` respeitando a prioridade frente-a-frente com os backgrounds.
+    ///
+    /// Ordem entre sprites: o de menor índice de OAM fica por cima (independe da
+    /// prioridade). Já a prioridade do sprite decide quem vence o BG no pixel.
+    fn render_sprites(
+        &self,
+        y: usize,
+        vram: &[u8],
+        palette: &[u8],
+        oam: &[u8],
+        line: &mut [[u8; 4]; SCREEN_WIDTH],
+        prio: &mut [u8; SCREEN_WIDTH],
+    ) {
+        // Buffer dos sprites: cor + prioridade por pixel (255 = vazio).
+        let mut obj = [[0u8; 4]; SCREEN_WIDTH];
+        let mut obj_prio = [255u8; SCREEN_WIDTH];
+
+        let one_d = self.dispcnt & (1 << 6) != 0;
+        let rd16 = |off: usize| u16::from_le_bytes([oam[off], oam[off + 1]]);
+
+        for i in 0..128 {
+            let base = i * 8;
+            let attr0 = rd16(base);
+            let attr1 = rd16(base + 2);
+            let attr2 = rd16(base + 4);
+
+            let obj_mode = (attr0 >> 8) & 0b11;
+            if obj_mode == 2 {
+                continue; // sprite desabilitado
+            }
+            let affine = obj_mode == 1 || obj_mode == 3;
+            let double = obj_mode == 3;
+
+            let shape = (attr0 >> 14) & 0b11;
+            let size = (attr1 >> 14) & 0b11;
+            let (w, h) = sprite_dims(shape, size);
+            let (bw, bh) = if double { (w * 2, h * 2) } else { (w, h) };
+
+            // Linha relativa ao topo do sprite, com wrap em 256.
+            let y0 = (attr0 & 0xFF) as i32;
+            let row = (y as i32 - y0) & 0xFF;
+            if row >= bh as i32 {
+                continue; // sprite não cobre esta scanline
+            }
+
+            let x0 = (attr1 & 0x1FF) as i32;
+            let is_8bpp = attr0 & (1 << 13) != 0;
+            let tile_base = (attr2 & 0x3FF) as usize;
+            let priority = ((attr2 >> 10) & 0b11) as u8;
+            let pal_bank = ((attr2 >> 12) & 0xF) as usize;
+
+            // Parâmetros afins (interleaved em OAM): grupo = bits 9-13 de attr1.
+            let (pa, pb, pc, pd) = if affine {
+                let g = (((attr1 >> 9) & 0x1F) as usize) * 0x20;
+                (
+                    rd16(g + 0x6) as i16 as i32,
+                    rd16(g + 0xE) as i16 as i32,
+                    rd16(g + 0x16) as i16 as i32,
+                    rd16(g + 0x1E) as i16 as i32,
+                )
+            } else {
+                (0, 0, 0, 0)
+            };
+            let hflip = !affine && attr1 & (1 << 12) != 0;
+            let vflip = !affine && attr1 & (1 << 13) != 0;
+
+            for col in 0..bw as i32 {
+                let screen_x = (x0 + col) & 0x1FF;
+                if screen_x >= SCREEN_WIDTH as i32 {
+                    continue;
+                }
+                let sx = screen_x as usize;
+                if obj_prio[sx] != 255 {
+                    continue; // já pintado por sprite de índice menor
+                }
+
+                // Coordenada de textura (tex_x, tex_y) dentro do sprite [0,w)×[0,h).
+                let (tex_x, tex_y) = if affine {
+                    let ix = col - bw as i32 / 2;
+                    let iy = row - bh as i32 / 2;
+                    let tx = ((pa * ix + pb * iy) >> 8) + w as i32 / 2;
+                    let ty = ((pc * ix + pd * iy) >> 8) + h as i32 / 2;
+                    (tx, ty)
+                } else {
+                    let tx = if hflip { w as i32 - 1 - col } else { col };
+                    let ty = if vflip { h as i32 - 1 - row } else { row };
+                    (tx, ty)
+                };
+                if tex_x < 0 || tex_y < 0 || tex_x >= w as i32 || tex_y >= h as i32 {
+                    continue;
+                }
+
+                if let Some(color) = self.sample_sprite(
+                    vram,
+                    palette,
+                    tile_base,
+                    is_8bpp,
+                    pal_bank,
+                    one_d,
+                    w,
+                    tex_x as usize,
+                    tex_y as usize,
+                ) {
+                    obj[sx] = color;
+                    obj_prio[sx] = priority;
+                }
+            }
+        }
+
+        // Composição: o sprite vence o BG quando sua prioridade ≤ a do pixel.
+        for x in 0..SCREEN_WIDTH {
+            if obj_prio[x] != 255 && obj_prio[x] <= prio[x] {
+                line[x] = obj[x];
+                prio[x] = obj_prio[x];
+            }
+        }
+    }
+
+    /// Amostra um texel de sprite. Devolve `None` se transparente (índice 0).
+    #[allow(clippy::too_many_arguments)]
+    fn sample_sprite(
+        &self,
+        vram: &[u8],
+        palette: &[u8],
+        tile_base: usize,
+        is_8bpp: bool,
+        pal_bank: usize,
+        one_d: bool,
+        w: usize,
+        tex_x: usize,
+        tex_y: usize,
+    ) -> Option<[u8; 4]> {
+        const OBJ_TILE_BASE: usize = 0x10000; // área de tiles de OBJ na VRAM
+        const OBJ_PAL_BASE: usize = 0x100; // paleta de OBJ começa na cor 256
+
+        let tile_x = tex_x / 8;
+        let tile_y = tex_y / 8;
+        let px = tex_x % 8;
+        let py = tex_y % 8;
+
+        // Mapeamento de tiles: 1D = linear (largura do sprite); 2D = grade de 32.
+        let row_tiles = if one_d { w / 8 } else { 32 };
+        let step = if is_8bpp { 2 } else { 1 }; // tiles de 8bpp ocupam 2 slots de 32 bytes
+        let tile_id = tile_base + (tile_y * row_tiles + tile_x) * step;
+
+        let color_idx = if is_8bpp {
+            let addr = OBJ_TILE_BASE + tile_id * 32 + py * 8 + px;
+            if addr >= vram.len() {
+                return None;
+            }
+            let idx = vram[addr] as usize;
+            if idx == 0 {
+                return None;
+            }
+            OBJ_PAL_BASE + idx
+        } else {
+            let addr = OBJ_TILE_BASE + tile_id * 32 + py * 4 + px / 2;
+            if addr >= vram.len() {
+                return None;
+            }
+            let byte = vram[addr];
+            let nibble = if px & 1 == 0 { byte & 0xF } else { byte >> 4 } as usize;
+            if nibble == 0 {
+                return None;
+            }
+            OBJ_PAL_BASE + pal_bank * 16 + nibble
+        };
+
+        Some(palette_color(palette, color_idx))
     }
 
     #[inline]
@@ -566,6 +802,25 @@ fn sign_extend_28(v: u32) -> i32 {
     ((v << 4) as i32) >> 4
 }
 
+/// Dimensões (largura, altura) de um sprite em pixels, conforme shape × size.
+fn sprite_dims(shape: u16, size: u16) -> (usize, usize) {
+    match (shape, size) {
+        (0, 0) => (8, 8),
+        (0, 1) => (16, 16),
+        (0, 2) => (32, 32),
+        (0, 3) => (64, 64),
+        (1, 0) => (16, 8),
+        (1, 1) => (32, 8),
+        (1, 2) => (32, 16),
+        (1, 3) => (64, 32),
+        (2, 0) => (8, 16),
+        (2, 1) => (8, 32),
+        (2, 2) => (16, 32),
+        (2, 3) => (32, 64),
+        _ => (8, 8),
+    }
+}
+
 /// Converte BGR555 (16 bits) para RGBA8 (4 bytes).
 /// Escala cada componente de 5 bits para 8 bits via (v << 3) | (v >> 2).
 #[inline]
@@ -594,28 +849,28 @@ fn palette_color(palette: &[u8], idx: usize) -> [u8; 4] {
 mod tests {
     use super::*;
 
-    fn dummy_mem() -> (Vec<u8>, Vec<u8>) {
-        (vec![0u8; 0x18000], vec![0u8; 0x400])
+    fn dummy_mem() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        (vec![0u8; 0x18000], vec![0u8; 0x400], vec![0u8; 0x400])
     }
 
     #[test]
     fn vcount_increments_each_scanline() {
         let mut p = Ppu::new();
-        let (v, pal) = dummy_mem();
-        p.tick(CYCLES_PER_SCANLINE, &v, &pal);
+        let (v, pal, oam) = dummy_mem();
+        p.tick(CYCLES_PER_SCANLINE, &v, &pal, &oam);
         assert_eq!(p.vcount, 1);
-        p.tick(CYCLES_PER_SCANLINE * 3, &v, &pal);
+        p.tick(CYCLES_PER_SCANLINE * 3, &v, &pal, &oam);
         assert_eq!(p.vcount, 4);
     }
 
     #[test]
     fn vblank_irq_fires_at_scanline_160_when_enabled() {
         let mut p = Ppu::new();
-        let (v, pal) = dummy_mem();
+        let (v, pal, oam) = dummy_mem();
         p.dispstat |= DISPSTAT_VBLANK_IRQ;
         let mut total_irqs = 0u16;
         for _ in 0..160 {
-            total_irqs |= p.tick(CYCLES_PER_SCANLINE, &v, &pal).irqs;
+            total_irqs |= p.tick(CYCLES_PER_SCANLINE, &v, &pal, &oam).irqs;
         }
         assert_eq!(p.vcount, 160);
         assert!(total_irqs & irq_bits::VBLANK != 0);
@@ -625,18 +880,18 @@ mod tests {
     #[test]
     fn frame_completes_in_280896_cycles() {
         let mut p = Ppu::new();
-        let (v, pal) = dummy_mem();
-        p.tick(228 * CYCLES_PER_SCANLINE, &v, &pal);
+        let (v, pal, oam) = dummy_mem();
+        p.tick(228 * CYCLES_PER_SCANLINE, &v, &pal, &oam);
         assert_eq!(p.vcount, 0);
     }
 
     #[test]
     fn hblank_flag_during_hblank_window() {
         let mut p = Ppu::new();
-        let (v, pal) = dummy_mem();
-        p.tick(HDRAW_CYCLES + 10, &v, &pal);
+        let (v, pal, oam) = dummy_mem();
+        p.tick(HDRAW_CYCLES + 10, &v, &pal, &oam);
         assert!(p.dispstat & DISPSTAT_HBLANK_FLAG != 0);
-        p.tick(CYCLES_PER_SCANLINE - HDRAW_CYCLES, &v, &pal);
+        p.tick(CYCLES_PER_SCANLINE - HDRAW_CYCLES, &v, &pal, &oam);
         assert!(p.dispstat & DISPSTAT_HBLANK_FLAG == 0);
     }
 
@@ -649,14 +904,15 @@ mod tests {
     #[test]
     fn mode3_renders_red_pixel() {
         let mut p = Ppu::new();
-        p.dispcnt = 3; // mode 3
+        p.dispcnt = 3 | (1 << 10); // mode 3, BG2 habilitado
         let mut v = vec![0u8; 0x18000];
         // Pixel (0, 0) = vermelho puro (BGR555 = 0x001F).
         v[0] = 0x1F;
         v[1] = 0x00;
         let pal = vec![0u8; 0x400];
+        let oam = vec![0u8; 0x400];
         // Avança 1 scanline para forçar render.
-        p.tick(CYCLES_PER_SCANLINE, &v, &pal);
+        p.tick(CYCLES_PER_SCANLINE, &v, &pal, &oam);
         assert_eq!(p.framebuffer[0..4], [0xFF, 0, 0, 0xFF]);
     }
 
@@ -687,7 +943,8 @@ mod tests {
         pal[17 * 2] = color as u8;
         pal[17 * 2 + 1] = (color >> 8) as u8;
 
-        p.tick(CYCLES_PER_SCANLINE, &v, &pal);
+        let oam = vec![0u8; 0x400];
+        p.tick(CYCLES_PER_SCANLINE, &v, &pal, &oam);
         assert_eq!(p.framebuffer[0..4], [0, 0xFF, 0, 0xFF]);
     }
 
@@ -721,8 +978,34 @@ mod tests {
         pal[33 * 2] = blue as u8;
         pal[33 * 2 + 1] = (blue >> 8) as u8;
 
-        p.tick(CYCLES_PER_SCANLINE, &v, &pal);
+        let oam = vec![0u8; 0x400];
+        p.tick(CYCLES_PER_SCANLINE, &v, &pal, &oam);
         // BG1 (prioridade 0) deve vencer → azul.
         assert_eq!(p.framebuffer[0..4], [0, 0, 0xFF, 0xFF]);
+    }
+
+    /// Sprite 4bpp em (0,0): monta 1 tile de OBJ e verifica que cobre o backdrop.
+    #[test]
+    fn sprite_renders_over_backdrop() {
+        let mut p = Ppu::new();
+        let mut v = vec![0u8; 0x18000];
+        let mut pal = vec![0u8; 0x400];
+        // OAM todo zerado já descreve sprite 0: y=0, x=0, 8×8 square, tile 0.
+        let oam = vec![0u8; 0x400];
+
+        // Modo 0, OBJ habilitado (bit 12), mapeamento 1D (bit 6).
+        p.dispcnt = (1 << 12) | (1 << 6);
+
+        // Tile 0 de OBJ (base 0x10000): pixel (0,0) nibble baixo = índice 1.
+        v[0x10000] = 0x01;
+
+        // Paleta de OBJ: cor 256 + (bank 0)*16 + 1 = índice 257 → amarelo.
+        // BGR555 amarelo = R+G = 0x03FF.
+        let yellow: u16 = 0x03FF;
+        pal[257 * 2] = yellow as u8;
+        pal[257 * 2 + 1] = (yellow >> 8) as u8;
+
+        p.tick(CYCLES_PER_SCANLINE, &v, &pal, &oam);
+        assert_eq!(p.framebuffer[0..4], bgr555_to_rgba8(yellow));
     }
 }

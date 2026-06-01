@@ -31,7 +31,7 @@ impl Gba {
         // Borrows disjuntos: ppu, vram e palette são campos distintos do bus.
         let ppu_result = {
             let bus = &mut self.bus;
-            bus.ppu.tick(cycles, &*bus.vram, &*bus.palette)
+            bus.ppu.tick(cycles, &*bus.vram, &*bus.palette, &*bus.oam)
         };
 
         // DMA disparado por VBlank/HBlank (a transferência precisa do bus inteiro,
