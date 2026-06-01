@@ -28,7 +28,9 @@ impl Gba {
         let cycles = self.cpu.step(&mut self.bus);
 
         let timer_irqs = self.bus.io.timers.tick(cycles);
-        let ppu_irqs = self.bus.ppu.tick(cycles);
+        // Borrows disjuntos: ppu, vram e palette são campos distintos do bus.
+        let bus = &mut self.bus;
+        let ppu_irqs = bus.ppu.tick(cycles, &*bus.vram, &*bus.palette);
         let all = timer_irqs | ppu_irqs;
         if all != 0 {
             self.bus.io.raise(all);

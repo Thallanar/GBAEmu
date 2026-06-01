@@ -53,14 +53,18 @@ impl Ppu {
     }
 
     /// Avança `cycles` ciclos. Retorna bitmap de IRQs a sinalizar.
-    pub fn tick(&mut self, cycles: u32) -> u16 {
+    /// Recebe slices da VRAM e palette para poder renderizar scanlines.
+    pub fn tick(&mut self, cycles: u32, vram: &[u8], palette: &[u8]) -> u16 {
         let mut irqs: u16 = 0;
         self.cycles += cycles;
 
         // Pode haver mais de uma transição de fase num único tick.
         loop {
             if !self.in_hblank && self.cycles >= HDRAW_CYCLES {
-                // Entra em HBlank.
+                // Entra em HBlank. Render do scanline atual (se visível).
+                if self.vcount < VISIBLE_SCANLINES {
+                    self.render_scanline(self.vcount, vram, palette);
+                }
                 self.in_hblank = true;
                 self.dispstat |= DISPSTAT_HBLANK_FLAG;
                 if self.dispstat & DISPSTAT_HBLANK_IRQ != 0 {
@@ -102,6 +106,92 @@ impl Ppu {
         irqs
     }
 
+    // ───────────────── Render ─────────────────
+
+    fn render_scanline(&mut self, y: u16, vram: &[u8], palette: &[u8]) {
+        let mode = self.dispcnt & 0b111;
+        let force_blank = self.dispcnt & 0x80 != 0;
+
+        if force_blank {
+            self.fill_scanline_white(y);
+            return;
+        }
+
+        match mode {
+            3 => self.render_mode3(y, vram),
+            4 => self.render_mode4(y, vram, palette),
+            5 => self.render_mode5(y, vram, palette),
+            _ => self.render_backdrop(y, palette),
+        }
+    }
+
+    /// Modo 3: 240×160, BGR555 direto na VRAM (sem double-buffer).
+    fn render_mode3(&mut self, y: u16, vram: &[u8]) {
+        let yu = y as usize;
+        for x in 0..SCREEN_WIDTH {
+            let off = (yu * SCREEN_WIDTH + x) * 2;
+            if off + 1 >= vram.len() { break; }
+            let color = u16::from_le_bytes([vram[off], vram[off + 1]]);
+            self.put_pixel(x, yu, bgr555_to_rgba8(color));
+        }
+    }
+
+    /// Modo 4: 240×160, paletizado 1 byte/pixel, dois frames (selecionado pelo
+    /// bit 4 do DISPCNT).
+    fn render_mode4(&mut self, y: u16, vram: &[u8], palette: &[u8]) {
+        let frame_base = if self.dispcnt & (1 << 4) != 0 { 0xA000 } else { 0 };
+        let yu = y as usize;
+        for x in 0..SCREEN_WIDTH {
+            let off = frame_base + yu * SCREEN_WIDTH + x;
+            if off >= vram.len() { break; }
+            let idx = vram[off] as usize;
+            let color = palette_color(palette, idx);
+            self.put_pixel(x, yu, color);
+        }
+    }
+
+    /// Modo 5: 160×128 BGR555 com double-buffer; resto da tela é backdrop.
+    fn render_mode5(&mut self, y: u16, vram: &[u8], palette: &[u8]) {
+        let frame_base = if self.dispcnt & (1 << 4) != 0 { 0xA000 } else { 0 };
+        let yu = y as usize;
+        let backdrop = palette_color(palette, 0);
+
+        for x in 0..SCREEN_WIDTH {
+            let pixel = if x < 160 && yu < 128 {
+                let off = frame_base + (yu * 160 + x) * 2;
+                if off + 1 < vram.len() {
+                    bgr555_to_rgba8(u16::from_le_bytes([vram[off], vram[off + 1]]))
+                } else {
+                    backdrop
+                }
+            } else {
+                backdrop
+            };
+            self.put_pixel(x, yu, pixel);
+        }
+    }
+
+    fn render_backdrop(&mut self, y: u16, palette: &[u8]) {
+        let color = palette_color(palette, 0);
+        let yu = y as usize;
+        for x in 0..SCREEN_WIDTH {
+            self.put_pixel(x, yu, color);
+        }
+    }
+
+    fn fill_scanline_white(&mut self, y: u16) {
+        let yu = y as usize;
+        for x in 0..SCREEN_WIDTH {
+            self.put_pixel(x, yu, [0xFF, 0xFF, 0xFF, 0xFF]);
+        }
+    }
+
+    #[inline]
+    fn put_pixel(&mut self, x: usize, y: usize, rgba: [u8; 4]) {
+        let off = (y * SCREEN_WIDTH + x) * 4;
+        self.framebuffer[off..off + 4].copy_from_slice(&rgba);
+    }
+
     /// Faixa de I/O servida pela PPU: 0x04000000..0x04000056.
     pub fn read_u8(&self, addr: u32) -> u8 {
         match addr {
@@ -137,27 +227,51 @@ impl Default for Ppu {
     }
 }
 
+/// Converte BGR555 (16 bits) para RGBA8 (4 bytes).
+/// Escala cada componente de 5 bits para 8 bits via (v << 3) | (v >> 2).
+#[inline]
+pub fn bgr555_to_rgba8(c: u16) -> [u8; 4] {
+    let r = (c & 0x1F) as u8;
+    let g = ((c >> 5) & 0x1F) as u8;
+    let b = ((c >> 10) & 0x1F) as u8;
+    [(r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), 0xFF]
+}
+
+/// Lê a cor `idx` da palette em RGBA8.
+fn palette_color(palette: &[u8], idx: usize) -> [u8; 4] {
+    let off = idx * 2;
+    if off + 1 >= palette.len() {
+        return [0, 0, 0, 0xFF];
+    }
+    bgr555_to_rgba8(u16::from_le_bytes([palette[off], palette[off + 1]]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn dummy_mem() -> (Vec<u8>, Vec<u8>) {
+        (vec![0u8; 0x18000], vec![0u8; 0x400])
+    }
+
     #[test]
     fn vcount_increments_each_scanline() {
         let mut p = Ppu::new();
-        p.tick(CYCLES_PER_SCANLINE);
+        let (v, pal) = dummy_mem();
+        p.tick(CYCLES_PER_SCANLINE, &v, &pal);
         assert_eq!(p.vcount, 1);
-        p.tick(CYCLES_PER_SCANLINE * 3);
+        p.tick(CYCLES_PER_SCANLINE * 3, &v, &pal);
         assert_eq!(p.vcount, 4);
     }
 
     #[test]
     fn vblank_irq_fires_at_scanline_160_when_enabled() {
         let mut p = Ppu::new();
+        let (v, pal) = dummy_mem();
         p.dispstat |= DISPSTAT_VBLANK_IRQ;
-        // Avança até o scanline 160 (160 scanlines completos).
         let mut total_irqs = 0u16;
         for _ in 0..160 {
-            total_irqs |= p.tick(CYCLES_PER_SCANLINE);
+            total_irqs |= p.tick(CYCLES_PER_SCANLINE, &v, &pal);
         }
         assert_eq!(p.vcount, 160);
         assert!(total_irqs & irq_bits::VBLANK != 0);
@@ -167,17 +281,38 @@ mod tests {
     #[test]
     fn frame_completes_in_280896_cycles() {
         let mut p = Ppu::new();
-        p.tick(228 * CYCLES_PER_SCANLINE);
-        assert_eq!(p.vcount, 0, "deve voltar ao scanline 0");
+        let (v, pal) = dummy_mem();
+        p.tick(228 * CYCLES_PER_SCANLINE, &v, &pal);
+        assert_eq!(p.vcount, 0);
     }
 
     #[test]
     fn hblank_flag_during_hblank_window() {
         let mut p = Ppu::new();
-        p.tick(HDRAW_CYCLES + 10);
+        let (v, pal) = dummy_mem();
+        p.tick(HDRAW_CYCLES + 10, &v, &pal);
         assert!(p.dispstat & DISPSTAT_HBLANK_FLAG != 0);
-        // Termina o scanline.
-        p.tick(CYCLES_PER_SCANLINE - HDRAW_CYCLES);
+        p.tick(CYCLES_PER_SCANLINE - HDRAW_CYCLES, &v, &pal);
         assert!(p.dispstat & DISPSTAT_HBLANK_FLAG == 0);
+    }
+
+    #[test]
+    fn bgr555_red_is_pure_red() {
+        let c = bgr555_to_rgba8(0x001F);
+        assert_eq!(c, [0xFF, 0, 0, 0xFF]);
+    }
+
+    #[test]
+    fn mode3_renders_red_pixel() {
+        let mut p = Ppu::new();
+        p.dispcnt = 3; // mode 3
+        let mut v = vec![0u8; 0x18000];
+        // Pixel (0, 0) = vermelho puro (BGR555 = 0x001F).
+        v[0] = 0x1F;
+        v[1] = 0x00;
+        let pal = vec![0u8; 0x400];
+        // Avança 1 scanline para forçar render.
+        p.tick(CYCLES_PER_SCANLINE, &v, &pal);
+        assert_eq!(p.framebuffer[0..4], [0xFF, 0, 0, 0xFF]);
     }
 }
