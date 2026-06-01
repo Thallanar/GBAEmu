@@ -166,4 +166,28 @@ auroragba/
 - [x] Roadmap definido
 - [x] Nome: **AuroraGBA**
 - [x] Linguagem: **Rust**
-- [ ] Fase 0 em andamento
+- [x] Fase 0 — workspace, CI, scripts de ROM de teste
+- [x] Fase 1 — CPU ARM7TDMI (ARM + THUMB completos, IRQ, banking)
+- [~] Fase 2 — PPU:
+  - [x] Máquina de estados de scanline (HBlank/VBlank/VCount IRQs)
+  - [x] Modos bitmap 3/4/5
+  - [x] Modos tile 0/1/2 (backgrounds texto + afim, prioridade)
+  - [x] Sprites (OBJ) — normal + afim, 1D/2D, prioridade
+  - [ ] Janelas, blending (BLDCNT), mosaic
+- [~] Fase 3 — Timers + IRQ (ok); DMA 4 canais (imediato/VBlank/HBlank, ok);
+  APU/som ainda pendente; DMA "special" (FIFO de som) pendente
+- [x] BIOS HLE (SWI + trampolim de IRQ + direct boot) — sem BIOS oficial
+- [x] Joypad (KEYINPUT/KEYCNT + IRQ de keypad + input no desktop)
+- [~] Fase 5 — Frontend desktop: janela egui, abrir ROM, framebuffer, input
+- [ ] Fase 4 — saves (detecção de tipo feita; persistência pendente)
+- [ ] Fase 6 — Shiny Hunter (esqueleto da crate criado)
+- [ ] Fase 7 — Android
+
+### Pendências conhecidas
+
+- **CPU**: jsmolka `arm.gba` reporta "Failed test 450" — há um caso de borda de
+  instrução ARM incorreto a investigar (correção da CPU, não da renderização).
+- **Formatação**: o repositório não passa por `cargo fmt` (commits anteriores ao
+  HLE não foram formatados); arquivos novos/reescritos já estão fmt-clean.
+- Falta áudio (APU), janelas/blending/mosaic na PPU, DMA de som, e timing de
+  ciclos exato (wait states).
