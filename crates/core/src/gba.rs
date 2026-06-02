@@ -41,8 +41,18 @@ impl Gba {
     pub fn step(&mut self) -> u32 {
         let cycles = self.cpu.step(&mut self.bus);
 
-        let timer_irqs = self.bus.io.timers.tick(cycles);
+        let timer = self.bus.io.timers.tick(cycles);
+        let timer_irqs = timer.irqs;
         self.bus.apu.tick(cycles);
+
+        // Direct Sound: cada overflow dos timers 0/1 avança 1 amostra das FIFOs
+        // que usam aquele timer. Depois, reabastece as FIFOs via DMA special.
+        for (t, &count) in timer.snd_overflows.iter().enumerate() {
+            for _ in 0..count {
+                self.bus.apu.on_timer_overflow(t as u8);
+            }
+        }
+        self.refill_sound_fifos();
         // Borrows disjuntos: ppu, vram e palette são campos distintos do bus.
         let ppu_result = {
             let bus = &mut self.bus;
@@ -69,6 +79,35 @@ impl Gba {
             self.bus.io.raise(all);
         }
         cycles
+    }
+
+    /// Reabastece as FIFOs do Direct Sound via DMA "special". DMA1/DMA2 em modo
+    /// special com destino numa FIFO transferem 4 words (16 amostras) sempre que
+    /// a FIFO cai à metade. Origem incrementa, destino é fixo, e o canal repete
+    /// (não desabilita).
+    fn refill_sound_fifos(&mut self) {
+        for ch in 1..=2usize {
+            let c = self.bus.dma.channels[ch];
+            if !c.enabled() || c.timing() != crate::dma::Timing::Special {
+                continue;
+            }
+            let fifo = match c.int_dst {
+                0x0400_00A0 => 0,
+                0x0400_00A4 => 1,
+                _ => continue,
+            };
+            if !self.bus.apu.fifo_needs_refill(fifo) {
+                continue;
+            }
+            let mut src = c.int_src;
+            let dst = c.int_dst;
+            for _ in 0..4 {
+                let w = self.bus.read_u32(src);
+                self.bus.write_u32(dst, w); // roteado para a FIFO do APU
+                src = src.wrapping_add(4);
+            }
+            self.bus.dma.channels[ch].int_src = src;
+        }
     }
 
     /// Executa um frame inteiro (~280896 ciclos). Placeholder.

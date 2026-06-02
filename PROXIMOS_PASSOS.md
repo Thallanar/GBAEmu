@@ -78,6 +78,8 @@ Sub-tarefas:
 
 ### 3. PPU — efeitos que faltam
 - [ ] Janelas (WIN0/WIN1/OBJ window) — `WININ`/`WINOUT`.
+      **BUG conhecido**: a tela de seleção do Emerald (Novo Jogo/Continuar) não
+      mostra a moldura em volta do card em foco — provável uso de janela/blend.
 - [ ] Blending / alpha (`BLDCNT`/`BLDALPHA`/`BLDY`) — transparências, fades.
 - [ ] Mosaic (`MOSAIC`).
 - [ ] Sprite semi-transparente e OBJ window mode.

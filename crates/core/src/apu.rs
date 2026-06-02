@@ -48,6 +48,13 @@ pub struct Apu {
     ch3: Wave,
     ch4: Noise,
 
+    /// FIFOs do Direct Sound A e B (amostras PCM 8-bit com sinal).
+    fifo_a: std::collections::VecDeque<i8>,
+    fifo_b: std::collections::VecDeque<i8>,
+    /// Amostra atual de cada canal Direct Sound (atualizada no overflow do timer).
+    cur_a: i8,
+    cur_b: i8,
+
     /// Contador de ciclos do frame sequencer (passo a cada 8192 ciclos = 512 Hz).
     seq_cycles: u32,
     seq_step: u8,
@@ -122,7 +129,16 @@ impl Apu {
             0x0400_0080 => self.cnt_l = (self.cnt_l & 0xFF00) | val as u16,
             0x0400_0081 => self.cnt_l = (self.cnt_l & 0x00FF) | ((val as u16) << 8),
             0x0400_0082 => self.cnt_h = (self.cnt_h & 0xFF00) | val as u16,
-            0x0400_0083 => self.cnt_h = (self.cnt_h & 0x00FF) | ((val as u16) << 8),
+            0x0400_0083 => {
+                self.cnt_h = (self.cnt_h & 0x00FF) | ((val as u16) << 8);
+                // Bits 11/15: reset da FIFO A/B (limpa quando setado).
+                if val & 0x08 != 0 {
+                    self.fifo_a.clear();
+                }
+                if val & 0x80 != 0 {
+                    self.fifo_b.clear();
+                }
+            }
             0x0400_0084 => {
                 let was = self.enabled;
                 self.enabled = val & 0x80 != 0;
@@ -136,6 +152,9 @@ impl Apu {
             }
             0x0400_0088 => self.bias = (self.bias & 0xFF00) | val as u16,
             0x0400_0089 => self.bias = (self.bias & 0x00FF) | ((val as u16) << 8),
+            // FIFOs do Direct Sound (escritas de 8/16/32 bits empilham 1/2/4 amostras).
+            0x0400_00A0..=0x0400_00A3 => push_fifo(&mut self.fifo_a, val as i8),
+            0x0400_00A4..=0x0400_00A7 => push_fifo(&mut self.fifo_b, val as i8),
             0x0400_0090..=0x0400_009F => self.ch3.write_ram(addr - 0x0400_0090, val),
             _ => {}
         }
@@ -193,11 +212,12 @@ impl Apu {
         self.seq_step = (self.seq_step + 1) & 7;
     }
 
-    /// Mixa os 4 canais PSG em L/R aplicando os pans/volumes de SOUNDCNT_L.
+    /// Mixa os 4 canais PSG + os 2 canais Direct Sound em L/R.
     fn mix(&self) -> (i16, i16) {
         if !self.enabled {
             return (0, 0);
         }
+        // --- PSG: soma dos canais habilitados (SOUNDCNT_L) × volume master ---
         let s = [
             self.ch1.sample() as i32,
             self.ch2.sample() as i32,
@@ -209,27 +229,78 @@ impl Apu {
         let vol_l = ((self.cnt_l >> 4) & 0x07) as i32;
         let en_r = (self.cnt_l >> 8) & 0x0F;
         let en_l = (self.cnt_l >> 12) & 0x0F;
-
-        let mut l = 0i32;
-        let mut r = 0i32;
+        let mut psg_l = 0i32;
+        let mut psg_r = 0i32;
         for (i, &v) in s.iter().enumerate() {
             if en_l & (1 << i) != 0 {
-                l += v;
+                psg_l += v;
             }
             if en_r & (1 << i) != 0 {
-                r += v;
+                psg_r += v;
             }
         }
-        // Cada canal dá -15..+15; 4 canais → ±60. Escala por volume (0..7) e por
-        // um ganho fixo para aproveitar a faixa de i16.
-        l = l * (vol_l + 1) * 80;
-        r = r * (vol_r + 1) * 80;
+        // SOUNDCNT_H bits0-1: razão de saída dos PSG (25/50/100%).
+        let ratio = [1, 2, 4, 4][(self.cnt_h & 0x03) as usize];
+        psg_l = psg_l * (vol_l + 1) * ratio / 4;
+        psg_r = psg_r * (vol_r + 1) * ratio / 4;
+
+        // --- Direct Sound A/B (SOUNDCNT_H) ---
+        let a = self.cur_a as i32 * if self.cnt_h & 0x04 != 0 { 2 } else { 1 };
+        let b = self.cur_b as i32 * if self.cnt_h & 0x08 != 0 { 2 } else { 1 };
+
+        let mut l = psg_l * 8;
+        let mut r = psg_r * 8;
+        if self.cnt_h & 0x0200 != 0 {
+            l += a * 52; // DS A enable L
+        }
+        if self.cnt_h & 0x0100 != 0 {
+            r += a * 52; // DS A enable R
+        }
+        if self.cnt_h & 0x2000 != 0 {
+            l += b * 52; // DS B enable L
+        }
+        if self.cnt_h & 0x1000 != 0 {
+            r += b * 52; // DS B enable R
+        }
         (l.clamp(-32768, 32767) as i16, r.clamp(-32768, 32767) as i16)
+    }
+
+    /// Chamado quando o timer 0 ou 1 overflowa: avança as FIFOs do Direct Sound
+    /// que usam aquele timer (1 amostra por overflow).
+    pub fn on_timer_overflow(&mut self, timer: u8) {
+        if (self.cnt_h >> 10) & 1 == timer as u16 {
+            if let Some(s) = self.fifo_a.pop_front() {
+                self.cur_a = s;
+            }
+        }
+        if (self.cnt_h >> 14) & 1 == timer as u16 {
+            if let Some(s) = self.fifo_b.pop_front() {
+                self.cur_b = s;
+            }
+        }
+    }
+
+    /// A FIFO está com metade ou menos (≤16 de 32 bytes)? Dispara o DMA de
+    /// reabastecimento. `fifo` 0 = A, 1 = B.
+    pub fn fifo_needs_refill(&self, fifo: usize) -> bool {
+        let len = if fifo == 0 {
+            self.fifo_a.len()
+        } else {
+            self.fifo_b.len()
+        };
+        len <= 16
     }
 
     /// Remove e devolve todas as amostras acumuladas (chamado pelo frontend).
     pub fn drain(&mut self) -> Vec<i16> {
         std::mem::take(&mut self.buffer)
+    }
+}
+
+/// Empilha uma amostra na FIFO (capacidade 32 bytes; descarta se cheia).
+fn push_fifo(fifo: &mut std::collections::VecDeque<i8>, sample: i8) {
+    if fifo.len() < 32 {
+        fifo.push_back(sample);
     }
 }
 
@@ -702,5 +773,26 @@ mod tests {
         assert!(a.ch3.on);
         a.tick(100_000);
         assert!(a.buffer.iter().any(|&s| s != 0), "wave deveria gerar som");
+    }
+
+    #[test]
+    fn direct_sound_a_pops_on_timer_and_mixes() {
+        let mut a = apu_on();
+        // SOUNDCNT_H: bit2 = DS A volume 100% (low byte); bits 8+9 = DS A enable
+        // R+L (high byte 0x03); bit10 (timer select) = 0 → timer 0.
+        a.write_u8(0x0400_0082, 0x04);
+        a.write_u8(0x0400_0083, 0x03);
+        // Empilha uma amostra na FIFO A.
+        a.write_u8(0x0400_00A0, 100i8 as u8);
+        assert!(a.fifo_needs_refill(0), "FIFO quase vazia precisa de refill");
+
+        a.on_timer_overflow(0);
+        assert_eq!(a.cur_a, 100, "overflow do timer 0 deve popar a amostra");
+
+        a.tick(2000);
+        assert!(
+            a.buffer.iter().any(|&s| s != 0),
+            "Direct Sound deveria gerar som"
+        );
     }
 }

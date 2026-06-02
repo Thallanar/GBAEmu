@@ -27,15 +27,31 @@ pub struct Timer {
 }
 
 impl Timer {
-    pub fn enabled(self) -> bool { self.control & 0x80 != 0 }
-    pub fn cascade(self) -> bool { self.control & 0x04 != 0 }
-    pub fn irq_enable(self) -> bool { self.control & 0x40 != 0 }
-    pub fn prescaler(self) -> u32 { PRESCALER_TABLE[(self.control as usize) & 0b11] }
+    pub fn enabled(self) -> bool {
+        self.control & 0x80 != 0
+    }
+    pub fn cascade(self) -> bool {
+        self.control & 0x04 != 0
+    }
+    pub fn irq_enable(self) -> bool {
+        self.control & 0x40 != 0
+    }
+    pub fn prescaler(self) -> u32 {
+        PRESCALER_TABLE[(self.control as usize) & 0b11]
+    }
 }
 
 #[derive(Default)]
 pub struct Timers {
     pub units: [Timer; 4],
+}
+
+/// Resultado de um `tick`: IRQs a sinalizar + nº de overflows dos timers 0/1
+/// (que alimentam o Direct Sound do APU).
+#[derive(Default)]
+pub struct TimerTick {
+    pub irqs: u16,
+    pub snd_overflows: [u32; 2],
 }
 
 impl Timers {
@@ -45,24 +61,29 @@ impl Timers {
 
     /// Avança `cycles` ciclos em todos os timers, retornando um bitmap de
     /// IRQs disparadas (combinável com [`Io::raise`]).
-    pub fn tick(&mut self, cycles: u32) -> u16 {
+    pub fn tick(&mut self, cycles: u32) -> TimerTick {
         let mut irq_pending: u16 = 0;
-        let mut cascade_overflow = false;
+        let mut snd_overflows = [0u32; 2];
+        // Quantas vezes o timer anterior overflowou (para cascade).
+        let mut cascade_count = 0u32;
 
+        // O índice serve para units, o bitmap de IRQ e snd_overflows ao mesmo tempo.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..4 {
             let t = &mut self.units[i];
             if !t.enabled() {
-                cascade_overflow = false;
+                cascade_count = 0;
                 continue;
             }
 
-            let mut overflowed = false;
+            // Conta os overflows deste timer neste tick (pode ser >1).
+            let mut count = 0u32;
             if t.cascade() && i > 0 {
                 // Timer cascateado: incrementa uma vez por overflow do anterior.
-                if cascade_overflow {
+                for _ in 0..cascade_count {
                     if t.counter == 0xFFFF {
                         t.counter = t.reload;
-                        overflowed = true;
+                        count += 1;
                     } else {
                         t.counter = t.counter.wrapping_add(1);
                     }
@@ -74,14 +95,14 @@ impl Timers {
                     t.cycles -= step;
                     if t.counter == 0xFFFF {
                         t.counter = t.reload;
-                        overflowed = true;
+                        count += 1;
                     } else {
                         t.counter = t.counter.wrapping_add(1);
                     }
                 }
             }
 
-            if overflowed && t.irq_enable() {
+            if count > 0 && t.irq_enable() {
                 irq_pending |= match i {
                     0 => irq_bits::TIMER0,
                     1 => irq_bits::TIMER1,
@@ -89,9 +110,16 @@ impl Timers {
                     _ => irq_bits::TIMER3,
                 };
             }
-            cascade_overflow = overflowed;
+            // Os timers 0 e 1 alimentam o Direct Sound.
+            if i < 2 {
+                snd_overflows[i] = count;
+            }
+            cascade_count = count;
         }
-        irq_pending
+        TimerTick {
+            irqs: irq_pending,
+            snd_overflows,
+        }
     }
 
     pub fn read_u8(&self, addr: u32) -> u8 {
@@ -144,7 +172,7 @@ mod tests {
         let mut t = Timers::new();
         // Habilita timer 0 com prescaler=1, IRQ off, sem cascade.
         t.write_u16(0x0400_0102, 0x0080);
-        let irq = t.tick(100);
+        let irq = t.tick(100).irqs;
         assert_eq!(irq, 0);
         assert_eq!(t.units[0].counter, 100);
     }
@@ -155,8 +183,11 @@ mod tests {
         // Reload = 0xFFFE, control: enable=1, IRQ=1, prescaler=1.
         t.write_u16(0x0400_0100, 0xFFFE);
         t.write_u16(0x0400_0102, 0x00C0); // bit6=IRQ, bit7=enable
-        let irq = t.tick(3);
-        assert!(irq & irq_bits::TIMER0 != 0, "deve disparar IRQ TIMER0 no overflow");
+        let irq = t.tick(3).irqs;
+        assert!(
+            irq & irq_bits::TIMER0 != 0,
+            "deve disparar IRQ TIMER0 no overflow"
+        );
         // 3 ticks: 0xFFFE→0xFFFF→reload(0xFFFE)→0xFFFF.
         assert_eq!(t.units[0].counter, 0xFFFF);
     }
