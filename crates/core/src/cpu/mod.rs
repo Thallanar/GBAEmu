@@ -113,7 +113,13 @@ impl Cpu {
             self.spsr[idx] = old_cpsr;
         }
         self.regs.set_lr(return_addr);
-        self.set_pc_arm(0x0000_0018);
+        // NÃO usar set_pc_arm aqui: ele marca `branched=true`, mas enter_irq roda
+        // FORA de um passo de instrução. Se `branched` ficasse true, o próximo
+        // step_arm (executando 0x18) pularia o recuo de PC e PERDERIA a instrução
+        // em 0x1C (o `mov r0, #0x04000000` do trampolim) → ldr pc lê de r0 errado
+        // → pula pra null → descarrilha. Setar o PC direto preserva o pipeline.
+        self.regs.set_pc(0x0000_0018);
+        self.branched = false;
     }
 
     fn step_arm(&mut self, bus: &mut Bus) -> u32 {
@@ -641,6 +647,29 @@ mod tests {
         assert_eq!(cpu.regs.pc(), 0x18);
         assert_eq!(cpu.cpsr.mode(), CpuMode::Irq);
         assert!(cpu.cpsr.irq_disabled(), "I bit deve ser setado ao entrar na exceção");
+    }
+
+    /// Regressão (bug do boot do Emerald): após entrar no IRQ (PC=0x18), o
+    /// trampolim da BIOS deve executar instrução-a-instrução SEM pular a de
+    /// 0x1C. O bug era `enter_irq` chamar `set_pc_arm`, deixando `branched=true`;
+    /// o step de 0x18 então pulava o recuo do PC e ia direto pra 0x20, perdendo
+    /// o `mov r0, #0x04000000` de 0x1C → `ldr pc` lia r0 errado → pulo pra null.
+    #[test]
+    fn irq_trampoline_does_not_skip_instruction_after_vector() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE320_F000]);
+        bus.io.ime = true;
+        bus.io.ie = 0x0008;
+        bus.io.iflag = 0x0008;
+        cpu.cpsr.set_flag(psr::PsrFlags::I, false);
+
+        cpu.step(&mut bus); // entra no IRQ
+        assert_eq!(cpu.regs.pc(), 0x18);
+        cpu.step(&mut bus); // executa 0x18 (stmfd) — não pode pular 0x1C
+        assert_eq!(
+            cpu.regs.pc(),
+            0x1C,
+            "o passo após o vetor de IRQ pulou a instrução em 0x1C"
+        );
     }
 
     #[test]
