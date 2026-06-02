@@ -183,10 +183,15 @@ auroragba/
 - [ ] Fase 6 — Shiny Hunter (esqueleto da crate criado)
 - [ ] Fase 7 — Android
 
+### Validação (jsmolka gba-tests)
+
+- [x] `arm.gba` — **All tests passed** (corrigidos SWP/SWPB, S-bit user-bank,
+  rlist vazia e base-na-lista no LDM/STM).
+- [x] `thumb.gba` — **All tests passed** (quirks de LDMIA/STMIA fmt15).
+- [x] `memory.gba` — **All tests passed** (quirk de STRB em memória de vídeo).
+
 ### Pendências conhecidas
 
-- **CPU**: jsmolka `arm.gba` reporta "Failed test 450" — há um caso de borda de
-  instrução ARM incorreto a investigar (correção da CPU, não da renderização).
 - **Formatação**: o repositório não passa por `cargo fmt` (commits anteriores ao
   HLE não foram formatados); arquivos novos/reescritos já estão fmt-clean.
 - Falta áudio (APU), janelas/blending/mosaic na PPU, DMA de som, e timing de
