@@ -110,7 +110,9 @@ pub fn read_mon(gba: &mut Gba, base: u32) -> Gen3Mon {
         *w = dec;
         sum = sum.wrapping_add(dec & 0xFFFF).wrapping_add(dec >> 16);
     }
-    let valid = (sum as u16) == stored_checksum;
+    // pid==0 ⇒ slot vazio (ex.: time sem Pokémon antes de escolher o inicial):
+    // não é um encontro real, mesmo que o checksum "bata" (0 == 0).
+    let valid = pid != 0 && (sum as u16) == stored_checksum;
 
     // A espécie é o 1º halfword da sub-struct Growth (tipo 0).
     let order = SUBSTRUCT_ORDER[(pid % 24) as usize];
@@ -148,6 +150,11 @@ pub struct Hunter {
     pub last_shiny_value: u16,
     /// Frames já gastos na tentativa em andamento (controle do `tick`).
     frames_this_attempt: u32,
+    /// Frames de "espera" no início da tentativa antes de começar a amassar A.
+    /// Varia por tentativa pra injetar entropia de timing — essencial no Emerald,
+    /// cujo RNG é determinístico (seed 0 no boot); sem isso, todo reset geraria
+    /// o mesmo PID.
+    entropy_delay: u32,
 }
 
 impl Hunter {
@@ -158,14 +165,24 @@ impl Hunter {
             last_pid: 0,
             last_shiny_value: 0xFFFF,
             frames_this_attempt: 0,
+            entropy_delay: 0,
         }
     }
 
+    /// Espera (em frames) a aplicar no início da próxima tentativa, derivada do
+    /// nº de tentativas via hash — pseudo-aleatória mas determinística/reproduzível.
+    /// Espalha o "frame de geração" do PID ao longo de ~5s pra variar a seed.
+    fn next_delay(&self) -> u32 {
+        (self.attempts.wrapping_mul(0x9E37_79B1) % 300) as u32
+    }
+
     /// Power-cycle do console (preserva o Flash). Volta o jogo à tela de título;
-    /// daí o `tick`/`advance_to_encounter` amassa A/Start até a batalha.
+    /// daí o `tick`/`advance_to_encounter` amassa A até a batalha. Sorteia uma
+    /// nova espera de entropia pra próxima tentativa render um PID diferente.
     pub fn soft_reset(&mut self, gba: &mut Gba) {
         gba.reset();
         self.frames_this_attempt = 0;
+        self.entropy_delay = self.next_delay();
     }
 
     /// Avança a emulação "amassando" A e Start (passa título → continuar →
@@ -180,16 +197,13 @@ impl Hunter {
     ) -> bool {
         let base = profile.target_base(target);
         for frame in 0..max_frames {
-            // Alterna A/Start a cada poucos frames pra passar telas diferentes.
+            // Tapa A (ver `tick`): cobre título → continuar → bag → diálogos.
             let press = (frame / 8).is_multiple_of(2);
             gba.bus.io.joypad.set_button(Button::A, press);
-            gba.bus.io.joypad.set_button(Button::Start, !press);
             gba.run_frame();
 
             if self.encounter_ready(gba, base, target) {
-                // Solta os botões antes de devolver o controle.
                 gba.bus.io.joypad.set_button(Button::A, false);
-                gba.bus.io.joypad.set_button(Button::Start, false);
                 return true;
             }
         }
@@ -261,15 +275,27 @@ impl Hunter {
         let base = profile.target_base(target);
 
         for _ in 0..batch {
-            let press = (self.frames_this_attempt / 8).is_multiple_of(2);
+            // Espera de entropia: idle no começo da tentativa pra deslocar o
+            // frame de geração do PID (ver `entropy_delay`).
+            if self.frames_this_attempt < self.entropy_delay {
+                gba.bus.io.joypad.set_button(Button::A, false);
+                gba.run_frame();
+                self.frames_this_attempt += 1;
+                continue;
+            }
+
+            // Tapa A (8 frames pressionado / 8 solto): confirma no título,
+            // escolhe "Continuar", abre a bag, seleciona/confirma o inicial e
+            // avança diálogos — tudo com A. Tap (não segurar) pra cada prompt
+            // registrar uma borda de tecla.
+            let phase = self.frames_this_attempt - self.entropy_delay;
+            let press = (phase / 8).is_multiple_of(2);
             gba.bus.io.joypad.set_button(Button::A, press);
-            gba.bus.io.joypad.set_button(Button::Start, !press);
             gba.run_frame();
             self.frames_this_attempt += 1;
 
             if self.encounter_ready(gba, base, target) {
                 gba.bus.io.joypad.set_button(Button::A, false);
-                gba.bus.io.joypad.set_button(Button::Start, false);
                 let result = self.check(gba, profile, target);
                 if result != CheckResult::Shiny {
                     self.soft_reset(gba);
@@ -359,6 +385,16 @@ mod tests {
         assert_eq!(mon.otid, 0xDEAD_BEEF);
         assert_eq!(mon.species, 384);
         assert!(mon.valid, "checksum deveria conferir");
+    }
+
+    #[test]
+    fn read_mon_empty_slot_is_invalid() {
+        // Slot zerado (time sem Pokémon): checksum 0 == 0 "bate", mas pid==0
+        // ⇒ tem que ser inválido pra não disparar falso encontro no inicial.
+        let mut gba = Gba::new();
+        let mon = read_mon(&mut gba, 0x0200_0200);
+        assert_eq!(mon.pid, 0);
+        assert!(!mon.valid);
     }
 
     #[test]
