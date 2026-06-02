@@ -42,6 +42,7 @@ impl Gba {
         let cycles = self.cpu.step(&mut self.bus);
 
         let timer_irqs = self.bus.io.timers.tick(cycles);
+        self.bus.apu.tick(cycles);
         // Borrows disjuntos: ppu, vram e palette são campos distintos do bus.
         let ppu_result = {
             let bus = &mut self.bus;

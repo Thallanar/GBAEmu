@@ -30,6 +30,7 @@ pub struct Bus {
     pub io: Io,
     pub dma: Dma,
     pub ppu: Ppu,
+    pub apu: crate::apu::Apu,
     pub palette: Box<[u8; 0x400]>, // 1 KB
     pub vram: Box<[u8; 0x18000]>,  // 96 KB
     pub oam: Box<[u8; 0x400]>,     // 1 KB
@@ -46,6 +47,7 @@ impl Bus {
             io: Io::new(),
             dma: Dma::new(),
             ppu: Ppu::new(),
+            apu: crate::apu::Apu::new(),
             palette: Box::new([0; 0x400]),
             vram: Box::new([0; 0x18000]),
             oam: Box::new([0; 0x400]),
@@ -67,6 +69,8 @@ impl Bus {
                     self.dma.read_u8(addr)
                 } else if addr < 0x0400_0060 {
                     self.ppu.read_u8(addr)
+                } else if addr < 0x0400_00B0 {
+                    self.apu.read_u8(addr) // registradores de som (0x60-0xAF)
                 } else {
                     self.io.read_u8(addr)
                 }
@@ -124,6 +128,8 @@ impl Bus {
                     }
                 } else if addr < 0x0400_0060 {
                     self.ppu.write_u8(addr, val);
+                } else if addr < 0x0400_00B0 {
+                    self.apu.write_u8(addr, val); // registradores de som (0x60-0xAF)
                 } else {
                     self.io.write_u8(addr, val);
                 }
