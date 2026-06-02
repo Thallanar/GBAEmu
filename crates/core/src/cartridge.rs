@@ -29,6 +29,8 @@ pub struct Cartridge {
     save_data: Vec<u8>,
     /// Estado volátil da máquina de comandos do Flash (ignorado nos outros tipos).
     flash: Flash,
+    /// GPIO + RTC do cartucho (presente em RSE; inofensivo nos demais).
+    pub gpio: crate::rtc::Gpio,
     /// Marcado a cada escrita; o frontend usa pra saber quando salvar em disco.
     pub dirty: bool,
 }

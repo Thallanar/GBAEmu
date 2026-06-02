@@ -75,8 +75,15 @@ impl Bus {
             0x6 => self.vram[vram_offset(addr)],
             0x7 => self.oam[(addr as usize) & 0x3FF],
             0x8..=0xD => {
-                let off = (addr as usize) & 0x01FF_FFFF;
-                self.cartridge.rom.get(off).copied().unwrap_or(0)
+                let off = addr & 0x01FF_FFFF;
+                // GPIO/RTC do cartucho (0x0C4..0x0C9): se em modo legível, devolve
+                // o registrador; senão cai na ROM (open bus).
+                if (crate::rtc::GPIO_DATA..=crate::rtc::GPIO_END).contains(&off) {
+                    if let Some(v) = self.cartridge.gpio.read(off) {
+                        return v;
+                    }
+                }
+                self.cartridge.rom.get(off as usize).copied().unwrap_or(0)
             }
             0xE | 0xF => self.cartridge.read_save_u8(addr),
             _ => 0, // open bus (placeholder)
@@ -144,7 +151,13 @@ impl Bus {
                 }
             }
             0x7 => { /* byte writes em OAM são ignorados */ }
-            0x8..=0xD => { /* ROM read-only (writes podem disparar EEPROM, ver Fase 4) */ }
+            0x8..=0xD => {
+                // ROM é read-only, exceto os registradores de GPIO/RTC do cartucho.
+                let off = addr & 0x01FF_FFFF;
+                if (crate::rtc::GPIO_DATA..=crate::rtc::GPIO_END).contains(&off) {
+                    self.cartridge.gpio.write(off, val);
+                }
+            }
             0xE | 0xF => self.cartridge.write_save_u8(addr, val),
             _ => {}
         }

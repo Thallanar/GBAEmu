@@ -13,6 +13,7 @@ pub mod gba;
 pub mod io;
 pub mod joypad;
 pub mod ppu;
+pub mod rtc;
 pub mod timer;
 
 pub use gba::Gba;
