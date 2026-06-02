@@ -238,22 +238,35 @@ impl eframe::App for AuroraApp {
             self.refresh_texture();
             ctx.request_repaint();
         } else if self.running {
-            // Modo jogo normal: 1 frame por update.
             self.poll_input(ctx);
-            self.gba.run_frame();
-            // Manda o áudio gerado neste frame para a placa de som.
-            if let Some(audio) = &mut self.audio {
-                let samples = self.gba.bus.apu.drain();
-                audio.push(&samples, auroragba_core::apu::OUTPUT_RATE);
-            } else {
-                self.gba.bus.apu.buffer.clear();
+            match &mut self.audio {
+                Some(audio) => {
+                    // Pacing pelo áudio: roda frames só até repor o buffer-alvo
+                    // (no máx. 4 por update, pra não travar se a UI ficar lenta).
+                    // Como o áudio é consumido em tempo real, isso ancora a
+                    // emulação ao tempo real e corrige a "aceleração".
+                    let target = audio.target();
+                    let mut ran = 0;
+                    while audio.queued() < target && ran < 4 {
+                        self.gba.run_frame();
+                        let samples = self.gba.bus.apu.drain();
+                        audio.push(&samples, auroragba_core::apu::OUTPUT_RATE);
+                        self.frame_count += 1;
+                        ran += 1;
+                    }
+                }
+                None => {
+                    // Sem áudio: 1 frame por update (sincroniza pelo vsync da UI).
+                    self.gba.run_frame();
+                    self.gba.bus.apu.buffer.clear();
+                    self.frame_count += 1;
+                }
             }
             self.refresh_texture();
             ctx.request_repaint();
 
             // Persiste o save no máximo ~1×/s (um save no jogo gera milhares de
             // escritas byte-a-byte no Flash; não faz sentido tocar o disco a cada).
-            self.frame_count += 1;
             if self.frame_count.is_multiple_of(60) {
                 self.flush_save();
             }

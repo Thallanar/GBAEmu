@@ -83,6 +83,17 @@ impl AudioOut {
         })
     }
 
+    /// Quantas amostras estão na fila para tocar (para pacing pelo áudio).
+    pub fn queued(&self) -> usize {
+        self.ring.lock().unwrap().len()
+    }
+
+    /// Nível-alvo de buffer (~67 ms): o frontend roda frames até atingi-lo,
+    /// sincronizando a emulação ao tempo real.
+    pub fn target(&self) -> usize {
+        (self.sample_rate as usize) * (self.channels as usize) / 15
+    }
+
     /// Recebe um lote de amostras do APU (i16 intercaladas L,R a `in_rate`),
     /// reamostra para a taxa do dispositivo (interpolação linear) e empurra no
     /// ring. Se o ring crescer demais (produtor mais rápido que o consumidor),
