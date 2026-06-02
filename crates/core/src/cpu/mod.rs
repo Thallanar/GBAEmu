@@ -418,6 +418,79 @@ mod tests {
         assert_eq!(cpu.regs.get(0), 0x0300_008C);
     }
 
+    /// LDM com lista vazia (quirk ARMv4): transfere R15 e ajusta Rn em 0x40.
+    /// LDMIA r0!, {} → 0xE8B0_0000
+    #[test]
+    fn ldm_empty_list_loads_pc_and_adds_0x40() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE8B0_0000]);
+        cpu.regs.set(0, 0x0300_0000);
+        bus.write_u32(0x0300_0000, 0x0800_1234); // destino do PC (alinhado em ARM)
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.pc(), 0x0800_1234, "R15 carregado do endereço base");
+        assert_eq!(cpu.regs.get(0), 0x0300_0040, "Rn += 0x40");
+    }
+
+    /// Quirk STM: base na lista, mas não é o menor registrador → grava o valor
+    /// já com writeback. STMDB r1!, {r0-r3} (STMFD) → 0xE921_000F.
+    #[test]
+    fn stm_base_in_list_not_lowest_stores_writeback() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE921_000F]);
+        cpu.regs.set(0, 0xA);
+        cpu.regs.set(1, 0x0300_0040); // base (também na lista, em r1)
+        cpu.regs.set(2, 0xC);
+        cpu.regs.set(3, 0xD);
+        cpu.step(&mut bus);
+        // STMFD com 4 regs: final = base - 0x10. r1 grava o valor final.
+        let final_base = 0x0300_0040u32 - 0x10;
+        assert_eq!(cpu.regs.get(1), final_base, "writeback de r1");
+        // Memória: r0..r3 nas posições crescentes a partir de final_base.
+        assert_eq!(bus.read_u32(final_base), 0xA, "r0 (menor) inalterado");
+        assert_eq!(bus.read_u32(final_base + 4), final_base, "r1 grava o valor com writeback");
+        assert_eq!(bus.read_u32(final_base + 8), 0xC);
+        assert_eq!(bus.read_u32(final_base + 12), 0xD);
+    }
+
+    // ──────── Single Data Swap ────────
+
+    /// SWP r2, r1, [r0] — troca word: r2 = [r0]; [r0] = r1.
+    /// Encoding: cond=E, 00010 B=0 00, Rn=0, Rd=2, 0000 1001, Rm=1 → 0xE1002091
+    #[test]
+    fn swp_word_exchanges() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE100_2091]);
+        cpu.regs.set(0, 0x0300_0040); // endereço (IWRAM)
+        cpu.regs.set(1, 0xCAFE_BABE); // valor a gravar
+        bus.write_u32(0x0300_0040, 0x1234_5678); // valor antigo na memória
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(2), 0x1234_5678, "Rd recebe o valor antigo");
+        assert_eq!(bus.read_u32(0x0300_0040), 0xCAFE_BABE, "memória recebe Rm");
+    }
+
+    /// SWPB r2, r1, [r0] — troca byte.
+    /// Encoding: cond=E, 00010 B=1 00, Rn=0, Rd=2, 0000 1001, Rm=1 → 0xE1402091
+    #[test]
+    fn swpb_byte_exchanges() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE140_2091]);
+        cpu.regs.set(0, 0x0300_0050);
+        cpu.regs.set(1, 0xAB);
+        bus.write_u8(0x0300_0050, 0xCD);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(2), 0xCD, "Rd recebe o byte antigo");
+        assert_eq!(bus.read_u8(0x0300_0050), 0xAB, "memória recebe o byte de Rm");
+    }
+
+    /// SWP com Rd == Rm: troca registrador com memória de forma atômica.
+    /// SWP r1, r1, [r0] → 0xE1001091
+    #[test]
+    fn swp_same_reg_swaps_with_memory() {
+        let (mut cpu, mut bus) = make_gba_with_rom(&[0xE100_1091]);
+        cpu.regs.set(0, 0x0300_0060);
+        cpu.regs.set(1, 0x1111_2222);
+        bus.write_u32(0x0300_0060, 0xAAAA_BBBB);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.regs.get(1), 0xAAAA_BBBB);
+        assert_eq!(bus.read_u32(0x0300_0060), 0x1111_2222);
+    }
+
     // ──────── SWI ────────
 
     /// SWI #0 com BIOS oficial → entra em Supervisor, PC=0x08, LR_svc = exec_pc+4.

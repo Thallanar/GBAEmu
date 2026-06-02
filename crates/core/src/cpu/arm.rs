@@ -104,6 +104,15 @@ fn exec_group_000(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
         return;
     }
 
+    // Single Data Swap (SWP/SWPB): bits[27:23]=00010, bits[21:20]=00,
+    // bits[11:8]=0000, bits[7:4]=1001 (bit 22 = B fica de fora da máscara).
+    // Precisa vir ANTES do fallback de PSR/data-processing, pois o opcode
+    // efetivo (1000, S=0) colide com o padrão de MRS/MSR.
+    if (instr & 0x0FB0_0FF0) == 0x0100_0090 {
+        exec_swap(cpu, bus, instr);
+        return;
+    }
+
     // Halfword/signed-byte transfer: bit 7 e bit 4 ligados, com bits[6:5] != 00.
     // (bits[6:5]==00 com bit 7=1 já foi capturado pelo multiply acima.)
     if !imm_operand && (instr & 0x90) == 0x90 {
@@ -531,15 +540,17 @@ fn exec_block_data_transfer(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
     let writeback = (instr & (1 << 21)) != 0;
     let load = (instr & (1 << 20)) != 0;
     let rn = ((instr >> 16) & 0xF) as usize;
-    let list = (instr & 0xFFFF) as u16;
+    let raw_list = (instr & 0xFFFF) as u16;
 
-    if list == 0 {
-        // Edge case real: lista vazia transfere R15 e adianta Rn em 0x40.
-        // Para simplicidade, ignoramos (não ocorre em código de compilador).
-        return;
-    }
+    // Quirk ARMv4: lista vazia transfere apenas R15 e ajusta Rn em ±0x40
+    // (como se houvesse 16 registradores). A lógica de endereço abaixo, com
+    // count=16, posiciona o R15 no slot inicial corretamente.
+    let (list, count) = if raw_list == 0 {
+        (0x8000u16, 16u32)
+    } else {
+        (raw_list, raw_list.count_ones())
+    };
 
-    let count = list.count_ones();
     let base = cpu.regs.get(rn);
     let final_addr = if up {
         base.wrapping_add(count * 4)
@@ -561,9 +572,23 @@ fn exec_block_data_transfer(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
     //   DB (U=0,P=1): start = final+4 ... mas DB também é "start = base - 4*count + 4 = final + 4"
     // A lógica acima cobre todos.
 
-    // S bit em LDM com R15 na lista: restaura CPSR ← SPSR.
-    // S bit em LDM/STM sem R15: força acesso ao banco user (não implementado aqui).
-    let restore_cpsr = load && psr_or_user && (list & 0x8000) != 0;
+    // Semântica do bit S:
+    //   - LDM com R15 na lista: restaura CPSR ← SPSR (retorno de exceção).
+    //   - LDM/STM sem R15: força transferência do banco de registradores User.
+    let r15_in_list = (list & 0x8000) != 0;
+    let restore_cpsr = load && psr_or_user && r15_in_list;
+    let force_user = psr_or_user && !r15_in_list;
+
+    // Para o banco User, trocamos temporariamente para o modo System (que
+    // compartilha R8..R14 com User). O endereço e o writeback continuam usando
+    // o Rn do modo atual (calculados antes/depois da troca).
+    let original_mode = cpu.cpsr.mode();
+    if force_user {
+        cpu.regs.switch_mode(CpuMode::System);
+    }
+
+    // Menor registrador da lista (para o quirk de STM com o base na lista).
+    let lowest = list.trailing_zeros() as usize;
 
     for i in 0..16 {
         if list & (1 << i) == 0 {
@@ -580,10 +605,18 @@ fn exec_block_data_transfer(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
             let mut v = cpu.regs.get(i);
             if i == 15 {
                 v = v.wrapping_add(4); // PC+12
+            } else if i == rn && writeback && i != lowest {
+                // Quirk STM: o base está na lista mas não é o menor registrador
+                // → grava-se o valor já com writeback, não o original.
+                v = final_addr;
             }
             bus.write_u32(addr, v);
         }
         addr = addr.wrapping_add(4);
+    }
+
+    if force_user {
+        cpu.regs.switch_mode(original_mode);
     }
 
     if writeback && !(load && (list & (1 << rn)) != 0) {
@@ -595,6 +628,32 @@ fn exec_block_data_transfer(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
             cpu.cpsr = cpu.spsr[idx];
             cpu.regs.switch_mode(cpu.cpsr.mode());
         }
+    }
+}
+
+// ────────────────────── Single Data Swap ──────────────────────
+
+/// SWP / SWPB — troca atômica entre registrador e memória.
+/// Lê [Rn] para Rd e grava Rm em [Rn] (na ordem: read-old, write-new).
+fn exec_swap(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
+    let byte = instr & (1 << 22) != 0;
+    let rn = ((instr >> 16) & 0xF) as usize;
+    let rd = ((instr >> 12) & 0xF) as usize;
+    let rm = (instr & 0xF) as usize;
+
+    let addr = cpu.regs.get(rn);
+    let store = cpu.regs.get(rm);
+
+    if byte {
+        let old = bus.read_u8(addr) as u32;
+        bus.write_u8(addr, store as u8);
+        cpu.regs.set(rd, old);
+    } else {
+        // Leitura de word com o quirk de rotação do ARMv4 em endereço desalinhado.
+        let aligned = addr & !0x3;
+        let old = bus.read_u32(aligned).rotate_right((addr & 0x3) * 8);
+        bus.write_u32(aligned, store);
+        cpu.regs.set(rd, old);
     }
 }
 
