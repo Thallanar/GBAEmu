@@ -2,68 +2,305 @@
 //!
 //! Suporte inicial: Gen 3 (Ruby/Sapphire/Emerald, FireRed/LeafGreen).
 //!
-//! Estratégia:
-//!   - Cada jogo implementa [`ShinyTarget`], descrevendo onde encontrar o PID
-//!     do Pokémon na RAM e a sequência de inputs para o reset.
-//!   - O [`Hunter`] dirige o loop: roda emulação, lê PID, checa fórmula shiny,
-//!     soft-reset e repete até encontrar.
+//! Arquitetura (data-driven):
+//!   - [`games::GameProfile`] descreve, em dados puros, onde cada jogo guarda os
+//!     Pokémon na RAM. O emulador identifica o jogo pelo header e carrega o
+//!     perfil ([`games::detect`]).
+//!   - O [`Hunter`] dirige o loop genérico: reset → avança até o encontro → lê
+//!     o PID do slot do alvo → checa a fórmula shiny → repete se não for.
+//!
+//! A shininess depende do **TID/SID do jogador** (constante do save), não do
+//! Pokémon: por isso lemos o TID/SID do líder do time do jogador e o PID do
+//! slot específico do alvo. Não fazemos varredura — endereçamos o slot exato,
+//! então o time do jogador estar shiny nunca confunde a leitura do selvagem.
 
+use auroragba_core::joypad::Button;
 use auroragba_core::Gba;
 
 pub mod games;
+
+use games::{GameProfile, HuntMethod, TargetDef};
 
 /// Fórmula shiny da Gen 3.
 /// Shiny se `(PID_hi ^ PID_lo ^ TID ^ SID) < 8`.
 #[inline]
 pub fn is_shiny_gen3(pid: u32, tid: u16, sid: u16) -> bool {
+    shiny_value(pid, tid, sid) < 8
+}
+
+/// Valor bruto da fórmula shiny (`< 8` ⇒ shiny). Útil pra UI ("passou perto").
+#[inline]
+pub fn shiny_value(pid: u32, tid: u16, sid: u16) -> u16 {
     let pid_hi = (pid >> 16) as u16;
     let pid_lo = pid as u16;
-    (pid_hi ^ pid_lo ^ tid ^ sid) < 8
+    pid_hi ^ pid_lo ^ tid ^ sid
 }
 
-/// Descreve um alvo de caça em um jogo específico.
-pub trait ShinyTarget {
-    /// Nome do jogo + alvo (ex.: "Ruby / Latias").
-    fn name(&self) -> &str;
+// ───────────────────────── leitura de Pokémon (Gen 3) ───────────────────────
 
-    /// Endereço na RAM onde o PID do Pokémon-alvo aparece.
-    fn pid_address(&self) -> u32;
+/// Ordem das 4 sub-structs (Growth=0, Attacks=1, EVs=2, Misc=3) conforme
+/// `PID % 24`. Cada linha lista os tipos na ordem em que aparecem na memória.
+const SUBSTRUCT_ORDER: [[u8; 4]; 24] = [
+    [0, 1, 2, 3],
+    [0, 1, 3, 2],
+    [0, 2, 1, 3],
+    [0, 2, 3, 1],
+    [0, 3, 1, 2],
+    [0, 3, 2, 1],
+    [1, 0, 2, 3],
+    [1, 0, 3, 2],
+    [1, 2, 0, 3],
+    [1, 2, 3, 0],
+    [1, 3, 0, 2],
+    [1, 3, 2, 0],
+    [2, 0, 1, 3],
+    [2, 0, 3, 1],
+    [2, 1, 0, 3],
+    [2, 1, 3, 0],
+    [2, 3, 0, 1],
+    [2, 3, 1, 0],
+    [3, 0, 1, 2],
+    [3, 0, 2, 1],
+    [3, 1, 0, 2],
+    [3, 1, 2, 0],
+    [3, 2, 0, 1],
+    [3, 2, 1, 0],
+];
 
-    /// TID/SID do save (lido uma vez no início).
-    fn trainer_ids(&self, gba: &mut Gba) -> (u16, u16);
-
-    /// Executa a sequência de inputs para chegar ao encontro
-    /// (soft-reset, navegação de menus, etc.).
-    fn run_encounter(&self, gba: &mut Gba);
+/// Dados de um Pokémon Gen 3 lidos da RAM.
+#[derive(Debug, Clone, Copy)]
+pub struct Gen3Mon {
+    /// Personality value (não-criptografado, offset 0x00).
+    pub pid: u32,
+    /// OT ID: TID nos 16 bits baixos, SID nos altos (offset 0x04).
+    pub otid: u32,
+    /// Espécie (índice interno), lida da sub-struct Growth descriptografada.
+    pub species: u16,
+    /// `true` se o checksum confere — ou seja, os dados são reais e frescos
+    /// (não lixo de uma tentativa anterior nem memória zerada).
+    pub valid: bool,
 }
 
-/// Driver principal: roda o loop de caça.
+impl Gen3Mon {
+    pub fn tid(&self) -> u16 {
+        self.otid as u16
+    }
+    pub fn sid(&self) -> u16 {
+        (self.otid >> 16) as u16
+    }
+}
+
+/// Lê e descriptografa o Pokémon no endereço-base dado.
+///
+/// PID e OT ID ficam em claro nos primeiros 8 bytes. As 48 bytes seguintes são
+/// 4 sub-structs de 12 bytes, cada palavra XOR com `key = PID ^ OTID`; a ordem
+/// é dada por `PID % 24`. A espécie é o primeiro campo da sub-struct Growth.
+pub fn read_mon(gba: &mut Gba, base: u32) -> Gen3Mon {
+    let pid = gba.bus.read_u32(base);
+    let otid = gba.bus.read_u32(base + 0x04);
+    let stored_checksum = gba.bus.read_u16(base + 0x1C);
+    let key = pid ^ otid;
+
+    // Descriptografa as 12 palavras (48 bytes) e acumula o checksum.
+    let mut words = [0u32; 12];
+    let mut sum: u32 = 0;
+    for (i, w) in words.iter_mut().enumerate() {
+        let enc = gba.bus.read_u32(base + 0x20 + (i as u32) * 4);
+        let dec = enc ^ key;
+        *w = dec;
+        sum = sum.wrapping_add(dec & 0xFFFF).wrapping_add(dec >> 16);
+    }
+    let valid = (sum as u16) == stored_checksum;
+
+    // A espécie é o 1º halfword da sub-struct Growth (tipo 0).
+    let order = SUBSTRUCT_ORDER[(pid % 24) as usize];
+    let growth_slot = order.iter().position(|&t| t == 0).unwrap();
+    let species = (words[growth_slot * 3] & 0xFFFF) as u16;
+
+    Gen3Mon {
+        pid,
+        otid,
+        species,
+        valid,
+    }
+}
+
+// ───────────────────────────── Hunter (loop) ────────────────────────────────
+
+/// Resultado de uma checagem de encontro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckResult {
+    /// O encontro ainda não está pronto (dados inválidos / espécie errada).
+    NotReady,
+    /// Encontro pronto, mas não é shiny.
+    NotShiny,
+    /// ✨ Shiny!
+    Shiny,
+}
+
+/// Driver da caça. Mantém o estado entre tentativas para a UI exibir.
 pub struct Hunter {
     pub attempts: u64,
     pub found: bool,
+    /// PID lido na última checagem (pra UI/log).
+    pub last_pid: u32,
+    /// Valor bruto da fórmula na última checagem (`< 8` ⇒ shiny).
+    pub last_shiny_value: u16,
+    /// Frames já gastos na tentativa em andamento (controle do `tick`).
+    frames_this_attempt: u32,
 }
 
 impl Hunter {
     pub fn new() -> Self {
-        Self { attempts: 0, found: false }
+        Self {
+            attempts: 0,
+            found: false,
+            last_pid: 0,
+            last_shiny_value: 0xFFFF,
+            frames_this_attempt: 0,
+        }
     }
 
-    /// Roda uma tentativa. Retorna `true` se encontrou shiny.
-    pub fn try_once(&mut self, gba: &mut Gba, target: &dyn ShinyTarget) -> bool {
-        self.attempts += 1;
-        target.run_encounter(gba);
+    /// Power-cycle do console (preserva o Flash). Volta o jogo à tela de título;
+    /// daí o `tick`/`advance_to_encounter` amassa A/Start até a batalha.
+    pub fn soft_reset(&mut self, gba: &mut Gba) {
+        gba.reset();
+        self.frames_this_attempt = 0;
+    }
 
-        let (tid, sid) = target.trainer_ids(gba);
-        let pid_addr = target.pid_address();
-        let pid = read_u32(gba, pid_addr);
+    /// Avança a emulação "amassando" A e Start (passa título → continuar →
+    /// diálogos → batalha) até o alvo carregar válido na RAM, ou estourar
+    /// `max_frames`. Retorna `true` se o encontro ficou pronto.
+    pub fn advance_to_encounter(
+        &mut self,
+        gba: &mut Gba,
+        profile: &GameProfile,
+        target: &TargetDef,
+        max_frames: u32,
+    ) -> bool {
+        let base = profile.target_base(target);
+        for frame in 0..max_frames {
+            // Alterna A/Start a cada poucos frames pra passar telas diferentes.
+            let press = (frame / 8).is_multiple_of(2);
+            gba.bus.io.joypad.set_button(Button::A, press);
+            gba.bus.io.joypad.set_button(Button::Start, !press);
+            gba.run_frame();
 
-        if is_shiny_gen3(pid, tid, sid) {
-            self.found = true;
-            log::info!("✨ SHINY encontrado após {} tentativas! PID={:08X}", self.attempts, pid);
-            true
-        } else {
-            false
+            if self.encounter_ready(gba, base, target) {
+                // Solta os botões antes de devolver o controle.
+                gba.bus.io.joypad.set_button(Button::A, false);
+                gba.bus.io.joypad.set_button(Button::Start, false);
+                return true;
+            }
         }
+        false
+    }
+
+    /// O encontro está pronto? Exige checksum válido e, se o alvo especificar
+    /// uma espécie, que ela bata.
+    fn encounter_ready(&self, gba: &mut Gba, base: u32, target: &TargetDef) -> bool {
+        let mon = read_mon(gba, base);
+        mon.valid && (target.species == 0 || mon.species == target.species)
+    }
+
+    /// Checa o slot do alvo contra a fórmula shiny, usando o TID/SID do líder do
+    /// time do jogador. Atualiza o estado pra UI.
+    pub fn check(
+        &mut self,
+        gba: &mut Gba,
+        profile: &GameProfile,
+        target: &TargetDef,
+    ) -> CheckResult {
+        let base = profile.target_base(target);
+        let target_mon = read_mon(gba, base);
+        if !target_mon.valid {
+            return CheckResult::NotReady;
+        }
+        // Encontro real → conta como uma tentativa.
+        self.attempts += 1;
+
+        // TID/SID do JOGADOR vêm do OT ID do líder do seu time.
+        let player = read_mon(gba, profile.player_party);
+        let (tid, sid) = (player.tid(), player.sid());
+
+        self.last_pid = target_mon.pid;
+        self.last_shiny_value = shiny_value(target_mon.pid, tid, sid);
+
+        if self.last_shiny_value < 8 {
+            self.found = true;
+            log::info!(
+                "✨ SHINY {} após {} tentativas! PID={:08X}",
+                target.name,
+                self.attempts,
+                target_mon.pid
+            );
+            CheckResult::Shiny
+        } else {
+            CheckResult::NotShiny
+        }
+    }
+
+    /// Passo **não-bloqueante** da caça, pra rodar 1×/update da UI sem travá-la.
+    ///
+    /// Avança até `batch` frames amassando A/Start. Quando o encontro carrega,
+    /// checa shiny: se for, marca `found` e para (a UI pausa na tela do shiny);
+    /// se não, faz soft-reset e a próxima chamada recomeça. Se a tentativa
+    /// passar de `attempt_timeout` frames sem chegar ao encontro, reseta também
+    /// (evita travar numa tela inesperada).
+    pub fn tick(
+        &mut self,
+        gba: &mut Gba,
+        profile: &GameProfile,
+        target: &TargetDef,
+        batch: u32,
+        attempt_timeout: u32,
+    ) -> CheckResult {
+        if self.found {
+            return CheckResult::Shiny;
+        }
+        let base = profile.target_base(target);
+
+        for _ in 0..batch {
+            let press = (self.frames_this_attempt / 8).is_multiple_of(2);
+            gba.bus.io.joypad.set_button(Button::A, press);
+            gba.bus.io.joypad.set_button(Button::Start, !press);
+            gba.run_frame();
+            self.frames_this_attempt += 1;
+
+            if self.encounter_ready(gba, base, target) {
+                gba.bus.io.joypad.set_button(Button::A, false);
+                gba.bus.io.joypad.set_button(Button::Start, false);
+                let result = self.check(gba, profile, target);
+                if result != CheckResult::Shiny {
+                    self.soft_reset(gba);
+                }
+                return result;
+            }
+
+            if self.frames_this_attempt >= attempt_timeout {
+                self.soft_reset(gba);
+                return CheckResult::NotReady;
+            }
+        }
+        CheckResult::NotReady
+    }
+
+    /// Uma tentativa completa (bloqueante): reset → avança → checa.
+    /// Usada em testes/headless; a UI roda os passos separados pra não travar.
+    pub fn try_once(
+        &mut self,
+        gba: &mut Gba,
+        profile: &GameProfile,
+        target: &TargetDef,
+    ) -> CheckResult {
+        // Lendários precisam de soft-reset; outros métodos virão depois.
+        if target.method == HuntMethod::SoftResetLegendary {
+            self.soft_reset(gba);
+        }
+        if !self.advance_to_encounter(gba, profile, target, 60 * 60) {
+            return CheckResult::NotReady;
+        }
+        self.check(gba, profile, target)
     }
 }
 
@@ -73,19 +310,110 @@ impl Default for Hunter {
     }
 }
 
-fn read_u32(gba: &mut Gba, addr: u32) -> u32 {
-    gba.bus.read_u32(addr)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use games::{Slot, TargetDef};
 
     #[test]
     fn shiny_formula_known_values() {
-        // PID=0x00000000, TID=0, SID=0 → XOR=0 → shiny.
         assert!(is_shiny_gen3(0, 0, 0));
-        // Caso obviamente não-shiny.
         assert!(!is_shiny_gen3(0xABCD_1234, 0x1111, 0x2222));
+    }
+
+    /// Escreve um Pokémon Gen 3 sintético na RAM (EWRAM) pra testar a leitura.
+    /// Faz o caminho inverso da descriptografia: cifra a sub-struct Growth com
+    /// a espécie e calcula o checksum correto.
+    fn write_synthetic_mon(gba: &mut Gba, base: u32, pid: u32, otid: u32, species: u16) {
+        gba.bus.write_u32(base, pid);
+        gba.bus.write_u32(base + 0x04, otid);
+
+        let key = pid ^ otid;
+        // Monta 12 palavras descriptografadas; só Growth[0] (espécie) é não-zero.
+        let mut words = [0u32; 12];
+        let order = SUBSTRUCT_ORDER[(pid % 24) as usize];
+        let growth_slot = order.iter().position(|&t| t == 0).unwrap();
+        words[growth_slot * 3] = species as u32;
+
+        // Checksum = soma dos 24 halfwords das palavras em claro.
+        let mut sum: u32 = 0;
+        for w in words {
+            sum = sum.wrapping_add(w & 0xFFFF).wrapping_add(w >> 16);
+        }
+        gba.bus.write_u16(base + 0x1C, sum as u16);
+
+        // Grava as palavras cifradas (XOR key).
+        for (i, w) in words.iter().enumerate() {
+            gba.bus.write_u32(base + 0x20 + (i as u32) * 4, w ^ key);
+        }
+    }
+
+    #[test]
+    fn read_mon_decrypts_species_and_validates() {
+        let mut gba = Gba::new();
+        let base = 0x0200_0000; // EWRAM
+        write_synthetic_mon(&mut gba, base, 0x1234_5678, 0xDEAD_BEEF, 384);
+
+        let mon = read_mon(&mut gba, base);
+        assert_eq!(mon.pid, 0x1234_5678);
+        assert_eq!(mon.otid, 0xDEAD_BEEF);
+        assert_eq!(mon.species, 384);
+        assert!(mon.valid, "checksum deveria conferir");
+    }
+
+    #[test]
+    fn read_mon_flags_garbage_as_invalid() {
+        let mut gba = Gba::new();
+        let base = 0x0200_0100;
+        // Sem escrever nada coerente: checksum não vai bater.
+        gba.bus.write_u32(base, 0x1111_1111);
+        gba.bus.write_u16(base + 0x1C, 0x9999);
+        let mon = read_mon(&mut gba, base);
+        assert!(!mon.valid);
+    }
+
+    #[test]
+    fn check_detects_shiny_from_player_ids() {
+        let mut gba = Gba::new();
+        // Perfil sintético apontando pra dois cantos da EWRAM.
+        let profile = GameProfile {
+            code: "TEST",
+            name: "test",
+            player_party: 0x0200_0000,
+            enemy_party: 0x0200_1000,
+            targets: &[],
+        };
+        let target = TargetDef {
+            name: "alvo",
+            species: 0,
+            slot: Slot::Enemy,
+            method: HuntMethod::SoftResetLegendary,
+        };
+
+        // Jogador com TID=0x1111, SID=0x2222 (OTID = SID<<16 | TID).
+        let otid = 0x2222_1111;
+        write_synthetic_mon(&mut gba, profile.player_party, 0xAAAA_BBBB, otid, 1);
+
+        // PID do alvo escolhido pra dar shiny: (PIDhi^PIDlo^TID^SID) < 8.
+        // Com TID^SID = 0x1111^0x2222 = 0x3333, escolho PID tal que
+        // PIDhi^PIDlo == 0x3333 → resultado 0 (shiny).
+        let pid = 0x0000_3333; // hi=0x0000, lo=0x3333 → 0x3333
+        write_synthetic_mon(&mut gba, profile.enemy_party, pid, otid, 100);
+
+        let mut hunter = Hunter::new();
+        assert_eq!(
+            hunter.check(&mut gba, &profile, &target),
+            CheckResult::Shiny
+        );
+        assert!(hunter.found);
+        assert_eq!(hunter.last_pid, pid);
+
+        // Um PID claramente não-shiny.
+        write_synthetic_mon(&mut gba, profile.enemy_party, 0x1234_5678, otid, 100);
+        let mut hunter2 = Hunter::new();
+        assert_eq!(
+            hunter2.check(&mut gba, &profile, &target),
+            CheckResult::NotShiny
+        );
     }
 }

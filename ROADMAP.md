@@ -120,12 +120,18 @@ auroragba/
 
 ### Fase 6 — 🌟 Shiny Hunter Mode (3–5 semanas)
 
-- [ ] Banco de dados por jogo (Gen 3: Ruby/Sapphire/Emerald/FireRed/LeafGreen)
-- [ ] Método: soft reset hunting (lendários, starters, fósseis)
-- [ ] Método: random encounters (detecção de tela de batalha + leitura de PID)
-- [ ] Detector shiny: `(PID ^ TID ^ SID ^ (PID>>16)) < 8`
-- [ ] Automação: input scripting + save state + loop
-- [ ] UI: contador de resets, ETA, log, notificação ao encontrar
+- [X] Banco de dados por jogo (data-driven, casado pelo game code do header;
+      Emerald semeado, fácil estender)
+- [X] Leitura/descriptografia de Pokémon Gen 3 (PID/OTID/espécie + validação por
+      checksum)
+- [X] Detector shiny: `(PID_hi ^ PID_lo ^ TID ^ SID) < 8`
+- [X] Loop de soft reset hunting (power-cycle preservando Flash + amassar
+      A/Start até o encontro) — `Hunter::tick` não-bloqueante
+- [X] UI: seletor de alvo, contador, último PID + valor, banner ao encontrar
+- [ ] Confirmar endereços de RAM por versão contra ROM real + ajustar roteiro
+      de inputs
+- [ ] Método: starters (navegação de menu no laboratório)
+- [ ] Método: random encounters (detecção de tela de batalha)
 - [ ] (Opcional avançado) RNG manipulation
 
 ### Fase 7 — Port Android (4–6 semanas)
@@ -200,8 +206,9 @@ auroragba/
 
 - [~] Fase 4 — saves: SRAM + Flash 64K/128K funcionando + persistência `.sav`;
   EEPROM e save states ainda pendentes
-- [ ] Fase 6 — Shiny Hunter (esqueleto da crate criado; agora desbloqueado pelos
-  saves de Flash)
+- [~] Fase 6 — Shiny Hunter: banco de perfis data-driven + leitura/descriptografia
+  Gen 3 + loop de soft-reset + UI funcionando. Falta confirmar endereços por
+  versão contra ROM real e os métodos de starter / random encounter.
 - [ ] Fase 7 — Android
 
 ### Validação (jsmolka gba-tests)

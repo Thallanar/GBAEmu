@@ -34,25 +34,33 @@ A=L, S=R.
 
 ## Próximos passos (em ordem sugerida)
 
-### 1. 🌟 Shiny Hunter Mode (RECOMENDADO atacar primeiro)
-É o diferencial do projeto e **não depende de som** — só de CPU+memória, que já
-estão validados. **Agora desbloqueado**: o Flash (SRAM/Flash 64K/128K) já funciona,
-então o jogo consegue carregar o save na frente do lendário e o soft-reset
-preserva o backup do cartucho. A crate `crates/shiny/` já tem o esqueleto.
+### 1. 🌟 Shiny Hunter Mode — ✅ esqueleto funcional, falta validar com ROM real
+Arquitetura **data-driven**: o emulador identifica o jogo pelo game code do
+header (`cartridge.game_code()`) e carrega um `GameProfile` de `crates/shiny/
+src/games.rs`. Adicionar um jogo = uma entrada na tabela, sem mexer na lógica.
 
-O que falta:
-- [ ] Definir os `ShinyTarget` concretos (RSE, FRLG): endereços de PID/TID/SID
-      na RAM, fórmula `(PID_hi ^ PID_lo ^ TID ^ SID) < 8` (já implementada em
-      `is_shiny_gen3`).
-- [ ] Loop de automação: soft-reset (SWI 0x00 já existe) → avançar até o encontro
-      → ler PID na RAM → checar shiny → repetir se não for.
-- [ ] Automatizar input (injetar botões via `joypad.set_button`) para passar
-      diálogos/menus até o encontro.
-- [ ] Detecção de "encontro pronto" (quando o PID já está populado na RAM).
-- [ ] Integrar na UI desktop (menu "Shiny Hunter": escolher jogo-alvo, start/stop,
-      contador de tentativas, parar ao achar shiny).
-- [ ] **Precisa de uma ROM de Pokémon Gen 3** (o usuário fornece) para testar e
-      descobrir/confirmar os endereços de RAM.
+Já feito:
+- [X] `read_mon()`: lê/descriptografa Pokémon Gen 3 (PID/OTID/espécie, valida por
+      checksum). Chave `PID^OTID`, ordem das sub-structs por `PID%24`.
+- [X] Detector shiny `is_shiny_gen3` / `shiny_value`.
+- [X] `Hunter::tick()` não-bloqueante: amassa A/Start → detecta encontro pronto
+      (checksum válido + espécie) → checa shiny → soft-reset se não for.
+- [X] `Gba::reset()`: power-cycle preservando o Flash (o save sobrevive).
+- [X] UI no desktop: menu Shiny Hunter (seletor de alvo, iniciar/parar, contador,
+      último PID + valor, banner ao achar; pausa na tela do shiny).
+- [X] Emerald semeado (Rayquaza/Groudon/Kyogre).
+
+O que falta (precisa de **ROM de Pokémon Gen 3** do usuário):
+- [ ] **Confirmar os endereços** `gPlayerParty`/`gEnemyParty` por versão. Se
+      errados, `read_mon` lê lixo e a caça nunca "encontra" (o `valid` por
+      checksum protege contra falso-positivo).
+- [ ] Ajustar o roteiro de inputs (timing/menus reais).
+- [ ] Preencher o índice **interno** de espécie nos `TargetDef` (Hoenn difere do
+      dex nacional) p/ verificação mais estrita.
+- [ ] Métodos: starters (menu do laboratório) e random encounters.
+
+Como testar: salvar na frente do lendário → menu Shiny Hunter → escolher alvo →
+Iniciar. Contador não sobe ⇒ endereços a corrigir.
 
 ### 2. APU — Som (deixado para depois; CONVERSADO em 2026-06-01)
 Bloco grande, sensível a timing, **não ajuda o Shiny Hunter**. Duas metades:

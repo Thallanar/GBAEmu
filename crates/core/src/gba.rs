@@ -22,6 +22,20 @@ impl Gba {
         self.bus.cartridge.load(rom);
     }
 
+    /// "Power-cycle": reinicia CPU, bus e periféricos do zero, mas **preserva o
+    /// cartucho** (ROM + Flash). Equivale a desligar e ligar o console — o save
+    /// na memória de backup sobrevive. É o primitivo usado pelo Shiny Hunter
+    /// para o soft-reset entre tentativas.
+    pub fn reset(&mut self) {
+        // Tira o cartucho fora antes de recriar o bus, depois devolve.
+        let cartridge = std::mem::take(&mut self.bus.cartridge);
+        self.bus = Bus::new();
+        self.bus.cartridge = cartridge;
+        self.cpu = Cpu::new();
+        self.cpu.setup_direct_boot();
+        self.cpu.regs.set_pc(0x0800_0000);
+    }
+
     /// Executa uma única instrução. Retorna ciclos consumidos.
     /// Após cada instrução, avança timers + PPU e propaga IRQs.
     pub fn step(&mut self) -> u32 {
