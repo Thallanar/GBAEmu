@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 
+use auroragba_core::joypad::Button;
 use auroragba_core::Gba;
 
 fn main() -> std::io::Result<()> {
@@ -81,10 +82,59 @@ fn main() -> std::io::Result<()> {
     }
 
     println!("Rodando até {} instruções...", cycles);
+    // AURORA_MASH: tapeia A pra avançar telas (bateria/intro/menus) e chegar
+    // num frame interessante pra dump.
+    let mash = std::env::var("AURORA_MASH").is_ok();
     let mut steps = 0u64;
     while steps < cycles {
+        if mash {
+            gba.bus
+                .io
+                .joypad
+                .set_button(Button::A, (steps / 8).is_multiple_of(2));
+        }
         gba.step();
         steps += 1;
+    }
+
+    // AURORA_VDUMP: despeja VRAM/paleta/OAM + registradores de BG pra análise.
+    if let Ok(dir) = std::env::var("AURORA_VDUMP") {
+        std::fs::write(format!("{dir}/vram.bin"), *gba.bus.vram)?;
+        std::fs::write(format!("{dir}/pal.bin"), *gba.bus.palette)?;
+        std::fs::write(format!("{dir}/oam.bin"), *gba.bus.oam)?;
+        let p = &gba.bus.ppu;
+        println!("DISPCNT={:04X}", p.dispcnt);
+        for b in 0..4 {
+            println!(
+                "BG{b}: cnt={:04X} hofs={} vofs={}",
+                p.bgcnt[b], p.bg_hofs[b], p.bg_vofs[b]
+            );
+        }
+        println!("VRAM/pal/oam salvos em {dir}");
+        return Ok(());
+    }
+
+    // Dump determinístico: se AURORA_DUMP setado, despeja o frame EXATAMENTE
+    // aqui (no fim do loop principal) e sai, sem rodar o diagnóstico que mexeria
+    // na tela.
+    if let Ok(out) = std::env::var("AURORA_DUMP") {
+        use std::io::Write;
+        println!(
+            "DISPCNT={:04X} BGxCNT={:04X} {:04X} {:04X} {:04X}",
+            gba.bus.ppu.dispcnt,
+            gba.bus.ppu.bgcnt[0],
+            gba.bus.ppu.bgcnt[1],
+            gba.bus.ppu.bgcnt[2],
+            gba.bus.ppu.bgcnt[3]
+        );
+        let fb = &gba.bus.ppu.framebuffer;
+        let mut f = std::fs::File::create(&out)?;
+        write!(f, "P6\n{} {}\n255\n", 240, 160)?;
+        for px in fb.chunks_exact(4) {
+            f.write_all(&px[0..3])?;
+        }
+        println!("Framebuffer salvo em {out}");
+        return Ok(());
     }
 
     let s = &gba.cpu.stats;
@@ -176,6 +226,11 @@ fn main() -> std::io::Result<()> {
         colors.insert([px[0], px[1], px[2]]);
     }
     println!("Framebuffer: {} cores distintas", colors.len());
+
+    println!(
+        "BGxCNT: {:04X} {:04X} {:04X} {:04X}",
+        gba.bus.ppu.bgcnt[0], gba.bus.ppu.bgcnt[1], gba.bus.ppu.bgcnt[2], gba.bus.ppu.bgcnt[3]
+    );
 
     // Dump opcional para PPM se AURORA_DUMP estiver setado.
     if let Ok(out) = std::env::var("AURORA_DUMP") {

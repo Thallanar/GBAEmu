@@ -37,10 +37,10 @@ pub struct Ppu {
     pub vcount: u16,
 
     /// Controle dos 4 backgrounds (BG0CNT..BG3CNT).
-    bgcnt: [u16; 4],
+    pub bgcnt: [u16; 4],
     /// Scroll horizontal/vertical dos backgrounds de texto (9 bits cada).
-    bg_hofs: [u16; 4],
-    bg_vofs: [u16; 4],
+    pub bg_hofs: [u16; 4],
+    pub bg_vofs: [u16; 4],
 
     // Parâmetros afins de BG2 (índice 0) e BG3 (índice 1), em ponto fixo 1.7.8.
     bg_pa: [i16; 2],

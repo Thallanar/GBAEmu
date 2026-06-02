@@ -352,6 +352,25 @@ fn read_comp_header(bus: &mut Bus, src: &mut u32) -> usize {
     (header >> 8) as usize
 }
 
+/// Escreve a saída descomprimida no destino em unidades de **16 bits**.
+///
+/// VRAM e paleta não aceitam escrita de byte: um STRB ali dispara o quirk de
+/// duplicação (o byte vai pros dois lados do halfword), então escrever a saída
+/// byte-a-byte corromperia os gráficos (cada par de bytes colapsaria no 2º). Por
+/// isso a BIOS real — e nós — escrevemos a saída em halfwords. Em WRAM o efeito
+/// é idêntico a escrever bytes.
+fn write_output(bus: &mut Bus, dst: u32, out: &[u8]) {
+    let mut i = 0;
+    while i + 1 < out.len() {
+        let hw = (out[i] as u16) | ((out[i + 1] as u16) << 8);
+        bus.write_u16(dst + i as u32, hw);
+        i += 2;
+    }
+    if i < out.len() {
+        bus.write_u8(dst + i as u32, out[i]);
+    }
+}
+
 /// SWI 0x11/0x12 — LZ77UnComp. r0=origem, r1=destino.
 fn lz77_uncomp(cpu: &mut Cpu, bus: &mut Bus) {
     let mut src = cpu.regs.get(0);
@@ -388,9 +407,7 @@ fn lz77_uncomp(cpu: &mut Cpu, bus: &mut Bus) {
         }
     }
 
-    for (i, byte) in out.iter().enumerate() {
-        bus.write_u8(dst + i as u32, *byte);
-    }
+    write_output(bus, dst, &out);
 }
 
 /// SWI 0x14/0x15 — RLUnComp (run-length).
@@ -421,9 +438,7 @@ fn rl_uncomp(cpu: &mut Cpu, bus: &mut Bus) {
         }
     }
 
-    for (i, byte) in out.iter().enumerate() {
-        bus.write_u8(dst + i as u32, *byte);
-    }
+    write_output(bus, dst, &out);
 }
 
 /// SWI 0x13 — HuffUnComp. Descomprime dados Huffman (bitstream 4/8 bits).
@@ -479,9 +494,7 @@ fn huff_uncomp(cpu: &mut Cpu, bus: &mut Bus) {
         }
     }
 
-    for (i, byte) in out.iter().enumerate() {
-        bus.write_u8(dst + i as u32, *byte);
-    }
+    write_output(bus, dst, &out);
 }
 
 /// SWI 0x10 — BitUnPack. Expande dados de 1/2/4/8 bits para 1/2/4/8/16/32 bits.
@@ -548,12 +561,13 @@ fn diff_unfilter(cpu: &mut Cpu, bus: &mut Bus, wide: bool) {
         }
     } else {
         let mut acc: u8 = 0;
+        let mut out = Vec::with_capacity(out_size);
         for _ in 0..out_size {
             acc = acc.wrapping_add(bus.read_u8(src));
             src += 1;
-            bus.write_u8(dst, acc);
-            dst += 1;
+            out.push(acc);
         }
+        write_output(bus, dst, &out);
     }
 }
 
@@ -630,6 +644,28 @@ mod tests {
         rl_uncomp(&mut cpu, &mut bus);
         let out: Vec<u8> = (0..5).map(|i| bus.read_u8(DST + i)).collect();
         assert_eq!(out, vec![0x58; 5]);
+    }
+
+    /// Regressão (glitch gráfico do Emerald): descompressão para a VRAM tem que
+    /// preservar bytes distintos. Escrever a saída byte-a-byte dispara o quirk de
+    /// STRB (duplica nos dois lados do halfword e sobrescreve), corrompendo os
+    /// gráficos. `write_output` escreve em halfwords e evita isso.
+    #[test]
+    fn lz77_to_vram_preserves_distinct_bytes() {
+        const VRAM: u32 = 0x0600_0000;
+        // 4 literais distintos: 0x11, 0x22, 0x33, 0x44.
+        let mut data = vec![0x10, 0x04, 0x00, 0x00]; // header: size=4, tipo LZ77
+        data.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44]); // flag=0 (todos literais)
+        let (mut cpu, mut bus) = setup(&data);
+        cpu.regs.set(0, SRC);
+        cpu.regs.set(1, VRAM);
+        lz77_uncomp(&mut cpu, &mut bus);
+        let out: Vec<u8> = (0..4).map(|i| bus.read_u8(VRAM + i)).collect();
+        assert_eq!(
+            out,
+            vec![0x11, 0x22, 0x33, 0x44],
+            "bytes corrompidos pelo quirk de STRB (byte-write em VRAM)"
+        );
     }
 
     #[test]
