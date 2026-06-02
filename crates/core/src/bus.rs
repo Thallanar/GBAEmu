@@ -78,12 +78,7 @@ impl Bus {
                 let off = (addr as usize) & 0x01FF_FFFF;
                 self.cartridge.rom.get(off).copied().unwrap_or(0)
             }
-            0xE | 0xF => self
-                .cartridge
-                .save_data
-                .get((addr as usize) & 0xFFFF)
-                .copied()
-                .unwrap_or(0),
+            0xE | 0xF => self.cartridge.read_save_u8(addr),
             _ => 0, // open bus (placeholder)
         }
     }
@@ -150,12 +145,7 @@ impl Bus {
             }
             0x7 => { /* byte writes em OAM são ignorados */ }
             0x8..=0xD => { /* ROM read-only (writes podem disparar EEPROM, ver Fase 4) */ }
-            0xE | 0xF => {
-                let idx = (addr as usize) & 0xFFFF;
-                if idx < self.cartridge.save_data.len() {
-                    self.cartridge.save_data[idx] = val;
-                }
-            }
+            0xE | 0xF => self.cartridge.write_save_u8(addr, val),
             _ => {}
         }
     }

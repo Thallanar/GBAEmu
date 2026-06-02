@@ -3,7 +3,7 @@
 > Arquivo de continuidade: "de onde paramos". O roadmap completo está em
 > [`ROADMAP.md`](./ROADMAP.md); aqui fica o estado atual + o que atacar a seguir.
 
-_Última atualização: 2026-06-01_
+_Última atualização: 2026-06-02_
 
 ---
 
@@ -19,8 +19,11 @@ Funcionando e validado:
 - **Joypad** (KEYINPUT/KEYCNT + IRQ de keypad; teclado mapeado no desktop).
 - **PPU**: modos bitmap 3/4/5 + tile 0/1/2 (texto e afim) + sprites (OBJ
   normal/afim, 1D/2D), composição por prioridade.
-- **Frontend desktop** (egui): abrir ROM, framebuffer escalável, input.
-- **72/72** testes unitários, clippy estrito limpo.
+- **Saves**: SRAM (32 KB) + Flash 64K/128K (máquina de comandos completa: chip
+  ID, apagar chip/setor, gravar byte, troca de banco) + persistência em `.sav`
+  (carrega no boot, grava ~1×/s e ao fechar). EEPROM ainda pendente.
+- **Frontend desktop** (egui): abrir ROM, framebuffer escalável, input, save.
+- **81/81** testes unitários, clippy estrito limpo.
 - ✅ **jsmolka gba-tests: arm.gba, thumb.gba, memory.gba passam 100%**
   ("All tests passed") — CPU e memória validados contra a suíte de referência.
 
@@ -33,7 +36,9 @@ A=L, S=R.
 
 ### 1. 🌟 Shiny Hunter Mode (RECOMENDADO atacar primeiro)
 É o diferencial do projeto e **não depende de som** — só de CPU+memória, que já
-estão validados. A crate `crates/shiny/` já tem o esqueleto.
+estão validados. **Agora desbloqueado**: o Flash (SRAM/Flash 64K/128K) já funciona,
+então o jogo consegue carregar o save na frente do lendário e o soft-reset
+preserva o backup do cartucho. A crate `crates/shiny/` já tem o esqueleto.
 
 O que falta:
 - [ ] Definir os `ShinyTarget` concretos (RSE, FRLG): endereços de PID/TID/SID
@@ -69,10 +74,12 @@ Sub-tarefas:
 - [ ] Mosaic (`MOSAIC`).
 - [ ] Sprite semi-transparente e OBJ window mode.
 
-### 4. Cartridge / Saves (Fase 4)
-- [ ] Persistência de save: SRAM/Flash/EEPROM (detecção de tipo já existe em
-      `cartridge.rs`). Ler/gravar arquivo `.sav` ao lado da ROM.
-- [ ] EEPROM via DMA (acesso serial), Flash com comandos de banco.
+### 4. Cartridge / Saves (Fase 4) — ✅ maior parte feita
+- [X] SRAM (32 KB) + Flash 64K/128K (máquina de comandos) + persistência `.sav`.
+- [ ] EEPROM via DMA (acesso serial na região 0x0D) — Pokémon Gen 3 NÃO usa, então
+      é baixa prioridade; necessário só para jogos específicos.
+- [ ] Save states (snapshot completo do estado do emulador — diferente do `.sav`
+      do jogo; útil pra UI de save/load instantâneo).
 
 ### 5. Polimento / qualidade
 - [ ] `cargo fmt --all` no repositório inteiro (dívida pré-existente: commits
