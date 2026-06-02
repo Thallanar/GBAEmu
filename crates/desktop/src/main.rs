@@ -11,6 +11,8 @@ use auroragba_shiny::games::GameProfile;
 use auroragba_shiny::{CheckResult, Hunter};
 use eframe::egui;
 
+mod audio;
+
 /// Mapeamento teclado → botões do GBA.
 const KEY_MAP: &[(egui::Key, Button)] = &[
     (egui::Key::Z, Button::A),
@@ -62,6 +64,8 @@ struct AuroraApp {
     /// (assistível, pra validar que está navegando certo); valores altos = caça
     /// rápida (mas vira um borrão).
     hunt_speed: u32,
+    /// Saída de áudio (None se não houver dispositivo).
+    audio: Option<audio::AudioOut>,
 }
 
 impl AuroraApp {
@@ -83,6 +87,7 @@ impl AuroraApp {
             hunting: false,
             hunter: Hunter::new(),
             hunt_speed: 1, // começa em tempo real pra dar pra ver/validar
+            audio: audio::AudioOut::new(),
         }
     }
 
@@ -182,6 +187,8 @@ impl AuroraApp {
         let result = self
             .hunter
             .tick(&mut self.gba, profile, target, batch, 60 * 60);
+        // Descarta o áudio gerado durante a caça (não toca; evita crescer o buffer).
+        self.gba.bus.apu.buffer.clear();
         if result == CheckResult::Shiny {
             // Achou! Devolve o controle no momento pós-seleção: o jogo entra na
             // batalha sozinho e o inicial shiny aparece (com os sparkles). O
@@ -234,6 +241,13 @@ impl eframe::App for AuroraApp {
             // Modo jogo normal: 1 frame por update.
             self.poll_input(ctx);
             self.gba.run_frame();
+            // Manda o áudio gerado neste frame para a placa de som.
+            if let Some(audio) = &mut self.audio {
+                let samples = self.gba.bus.apu.drain();
+                audio.push(&samples, auroragba_core::apu::OUTPUT_RATE);
+            } else {
+                self.gba.bus.apu.buffer.clear();
+            }
             self.refresh_texture();
             ctx.request_repaint();
 

@@ -26,4 +26,5 @@ anyhow.workspace = true
 eframe.workspace = true
 egui.workspace = true
 gilrs.workspace = true
+cpal.workspace = true
 rfd = "0.14"
