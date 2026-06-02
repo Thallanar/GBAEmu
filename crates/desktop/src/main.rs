@@ -183,11 +183,13 @@ impl AuroraApp {
             .hunter
             .tick(&mut self.gba, profile, target, batch, 60 * 60);
         if result == CheckResult::Shiny {
-            // Para e deixa a tela no encontro shiny pro jogador ver.
+            // Achou! Devolve o controle no momento pós-seleção: o jogo entra na
+            // batalha sozinho e o inicial shiny aparece (com os sparkles). O
+            // jogador assiste/joga a partir daí (pode apertar Z=A pra avançar).
             self.hunting = false;
-            self.running = false;
+            self.running = true;
             log::info!(
-                "✨ Shiny encontrado em {} tentativas!",
+                "✨ Shiny encontrado em {} tentativas! Controle devolvido pra você ver a batalha.",
                 self.hunter.attempts
             );
         }

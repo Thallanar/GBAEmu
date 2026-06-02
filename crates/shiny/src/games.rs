@@ -102,13 +102,13 @@ const EMERALD: GameProfile = GameProfile {
         },
         // Inicial Torchic: caminho reto (A abre a bag → A escolhe o do centro →
         // A confirma), por isso casa com o mashing de A do loop. O alvo é o slot
-        // 0 do time do jogador. species=0: índice interno a confirmar (~280);
-        // pular a checagem evita travar o loop se o índice estiver errado.
-        // Treecko (esquerda) e Mudkip (direita) precisam de um passo direcional
-        // — entram quando tivermos roteiro de input com direção.
+        // 0 do time do jogador. species=280 = índice interno do Torchic no Gen 3
+        // (confirmado lendo a RAM do Emerald: dex nacional 255 → interno 280).
+        // Treecko (277, esquerda) e Mudkip (283, direita) precisam de um passo
+        // direcional — entram quando tivermos roteiro de input com direção.
         TargetDef {
             name: "Torchic (inicial)",
-            species: 0,
+            species: 280,
             slot: Slot::Player,
             method: HuntMethod::Starter,
         },
