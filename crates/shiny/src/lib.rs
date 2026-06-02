@@ -148,6 +148,9 @@ pub struct Hunter {
     pub last_pid: u32,
     /// Valor bruto da fórmula na última checagem (`< 8` ⇒ shiny).
     pub last_shiny_value: u16,
+    /// Espécie (índice interno) lida no último encontro — confirma na UI que a
+    /// caça parou no Pokémon certo.
+    pub last_species: u16,
     /// Frames já gastos na tentativa em andamento (controle do `tick`).
     frames_this_attempt: u32,
     /// Frames de "espera" no início da tentativa antes de começar a amassar A.
@@ -164,6 +167,7 @@ impl Hunter {
             found: false,
             last_pid: 0,
             last_shiny_value: 0xFFFF,
+            last_species: 0,
             frames_this_attempt: 0,
             entropy_delay: 0,
         }
@@ -238,6 +242,7 @@ impl Hunter {
         let (tid, sid) = (player.tid(), player.sid());
 
         self.last_pid = target_mon.pid;
+        self.last_species = target_mon.species;
         self.last_shiny_value = shiny_value(target_mon.pid, tid, sid);
 
         if self.last_shiny_value < 8 {

@@ -58,6 +58,10 @@ struct AuroraApp {
     hunting: bool,
     /// Estado do Shiny Hunter.
     hunter: Hunter,
+    /// Velocidade da caça: frames de emulação por update da UI. 1 = tempo real
+    /// (assistível, pra validar que está navegando certo); valores altos = caça
+    /// rápida (mas vira um borrão).
+    hunt_speed: u32,
 }
 
 impl AuroraApp {
@@ -78,6 +82,7 @@ impl AuroraApp {
             selected_target: 0,
             hunting: false,
             hunter: Hunter::new(),
+            hunt_speed: 1, // começa em tempo real pra dar pra ver/validar
         }
     }
 
@@ -171,11 +176,12 @@ impl AuroraApp {
             return;
         };
         let target = &profile.targets[self.selected_target];
-        // ~300 frames/update = caça rápida sem congelar a UI; timeout de 1 min
-        // de tempo emulado por tentativa antes de resetar por segurança.
+        // `hunt_speed` frames por update (1 = tempo real, assistível). Timeout de
+        // 1 min de tempo emulado por tentativa antes de resetar por segurança.
+        let batch = self.hunt_speed.max(1);
         let result = self
             .hunter
-            .tick(&mut self.gba, profile, target, 300, 60 * 60);
+            .tick(&mut self.gba, profile, target, batch, 60 * 60);
         if result == CheckResult::Shiny {
             // Para e deixa a tela no encontro shiny pro jogador ver.
             self.hunting = false;
@@ -288,6 +294,18 @@ impl eframe::App for AuroraApp {
                             });
 
                         ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Velocidade:");
+                            ui.add(
+                                egui::Slider::new(&mut self.hunt_speed, 1..=2000)
+                                    .logarithmic(true)
+                                    .suffix(" fr/upd"),
+                            );
+                        });
+                        if self.hunt_speed == 1 {
+                            ui.label("(tempo real — dá pra ver navegando)");
+                        }
+
                         if self.hunting {
                             if ui.button("⏹ Parar caça").clicked() {
                                 self.hunting = false;
@@ -301,6 +319,10 @@ impl eframe::App for AuroraApp {
                             ui.label(format!(
                                 "Último PID: {:08X}  (valor shiny: {})",
                                 self.hunter.last_pid, self.hunter.last_shiny_value
+                            ));
+                            ui.label(format!(
+                                "Espécie lida (índice interno): {}",
+                                self.hunter.last_species
                             ));
                         }
                         if self.hunter.found {
