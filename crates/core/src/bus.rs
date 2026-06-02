@@ -126,9 +126,29 @@ impl Bus {
                     self.io.write_u8(addr, val);
                 }
             }
-            0x5 => self.palette[(addr as usize) & 0x3FF] = val,
-            0x6 => self.vram[vram_offset(addr)] = val,
-            0x7 => self.oam[(addr as usize) & 0x3FF] = val,
+            // Quirk de STRB em memória de vídeo (GBATEK): escrever 1 byte em
+            // Palette/VRAM-BG duplica o valor nos dois bytes do halfword; em
+            // VRAM-OBJ e OAM o byte é simplesmente ignorado.
+            0x5 => {
+                let o = ((addr as usize) & 0x3FF) & !1;
+                self.palette[o] = val;
+                self.palette[o + 1] = val;
+            }
+            0x6 => {
+                let off = vram_offset(addr) & !1;
+                // Início da região de OBJ na VRAM: 0x14000 em modos bitmap,
+                // 0x10000 em modos de tiles.
+                let obj_start = if (self.ppu.dispcnt & 0b111) >= 3 {
+                    0x14000
+                } else {
+                    0x10000
+                };
+                if off < obj_start {
+                    self.vram[off] = val;
+                    self.vram[off + 1] = val;
+                }
+            }
+            0x7 => { /* byte writes em OAM são ignorados */ }
             0x8..=0xD => { /* ROM read-only (writes podem disparar EEPROM, ver Fase 4) */ }
             0xE | 0xF => {
                 let idx = (addr as usize) & 0xFFFF;
@@ -142,16 +162,47 @@ impl Bus {
 
     pub fn write_u16(&mut self, addr: u32, val: u16) {
         let a = addr & !1;
-        self.write_u8(a, val as u8);
-        self.write_u8(a + 1, (val >> 8) as u8);
+        let [lo, hi] = val.to_le_bytes();
+        // As regiões de vídeo são escritas diretamente: o quirk de duplicação
+        // só vale para STRB (byte), não para STRH/STR (halfword/word).
+        match (a >> 24) & 0xF {
+            0x5 => {
+                let o = (a as usize) & 0x3FF;
+                self.palette[o] = lo;
+                self.palette[o + 1] = hi;
+            }
+            0x6 => {
+                let o = vram_offset(a);
+                self.vram[o] = lo;
+                self.vram[o + 1] = hi;
+            }
+            0x7 => {
+                let o = (a as usize) & 0x3FF;
+                self.oam[o] = lo;
+                self.oam[o + 1] = hi;
+            }
+            _ => {
+                self.write_u8(a, lo);
+                self.write_u8(a + 1, hi);
+            }
+        }
     }
 
     pub fn write_u32(&mut self, addr: u32, val: u32) {
         let a = addr & !3;
-        self.write_u8(a, val as u8);
-        self.write_u8(a + 1, (val >> 8) as u8);
-        self.write_u8(a + 2, (val >> 16) as u8);
-        self.write_u8(a + 3, (val >> 24) as u8);
+        match (a >> 24) & 0xF {
+            // Vídeo: dois halfwords diretos (mantém o caminho sem quirk de byte).
+            0x5..=0x7 => {
+                self.write_u16(a, val as u16);
+                self.write_u16(a + 2, (val >> 16) as u16);
+            }
+            _ => {
+                self.write_u8(a, val as u8);
+                self.write_u8(a + 1, (val >> 8) as u8);
+                self.write_u8(a + 2, (val >> 16) as u8);
+                self.write_u8(a + 3, (val >> 24) as u8);
+            }
+        }
     }
 
     // ───────────────────────── DMA ─────────────────────────
@@ -290,6 +341,45 @@ mod tests {
         for i in 0..3u32 {
             assert_eq!(bus.read_u32(DST + i * 4), 0xCAFE_F00D);
         }
+    }
+
+    #[test]
+    fn strb_to_palette_duplicates_halfword() {
+        let mut bus = Bus::new();
+        // STRB 0xAB em 0x05000000 → halfword 0xABAB.
+        bus.write_u8(0x0500_0000, 0xAB);
+        assert_eq!(bus.read_u16(0x0500_0000), 0xABAB);
+        // Endereço ímpar duplica no mesmo halfword.
+        bus.write_u8(0x0500_0003, 0xCD);
+        assert_eq!(bus.read_u16(0x0500_0002), 0xCDCD);
+    }
+
+    #[test]
+    fn strb_to_oam_is_ignored() {
+        let mut bus = Bus::new();
+        bus.write_u16(0x0700_0000, 0x1234);
+        bus.write_u8(0x0700_0000, 0xFF); // deve ser ignorado
+        assert_eq!(bus.read_u16(0x0700_0000), 0x1234);
+    }
+
+    #[test]
+    fn strh_to_palette_is_not_duplicated() {
+        let mut bus = Bus::new();
+        // STRH grava o valor real (sem o quirk de duplicação do byte).
+        bus.write_u16(0x0500_0000, 0x1234);
+        assert_eq!(bus.read_u16(0x0500_0000), 0x1234);
+    }
+
+    #[test]
+    fn strb_to_obj_vram_is_ignored_in_tile_mode() {
+        let mut bus = Bus::new();
+        bus.ppu.dispcnt = 0; // modo 0 (tiles): OBJ começa em 0x10000
+        // 0x06010000 cai na região de OBJ → byte ignorado.
+        bus.write_u8(0x0601_0000, 0xEE);
+        assert_eq!(bus.vram[0x10000], 0x00);
+        // Já em VRAM-BG (0x06000000) duplica normalmente.
+        bus.write_u8(0x0600_0000, 0xEE);
+        assert_eq!(bus.read_u16(0x0600_0000), 0xEEEE);
     }
 
     #[test]
