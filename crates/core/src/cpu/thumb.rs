@@ -440,18 +440,41 @@ fn fmt15_multi_load_store(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
     let list = (i & 0xFF) as u8;
     let mut addr = cpu.regs.get(rb);
 
+    // Quirk ARMv4: lista vazia transfere R15 e adianta Rb em 0x40.
+    if list == 0 {
+        if load {
+            let v = bus.read_u32(addr);
+            cpu.set_pc_thumb(v);
+        } else {
+            bus.write_u32(addr, cpu.regs.pc().wrapping_add(2));
+        }
+        cpu.regs.set(rb, addr.wrapping_add(0x40));
+        return;
+    }
+
+    let final_addr = addr.wrapping_add(list.count_ones() * 4);
+    let lowest = list.trailing_zeros() as usize;
+
     for r in 0..8 {
-        if list & (1 << r) == 0 { continue; }
+        if list & (1 << r) == 0 {
+            continue;
+        }
         if load {
             cpu.regs.set(r as usize, bus.read_u32(addr));
         } else {
-            bus.write_u32(addr, cpu.regs.get(r as usize));
+            // Quirk STM: base na lista e não é o menor → grava o valor com writeback.
+            let v = if r as usize == rb && r as usize != lowest {
+                final_addr
+            } else {
+                cpu.regs.get(r as usize)
+            };
+            bus.write_u32(addr, v);
         }
         addr = addr.wrapping_add(4);
     }
     // Writeback sempre, exceto se LDM e rb está na lista.
     if !(load && list & (1 << rb) != 0) {
-        cpu.regs.set(rb, addr);
+        cpu.regs.set(rb, final_addr);
     }
 }
 
