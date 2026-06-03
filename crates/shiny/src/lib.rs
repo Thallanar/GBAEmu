@@ -20,7 +20,21 @@ use auroragba_core::Gba;
 pub mod games;
 pub mod gfx;
 
-use games::{GameProfile, HuntMethod, TargetDef};
+use games::{GameProfile, HuntMethod, StarterCursor, TargetDef};
+
+/// Direção a **segurar** durante a tentativa pra estacionar o cursor no inicial
+/// certo. Só os iniciais laterais precisam; o resto (Torchic e lendários) não
+/// move o cursor. Ver [`StarterCursor`].
+fn hold_direction(target: &TargetDef) -> Option<Button> {
+    if target.method != HuntMethod::Starter {
+        return None;
+    }
+    match target.cursor {
+        StarterCursor::Left => Some(Button::Left),
+        StarterCursor::Right => Some(Button::Right),
+        StarterCursor::Center => None,
+    }
+}
 
 /// Fórmula shiny da Gen 3.
 /// Shiny se `(PID_hi ^ PID_lo ^ TID ^ SID) < 8`.
@@ -272,6 +286,7 @@ impl Hunter {
         max_frames: u32,
     ) -> bool {
         let base = profile.target_base(target);
+        let dir = hold_direction(target);
         self.frames_this_attempt = 0;
         self.seed_injected = false;
         for _ in 0..max_frames {
@@ -279,11 +294,18 @@ impl Hunter {
             // Tapa A (ver `tick`): cobre título → continuar → bag → diálogos.
             let press = (self.frames_this_attempt / MASH_PERIOD).is_multiple_of(2);
             gba.bus.io.joypad.set_button(Button::A, press);
+            // Segura a direção do inicial lateral (no-op pros demais alvos).
+            if let Some(d) = dir {
+                gba.bus.io.joypad.set_button(d, true);
+            }
             gba.run_frame();
             self.frames_this_attempt += 1;
 
             if self.encounter_ready(gba, base, target) {
                 gba.bus.io.joypad.set_button(Button::A, false);
+                if let Some(d) = dir {
+                    gba.bus.io.joypad.set_button(d, false);
+                }
                 return true;
             }
         }
@@ -360,6 +382,7 @@ impl Hunter {
             return CheckResult::Shiny;
         }
         let base = profile.target_base(target);
+        let dir = hold_direction(target);
 
         for _ in 0..batch {
             // No frame certo, injeta a seed do RNG do jogo (a entropia da caça).
@@ -371,11 +394,20 @@ impl Hunter {
             // registrar uma borda de tecla.
             let press = (self.frames_this_attempt / MASH_PERIOD).is_multiple_of(2);
             gba.bus.io.joypad.set_button(Button::A, press);
+            // Segura a direção do inicial lateral o tempo todo: nas telas antes
+            // da bag (título/continuar/diálogos) ◄/► é inócuo; na bag o cursor
+            // vai pro extremo e clampa. No-op pros demais alvos.
+            if let Some(d) = dir {
+                gba.bus.io.joypad.set_button(d, true);
+            }
             gba.run_frame();
             self.frames_this_attempt += 1;
 
             if self.encounter_ready(gba, base, target) {
                 gba.bus.io.joypad.set_button(Button::A, false);
+                if let Some(d) = dir {
+                    gba.bus.io.joypad.set_button(d, false);
+                }
                 let result = self.check(gba, profile, target);
                 if result != CheckResult::Shiny {
                     self.soft_reset(gba);
@@ -419,7 +451,33 @@ impl Default for Hunter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use games::{Slot, TargetDef};
+    use games::{Slot, StarterCursor, TargetDef};
+
+    #[test]
+    fn hold_direction_maps_starter_cursor() {
+        let mk = |method, cursor| TargetDef {
+            name: "x",
+            species: 0,
+            slot: Slot::Player,
+            method,
+            cursor,
+        };
+        // Iniciais laterais seguram a direção; o centro (Torchic) não.
+        assert_eq!(
+            hold_direction(&mk(HuntMethod::Starter, StarterCursor::Left)),
+            Some(Button::Left)
+        );
+        assert_eq!(
+            hold_direction(&mk(HuntMethod::Starter, StarterCursor::Right)),
+            Some(Button::Right)
+        );
+        assert_eq!(hold_direction(&mk(HuntMethod::Starter, StarterCursor::Center)), None);
+        // Fora do método Starter, o cursor é ignorado (lendário não mexe menu).
+        assert_eq!(
+            hold_direction(&mk(HuntMethod::SoftResetLegendary, StarterCursor::Left)),
+            None
+        );
+    }
 
     #[test]
     fn shiny_formula_known_values() {
@@ -541,6 +599,7 @@ mod tests {
             species: 0,
             slot: Slot::Enemy,
             method: HuntMethod::SoftResetLegendary,
+            cursor: StarterCursor::Center,
         };
         let otid = 0x2222_1111; // TID=0x1111, SID=0x2222 → TID^SID = 0x3333
         write_synthetic_mon(&mut gba, profile.player_party, 0xAAAA_BBBB, otid, 1);
@@ -574,6 +633,7 @@ mod tests {
             species: 0,
             slot: Slot::Enemy,
             method: HuntMethod::SoftResetLegendary,
+            cursor: StarterCursor::Center,
         };
 
         // Jogador com TID=0x1111, SID=0x2222 (OTID = SID<<16 | TID).

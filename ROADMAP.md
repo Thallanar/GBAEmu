@@ -136,9 +136,11 @@ auroragba/
       endereço de `gRngValue` daquele jogo.
 - [X] Endereços de RAM do Emerald confirmados contra ROM real (player/enemy
       party, espécie Torchic=280)
-- [X] Método: starter (Torchic) — navegação por A funciona; reveal na batalha
+- [X] Método: starter (Torchic/Treecko/Mudkip) — A-mash chega na bag; iniciais
+      laterais saem segurando a direção. Reveal na batalha
 - [ ] Outros jogos: Ruby/Sapphire, FireRed/LeafGreen (RAM + gRngValue por versão)
-- [ ] Starter: Treecko/Mudkip (precisa de input direcional no menu do lab)
+- [X] Starter: Treecko/Mudkip — segura ◄/► a tentativa toda pra estacionar o
+      cursor no Poké Ball lateral (menu clampa, robusto a timing)
 - [ ] Método: random encounters (detecção de tela de batalha de selvagem)
 - [ ] (Opcional avançado) RNG manipulation
 
@@ -217,8 +219,8 @@ auroragba/
   (detecção presente; protocolo não) e save states ainda pendentes.
 - [~] Fase 6 — Shiny Hunter: perfis data-driven + leitura/descripto Gen 3 + loop
   de soft-reset + **injeção de seed no RNG** + UI, **validado no Emerald/Torchic**
-  (10/10 PIDs distintos). Faltam outros jogos, Treecko/Mudkip (input direcional)
-  e o método de random encounters.
+  (10/10 PIDs distintos). Os 3 iniciais de Hoenn (Torchic/Treecko/Mudkip) já
+  caçam. Faltam outros jogos e o método de random encounters.
 - [ ] Fase 7 — Android
 
 ### Validação (jsmolka gba-tests)
