@@ -20,8 +20,24 @@ pub enum Slot {
 pub enum HuntMethod {
     /// Soft-reset na frente de um lendário estático: dá A/Start até a batalha.
     SoftResetLegendary,
-    /// Inicial no laboratório (navegação de menu — implementado depois).
+    /// Inicial no laboratório: amassa A pra chegar na bag e (se preciso) segura
+    /// uma direção pra mover o cursor até o inicial certo.
     Starter,
+}
+
+/// No menu de seleção do inicial (3 Poké Balls em linha), de que lado fica o
+/// alvo. O cursor abre no **centro** (Torchic), então o método A-mash já o pega
+/// sem direção. Para os laterais, o loop **segura** a direção a tentativa
+/// inteira: como o menu clampa nos extremos (não dá wrap), o cursor "estaciona"
+/// no Poké Ball certo independentemente do timing exato em que a bag abre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StarterCursor {
+    /// Treecko — Poké Ball da esquerda (segura ◄).
+    Left,
+    /// Torchic — Poké Ball do centro (default, sem direção).
+    Center,
+    /// Mudkip — Poké Ball da direita (segura ►).
+    Right,
 }
 
 /// Um alvo de caça concreto dentro de um jogo.
@@ -37,6 +53,9 @@ pub struct TargetDef {
     pub slot: Slot,
     /// Método de caça.
     pub method: HuntMethod,
+    /// Posição do alvo no menu do inicial. Só vale para [`HuntMethod::Starter`];
+    /// alvos de outros métodos usam [`StarterCursor::Center`] (ignorado).
+    pub cursor: StarterCursor,
 }
 
 /// Perfil de um jogo: endereços de RAM + lista de alvos.
@@ -94,30 +113,48 @@ const EMERALD: GameProfile = GameProfile {
             species: 0,
             slot: Slot::Enemy,
             method: HuntMethod::SoftResetLegendary,
+            cursor: StarterCursor::Center,
         },
         TargetDef {
             name: "Groudon",
             species: 0,
             slot: Slot::Enemy,
             method: HuntMethod::SoftResetLegendary,
+            cursor: StarterCursor::Center,
         },
         TargetDef {
             name: "Kyogre",
             species: 0,
             slot: Slot::Enemy,
             method: HuntMethod::SoftResetLegendary,
+            cursor: StarterCursor::Center,
         },
-        // Inicial Torchic: caminho reto (A abre a bag → A escolhe o do centro →
-        // A confirma), por isso casa com o mashing de A do loop. O alvo é o slot
-        // 0 do time do jogador. species=280 = índice interno do Torchic no Gen 3
-        // (confirmado lendo a RAM do Emerald: dex nacional 255 → interno 280).
-        // Treecko (277, esquerda) e Mudkip (283, direita) precisam de um passo
-        // direcional — entram quando tivermos roteiro de input com direção.
+        // Iniciais de Hoenn: o alvo é o slot 0 do time do jogador. O cursor do
+        // menu abre no centro (Torchic); os laterais saem segurando a direção.
+        // Índices internos Gen 3 (confirmados na RAM do Emerald): Treecko=277,
+        // Torchic=280, Mudkip=283.
+        TargetDef {
+            name: "Treecko (inicial)",
+            species: 277,
+            slot: Slot::Player,
+            method: HuntMethod::Starter,
+            cursor: StarterCursor::Left,
+        },
+        // Torchic: caminho reto (A abre a bag → A escolhe o do centro → A
+        // confirma), casa com o A-mash sem direção.
         TargetDef {
             name: "Torchic (inicial)",
             species: 280,
             slot: Slot::Player,
             method: HuntMethod::Starter,
+            cursor: StarterCursor::Center,
+        },
+        TargetDef {
+            name: "Mudkip (inicial)",
+            species: 283,
+            slot: Slot::Player,
+            method: HuntMethod::Starter,
+            cursor: StarterCursor::Right,
         },
     ],
 };
@@ -154,6 +191,7 @@ mod tests {
             species: 0,
             slot: Slot::Enemy,
             method: HuntMethod::SoftResetLegendary,
+            cursor: StarterCursor::Center,
         };
         let player_target = TargetDef {
             slot: Slot::Player,
