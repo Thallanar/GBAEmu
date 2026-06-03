@@ -86,20 +86,22 @@ auroragba/
 - [X] Memory bus básico (BIOS, WRAM, IWRAM, ROM)
 - [X] Testes: `armwrestler`, `FuzzARM`, `gba-tests`
 
-### Fase 2 — PPU / Vídeo (3–5 semanas)
+### Fase 2 — PPU / Vídeo (3–5 semanas) ✅
 
-- [ ] Modos de vídeo 0–5
-- [ ] Backgrounds, sprites, blending, windows
-- [ ] Renderização por scanline
-- [ ] Output via `wgpu`
+- [X] Modos de vídeo 0–5
+- [X] Backgrounds (texto + afim), sprites (normal/afim, 1D/2D)
+- [X] Janelas (WIN0/1/OBJ), blending (BLDCNT/BLDALPHA/BLDY), mosaic, OBJ
+      semitransparente — composição com resolução top-1/top-2 por pixel
+- [X] Renderização por scanline
+- [X] Output via textura `egui` (escalada 240×160) — `wgpu` direto fica p/ depois
 
-### Fase 3 — APU + Timers + DMA + IRQ (3–4 semanas)
+### Fase 3 — APU + Timers + DMA + IRQ (3–4 semanas) ✅
 
-- [ ] 4 canais PSG
-- [ ] 2 canais DMA de som
-- [ ] Timers 0–3
-- [ ] Sistema de interrupções
-- [ ] 4 canais DMA gerais
+- [X] 4 canais PSG (quadrada×2 / wave / ruído, envelope/length/sweep)
+- [X] 2 canais Direct Sound (FIFO + Timer 0/1 + DMA special)
+- [X] Timers 0–3 (cascade + prescalers)
+- [X] Sistema de interrupções
+- [X] 4 canais DMA gerais (imediato/VBlank/HBlank/special)
 
 ### Fase 4 — Cartridge & saves (1–2 semanas)
 
@@ -128,10 +130,16 @@ auroragba/
 - [X] Loop de soft reset hunting (power-cycle preservando Flash + amassar
       A/Start até o encontro) — `Hunter::tick` não-bloqueante
 - [X] UI: seletor de alvo, contador, último PID + valor, banner ao encontrar
-- [ ] Confirmar endereços de RAM por versão contra ROM real + ajustar roteiro
-      de inputs
-- [ ] Método: starters (navegação de menu no laboratório)
-- [ ] Método: random encounters (detecção de tela de batalha)
+- [X] **Injeção de entropia no RNG do jogo** (`gRngValue` do Emerald em
+      0x03005D80): sem isso o emulador é determinístico e todo reset dá o MESMO
+      PID. Validado: Torchic 10/10 PIDs distintos. Cada perfil novo precisa do
+      endereço de `gRngValue` daquele jogo.
+- [X] Endereços de RAM do Emerald confirmados contra ROM real (player/enemy
+      party, espécie Torchic=280)
+- [X] Método: starter (Torchic) — navegação por A funciona; reveal na batalha
+- [ ] Outros jogos: Ruby/Sapphire, FireRed/LeafGreen (RAM + gRngValue por versão)
+- [ ] Starter: Treecko/Mudkip (precisa de input direcional no menu do lab)
+- [ ] Método: random encounters (detecção de tela de batalha de selvagem)
 - [ ] (Opcional avançado) RNG manipulation
 
 ### Fase 7 — Port Android (4–6 semanas)
@@ -190,25 +198,27 @@ auroragba/
 - [X] Fase 0 — workspace, CI, scripts de ROM de teste
 - [X] Fase 1 — CPU ARM7TDMI (ARM + THUMB completos, IRQ, banking)
 
-- [~] Fase 2 — PPU:
-  - [X] Máquina de estados de scanline (HBlank/VBlank/VCount IRQs)
-  - [X] Modos bitmap 3/4/5
-  - [X] Modos tile 0/1/2 (backgrounds texto + afim, prioridade)
-  - [X] Sprites (OBJ) — normal + afim, 1D/2D, prioridade
-  - [ ] Janelas, blending (BLDCNT), mosaic
-- [~] Fase 3 — Timers + IRQ (ok); DMA 4 canais (imediato/VBlank/HBlank, ok);
-  APU/som ainda pendente; DMA "special" (FIFO de som) pendente
+- [X] Fase 2 — PPU completa: scanline (HBlank/VBlank/VCount IRQs), modos bitmap
+  3/4/5, modos tile 0/1/2 (texto + afim), sprites (normal/afim, 1D/2D), e os
+  efeitos — janelas (WIN0/1/OBJ), blending (BLDCNT/BLDALPHA/BLDY), mosaic e OBJ
+  semitransparente, via composição top-1/top-2 por pixel.
+- [X] Fase 3 — Timers + IRQ + DMA 4 canais (imediato/VBlank/HBlank/special) +
+  **APU completa**: 4 canais PSG + Direct Sound (FIFO/Timer/DMA special) + saída
+  no host via `cpal` (emulação paçada pelo consumo de áudio). RTC/GPIO (S-3511A).
 
 - [X] BIOS HLE (SWI + trampolim de IRQ + direct boot) — sem BIOS oficial
 - [X] Joypad (KEYINPUT/KEYCNT + IRQ de keypad + input no desktop)
 
-- [~] Fase 5 — Frontend desktop: janela egui, abrir ROM, framebuffer, input
+- [~] Fase 5 — Frontend desktop: janela egui, abrir ROM, framebuffer escalável,
+  input, persistência de save, slider de velocidade. Faltam save states UI,
+  gamepad (gilrs), fast-forward/rewind, screenshots, biblioteca de ROMs.
 
-- [~] Fase 4 — saves: SRAM + Flash 64K/128K funcionando + persistência `.sav`;
-  EEPROM e save states ainda pendentes
-- [~] Fase 6 — Shiny Hunter: banco de perfis data-driven + leitura/descriptografia
-  Gen 3 + loop de soft-reset + UI funcionando. Falta confirmar endereços por
-  versão contra ROM real e os métodos de starter / random encounter.
+- [~] Fase 4 — saves: SRAM + Flash 64K/128K + persistência `.sav` (ok). EEPROM
+  (detecção presente; protocolo não) e save states ainda pendentes.
+- [~] Fase 6 — Shiny Hunter: perfis data-driven + leitura/descripto Gen 3 + loop
+  de soft-reset + **injeção de seed no RNG** + UI, **validado no Emerald/Torchic**
+  (10/10 PIDs distintos). Faltam outros jogos, Treecko/Mudkip (input direcional)
+  e o método de random encounters.
 - [ ] Fase 7 — Android
 
 ### Validação (jsmolka gba-tests)
@@ -222,5 +232,9 @@ auroragba/
 
 - **Formatação**: o repositório não passa por `cargo fmt` (commits anteriores ao
   HLE não foram formatados); arquivos novos/reescritos já estão fmt-clean.
-- Falta áudio (APU), janelas/blending/mosaic na PPU, DMA de som, EEPROM, save
-  states, e timing de ciclos exato (wait states).
+- **Timing de ciclos**: hoje cada instrução conta como 1 ciclo (placeholder);
+  falta wait states por região de memória (afeta precisão fina e pitch de áudio).
+- **Faltam**: EEPROM (protocolo serial), save states, gamepad/fast-forward/
+  screenshots no frontend, mosaic afim (só BG texto + OBJ implementados), e o
+  port Android.
+- Suíte: **110 testes** passam, clippy estrito limpo.
