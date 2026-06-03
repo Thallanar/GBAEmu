@@ -3,11 +3,14 @@
 //! Roda 1 frame por update da UI e exibe o framebuffer da PPU numa textura
 //! 240×160 escalada.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use auroragba_core::joypad::Button;
 use auroragba_core::{Gba, SCREEN_HEIGHT, SCREEN_WIDTH};
 use auroragba_shiny::games::GameProfile;
+use auroragba_shiny::gfx::RomGfx;
 use auroragba_shiny::{CheckResult, Hunter};
 use eframe::egui;
 
@@ -66,6 +69,14 @@ struct AuroraApp {
     hunt_speed: u32,
     /// Saída de áudio (None se não houver dispositivo).
     audio: Option<audio::AudioOut>,
+    /// Tabelas de gráficos da ROM (pra decodificar o sprite do alvo). `None` se
+    /// não localizadas (ROM não-Gen3 ou layout desconhecido).
+    gfx: Option<RomGfx>,
+    /// Cache de texturas de sprite por (espécie, shiny) — decodificar a cada
+    /// frame seria desperdício.
+    sprite_cache: HashMap<(u16, bool), Option<egui::TextureHandle>>,
+    /// Instante em que a caça atual começou (pra tempo decorrido e taxa).
+    hunt_started: Option<Instant>,
 }
 
 impl AuroraApp {
@@ -88,6 +99,9 @@ impl AuroraApp {
             hunter: Hunter::new(),
             hunt_speed: 1, // começa em tempo real pra dar pra ver/validar
             audio: audio::AudioOut::new(),
+            gfx: None,
+            sprite_cache: HashMap::new(),
+            hunt_started: None,
         }
     }
 
@@ -114,6 +128,10 @@ impl AuroraApp {
                 self.selected_target = 0;
                 self.hunting = false;
                 self.hunter = Hunter::new();
+                self.hunt_started = None;
+                // Localiza as tabelas de gráficos pra decodificar sprites do alvo.
+                self.gfx = RomGfx::locate(&self.gba.bus.cartridge.rom);
+                self.sprite_cache.clear();
                 match self.profile {
                     Some(p) => log::info!("Jogo reconhecido: {} ({code})", p.name),
                     None => log::info!("Jogo não reconhecido pelo Shiny Hunter (code={code})"),
@@ -170,7 +188,154 @@ impl AuroraApp {
             self.hunter = Hunter::new();
             self.hunting = true;
             self.running = false;
+            self.hunt_started = Some(Instant::now());
             log::info!("Caça iniciada.");
+        }
+    }
+
+    /// Decodifica (com cache) o sprite do alvo da ROM e devolve a textura egui.
+    /// `None` se a espécie é 0 (não preenchida) ou os gráficos não foram achados.
+    fn target_sprite(
+        &mut self,
+        ctx: &egui::Context,
+        species: u16,
+        shiny: bool,
+    ) -> Option<egui::TextureHandle> {
+        if species == 0 {
+            return None;
+        }
+        if let Some(cached) = self.sprite_cache.get(&(species, shiny)) {
+            return cached.clone();
+        }
+        let handle = self.gfx.and_then(|gfx| {
+            let sprite = gfx.decode_front(&self.gba.bus.cartridge.rom, species, shiny)?;
+            let img = egui::ColorImage::from_rgba_unmultiplied(
+                [sprite.width, sprite.height],
+                &sprite.rgba,
+            );
+            Some(ctx.load_texture(
+                format!("mon-{species}-{shiny}"),
+                img,
+                egui::TextureOptions::NEAREST,
+            ))
+        });
+        self.sprite_cache.insert((species, shiny), handle.clone());
+        handle
+    }
+
+    /// Desenha o painel lateral do Shiny Hunter: sprite do alvo + estatísticas
+    /// da caça em tempo real + controles.
+    fn shiny_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.heading("✨ Shiny Hunter");
+        let Some(profile) = self.profile else {
+            ui.label("Jogo não reconhecido.");
+            ui.label("(carregue uma ROM Gen 3 suportada)");
+            return;
+        };
+        ui.label(profile.name);
+
+        // Seletor de alvo.
+        let current = profile.targets[self.selected_target].name;
+        egui::ComboBox::from_label("Alvo")
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                for (i, t) in profile.targets.iter().enumerate() {
+                    ui.selectable_value(&mut self.selected_target, i, t.name);
+                }
+            });
+        let target = profile.targets[self.selected_target];
+
+        // Sprite do alvo (shiny quando já achou, normal enquanto caça).
+        ui.separator();
+        let ctx = ui.ctx().clone();
+        let want_shiny = self.hunter.found;
+        ui.vertical_centered(|ui| match self.target_sprite(&ctx, target.species, want_shiny) {
+            Some(tex) => {
+                ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(128.0, 128.0)));
+            }
+            None => {
+                ui.add_space(40.0);
+                ui.label(egui::RichText::new("?").size(48.0).weak());
+                ui.label("(sprite indisponível)");
+                ui.add_space(40.0);
+            }
+        });
+
+        // Contador grande.
+        ui.separator();
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new(self.hunter.attempts.to_string())
+                    .size(30.0)
+                    .strong(),
+            );
+            ui.label("tentativas");
+        });
+
+        // Tempo decorrido + taxa.
+        if let Some(start) = self.hunt_started {
+            let secs = start.elapsed().as_secs_f64();
+            let (m, s) = (secs as u64 / 60, secs as u64 % 60);
+            let rate = if secs > 0.5 {
+                self.hunter.attempts as f64 / secs
+            } else {
+                0.0
+            };
+            ui.label(format!("⏱ {m:02}:{s:02}   ·   {rate:.1}/s"));
+        }
+
+        // Probabilidade acumulada de já ter achado pelo menos 1 shiny.
+        let p = 1.0 - (1.0 - 1.0 / 8192.0_f64).powi(self.hunter.attempts as i32);
+        ui.label(format!("📊 Chance acumulada: {:.1}%", p * 100.0));
+
+        // Quão perto chegou (menor valor shiny visto).
+        if self.hunter.best_shiny_value != 0xFFFF {
+            ui.label(format!(
+                "🔥 Mais perto: {} (tentativa #{})",
+                self.hunter.best_shiny_value, self.hunter.best_attempt
+            ));
+        }
+
+        // Último encontro.
+        if self.hunter.last_pid != 0 {
+            ui.separator();
+            ui.label(format!("Último PID: {:08X}", self.hunter.last_pid));
+            ui.label(format!(
+                "Valor shiny: {} (shiny se < 8)",
+                self.hunter.last_shiny_value
+            ));
+            ui.label(format!("Espécie lida: {}", self.hunter.last_species));
+        }
+
+        // Controles.
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Velocidade:");
+            ui.add(
+                egui::Slider::new(&mut self.hunt_speed, 1..=2000)
+                    .logarithmic(true)
+                    .suffix(" fr/upd"),
+            );
+        });
+        if self.hunting {
+            if ui.button("⏹ Parar caça").clicked() {
+                self.hunting = false;
+            }
+        } else if ui.button("▶ Iniciar caça").clicked() {
+            self.start_hunt();
+        }
+
+        if self.hunter.found {
+            ui.separator();
+            ui.vertical_centered(|ui| {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 105, 180),
+                    egui::RichText::new("✨ SHINY ENCONTRADO! ✨")
+                        .size(18.0)
+                        .strong(),
+                );
+            });
         }
     }
 
@@ -309,69 +474,18 @@ impl eframe::App for AuroraApp {
                         ui.close_menu();
                     }
                 });
-                ui.menu_button("Shiny Hunter", |ui| match self.profile {
-                    Some(profile) => {
-                        ui.label(format!("Jogo: {}", profile.name));
-
-                        let current = profile.targets[self.selected_target].name;
-                        egui::ComboBox::from_label("Alvo")
-                            .selected_text(current)
-                            .show_ui(ui, |ui| {
-                                for (i, t) in profile.targets.iter().enumerate() {
-                                    ui.selectable_value(&mut self.selected_target, i, t.name);
-                                }
-                            });
-
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label("Velocidade:");
-                            ui.add(
-                                egui::Slider::new(&mut self.hunt_speed, 1..=2000)
-                                    .logarithmic(true)
-                                    .suffix(" fr/upd"),
-                            );
-                        });
-                        if self.hunt_speed == 1 {
-                            ui.label("(tempo real — dá pra ver navegando)");
-                        }
-
-                        if self.hunting {
-                            if ui.button("⏹ Parar caça").clicked() {
-                                self.hunting = false;
-                            }
-                        } else if ui.button("▶ Iniciar caça").clicked() {
-                            self.start_hunt();
-                        }
-
-                        ui.label(format!("Tentativas: {}", self.hunter.attempts));
-                        if self.hunter.last_pid != 0 {
-                            ui.label(format!(
-                                "Último PID: {:08X}  (valor shiny: {})",
-                                self.hunter.last_pid, self.hunter.last_shiny_value
-                            ));
-                            ui.label(format!(
-                                "Espécie lida (índice interno): {}",
-                                self.hunter.last_species
-                            ));
-                        }
-                        if self.hunter.found {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(255, 105, 180),
-                                "✨ SHINY ENCONTRADO!",
-                            );
-                        }
-                    }
-                    None => {
-                        ui.label("Jogo não reconhecido.");
-                        ui.label("(carregue uma ROM Gen 3 suportada)");
-                    }
-                });
-
                 ui.separator();
                 ui.label(format!("Scale: {:.0}x", self.scale));
                 ui.add(egui::Slider::new(&mut self.scale, 1.0..=6.0).show_value(false));
             });
         });
+
+        // Painel do Shiny Hunter (só quando o jogo é reconhecido).
+        if self.profile.is_some() {
+            egui::SidePanel::right("shiny_panel")
+                .min_width(230.0)
+                .show(ctx, |ui| self.shiny_panel(ui));
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
