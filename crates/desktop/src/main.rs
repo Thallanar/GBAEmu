@@ -426,7 +426,21 @@ impl AuroraApp {
                     for &off in &self.ram_search.candidates {
                         let addr = 0x0300_0000u32 + off as u32;
                         let val = self.gba.bus.iwram[off as usize];
-                        ui.monospace(format!("0x{addr:08X} = {val}"));
+                        // Se o candidato for `gTasks[i].data[0]`, a função da task
+                        // fica 8 bytes antes (offset 0 da struct Task). Mostrar
+                        // esse ponteiro permite cravar a detecção do menu aberto.
+                        let func = (off >= 8)
+                            .then(|| {
+                                let b = off as usize - 8;
+                                u32::from_le_bytes([
+                                    self.gba.bus.iwram[b],
+                                    self.gba.bus.iwram[b + 1],
+                                    self.gba.bus.iwram[b + 2],
+                                    self.gba.bus.iwram[b + 3],
+                                ])
+                            })
+                            .unwrap_or(0);
+                        ui.monospace(format!("0x{addr:08X} = {val}   (func: 0x{func:08X})"));
                     }
                 }
             }
