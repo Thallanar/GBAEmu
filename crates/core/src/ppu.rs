@@ -9,7 +9,12 @@
 //!   - 160 scanlines visíveis + 68 de VBlank  = 228 scanlines/frame
 //!   - Total: 228 × 1232 = 280 896 ciclos/frame (~59.7 Hz)
 //!
-//! Sprites (OBJ), janelas, blending e mosaic virão numa próxima iteração.
+//! Composição: cada camada (BG0-3, OBJ, backdrop) entra num resolvedor por pixel
+//! que guarda as DUAS da frente (top-1/top-2). Sobre elas aplicam-se, em ordem:
+//!   - janelas (WIN0/1/OBJ): mascaram quais camadas aparecem e se o efeito liga;
+//!   - blending (BLDCNT): alpha entre top-1/top-2, ou brilho ±; OBJ
+//!     semitransparente força alpha-blend;
+//!   - mosaic (BG e OBJ): amostragem "esticada" ao canto do bloco.
 
 use crate::io::irq_bits;
 use crate::{SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -27,6 +32,10 @@ const DISPSTAT_VBLANK_IRQ: u16 = 1 << 3;
 const DISPSTAT_HBLANK_IRQ: u16 = 1 << 4;
 const DISPSTAT_VCOUNT_IRQ: u16 = 1 << 5;
 // bits 8..15: VCount setting (alvo da VCount match interrupt)
+
+// Identidade das camadas (índice de bit em WININ/WINOUT e nos alvos do BLDCNT).
+const LAYER_OBJ: u8 = 4;
+const LAYER_BD: u8 = 5; // backdrop
 
 pub struct Ppu {
     /// Framebuffer RGBA8, 240×160.
@@ -53,6 +62,29 @@ pub struct Ppu {
     bg_ref_y: [i32; 2],
     bg_cur_x: [i32; 2],
     bg_cur_y: [i32; 2],
+
+    // ── Janelas (windows) ──
+    /// WIN0H/WIN1H: X1 no byte alto, X2 (exclusivo) no byte baixo.
+    win_h: [u16; 2],
+    /// WIN0V/WIN1V: Y1 no byte alto, Y2 (exclusivo) no byte baixo.
+    win_v: [u16; 2],
+    /// WININ: máscara de camadas dentro de WIN0 (bits 0-5) e WIN1 (bits 8-13).
+    winin: u16,
+    /// WINOUT: máscara fora de todas as janelas (bits 0-5) e da OBJ-window
+    /// (bits 8-13). Bit 5/13 = habilita efeito especial (blending) na região.
+    winout: u16,
+
+    // ── Mosaic ──
+    /// MOSAIC: BG H (bits 0-3), BG V (4-7), OBJ H (8-11), OBJ V (12-15). +1 = tamanho.
+    mosaic: u16,
+
+    // ── Blending (efeitos de cor) ──
+    /// BLDCNT: 1º alvo (bits 0-5), modo (6-7), 2º alvo (8-13).
+    bldcnt: u16,
+    /// BLDALPHA: coef. EVA do 1º alvo (bits 0-4), EVB do 2º (8-12), passo 1/16.
+    bldalpha: u16,
+    /// BLDY: coef. EVY de brilho (bits 0-4), passo 1/16.
+    bldy: u16,
 
     /// Ciclos acumulados no scanline atual.
     cycles: u32,
@@ -89,6 +121,14 @@ impl Ppu {
             bg_ref_y: [0; 2],
             bg_cur_x: [0; 2],
             bg_cur_y: [0; 2],
+            win_h: [0; 2],
+            win_v: [0; 2],
+            winin: 0,
+            winout: 0,
+            mosaic: 0,
+            bldcnt: 0,
+            bldalpha: 0,
+            bldy: 0,
             cycles: 0,
             in_hblank: false,
         }
@@ -179,99 +219,193 @@ impl Ppu {
             return;
         }
 
-        // Buffer de linha + prioridade por pixel (4 = backdrop, atrás de tudo).
         let backdrop = palette_color(palette, 0);
-        let mut line = [backdrop; SCREEN_WIDTH];
-        let mut prio = [4u8; SCREEN_WIDTH];
 
-        match mode {
-            0 => self.render_bgs(
-                yu,
-                vram,
-                palette,
-                &mut line,
-                &mut prio,
-                &[false, false, false, false],
-            ),
-            1 => self.render_bgs(
-                yu,
-                vram,
-                palette,
-                &mut line,
-                &mut prio,
-                &[false, false, true, false],
-            ),
-            2 => self.render_bgs(
-                yu,
-                vram,
-                palette,
-                &mut line,
-                &mut prio,
-                &[false, false, true, true],
-            ),
-            3 => self.render_mode3(yu, vram, &mut line, &mut prio),
-            4 => self.render_mode4(yu, vram, palette, &mut line, &mut prio),
-            5 => self.render_mode5(yu, vram, palette, &mut line, &mut prio),
-            _ => {}
+        // 1. Cada BG habilitado renderiza no SEU buffer (cor + opacidade). A
+        //    prioridade e a identidade da camada são resolvidas só na composição
+        //    — preciso disso pra saber, por pixel, quais são as DUAS camadas da
+        //    frente (top-1 e top-2), que é o que o blending mistura.
+        // `bg_kind[bg]` = Some(é_afim?) se o BG participa neste modo; None senão.
+        let bg_kind: [Option<bool>; 4] = match mode {
+            0 => [Some(false), Some(false), Some(false), Some(false)],
+            1 => [Some(false), Some(false), Some(true), None],
+            2 => [None, None, Some(true), Some(true)],
+            3..=5 => [None, None, Some(false), None], // só BG2 (bitmap)
+            _ => [None; 4],
+        };
+        let mut bg_c = [[[0u8; 4]; SCREEN_WIDTH]; 4];
+        let mut bg_op = [[false; SCREEN_WIDTH]; 4];
+        let mut bg_prio = [0u8; 4];
+        let mut bg_on = [false; 4];
+        for bg in 0..4 {
+            let Some(affine) = bg_kind[bg] else { continue };
+            if self.dispcnt & (1 << (8 + bg)) == 0 {
+                continue;
+            }
+            bg_on[bg] = true;
+            bg_prio[bg] = (self.bgcnt[bg] & 0b11) as u8;
+            let (c, op) = (&mut bg_c[bg], &mut bg_op[bg]);
+            match mode {
+                0..=2 if affine => self.render_affine_bg(bg, vram, palette, c, op),
+                0..=2 => self.render_text_bg(bg, yu, vram, palette, c, op),
+                3 => self.render_mode3(yu, vram, c, op),
+                4 => self.render_mode4(yu, vram, palette, c, op),
+                5 => self.render_mode5(yu, vram, palette, c, op),
+                _ => {}
+            }
         }
 
-        // Sprites (OBJ) — habilitados pelo bit 12 do DISPCNT.
+        // 2. OBJ: cor + prioridade + flag de semitransparência + flag de
+        //    janela-OBJ, por pixel.
+        let mut obj_c = [[0u8; 4]; SCREEN_WIDTH];
+        let mut obj_prio = [255u8; SCREEN_WIDTH];
+        let mut obj_semi = [false; SCREEN_WIDTH];
+        let mut obj_win = [false; SCREEN_WIDTH];
         if self.dispcnt & (1 << 12) != 0 {
-            self.render_sprites(yu, vram, palette, oam, &mut line, &mut prio);
+            self.render_sprites(
+                yu,
+                vram,
+                palette,
+                oam,
+                &mut obj_c,
+                &mut obj_prio,
+                &mut obj_semi,
+                &mut obj_win,
+            );
         }
 
-        for (x, px) in line.iter().enumerate() {
-            self.put_pixel(x, yu, *px);
+        // 3. Composição por pixel: junta as camadas de trás pra frente achando
+        //    top-1/top-2, aplica janelas (quem aparece + se o efeito liga) e
+        //    então o blending.
+        for x in 0..SCREEN_WIDTH {
+            let win = self.window_mask(x, yu, obj_win[x]);
+
+            // Camada do topo e a de baixo: (cor, layer_id, é_OBJ_semi).
+            let mut top = (backdrop, LAYER_BD, false);
+            let mut sub = (backdrop, LAYER_BD);
+            // Empurra de trás (prio 3) pra frente (prio 0). No mesmo nível de
+            // prioridade, OBJ fica à frente dos BGs, e BG menor à frente do maior.
+            for prio in (0..=3u8).rev() {
+                for bg in (0..4usize).rev() {
+                    if bg_on[bg]
+                        && bg_prio[bg] == prio
+                        && bg_op[bg][x]
+                        && win & (1 << bg) != 0
+                    {
+                        sub = (top.0, top.1);
+                        top = (bg_c[bg][x], bg as u8, false);
+                    }
+                }
+                if obj_prio[x] == prio && win & (1 << LAYER_OBJ) != 0 {
+                    sub = (top.0, top.1);
+                    top = (obj_c[x], LAYER_OBJ, obj_semi[x]);
+                }
+            }
+
+            let effect = win & (1 << 5) != 0;
+            let color = self.apply_effects(top, sub, effect);
+            self.put_pixel(x, yu, color);
         }
     }
 
-    /// Compõe os backgrounds habilitados de um modo em tiles, do mais ao fundo
-    /// para o mais à frente. `affine[b]` indica se o BG `b` é afim.
-    fn render_bgs(
+    /// Máscara de camadas (6 bits) que vale para o pixel `(x,y)`: bits 0-3 = BG0-3
+    /// visíveis, bit 4 = OBJ visível, bit 5 = efeito especial (blending) ligado.
+    /// Sem nenhuma janela ativa, tudo é visível e o efeito liga em toda a tela.
+    fn window_mask(&self, x: usize, y: usize, obj_window_here: bool) -> u8 {
+        let win0 = self.dispcnt & (1 << 13) != 0;
+        let win1 = self.dispcnt & (1 << 14) != 0;
+        let objwin = self.dispcnt & (1 << 15) != 0;
+        if !win0 && !win1 && !objwin {
+            return 0x3F; // bits 0-5 todos ligados
+        }
+        if win0 && self.inside_window(0, x, y) {
+            return (self.winin & 0x3F) as u8;
+        }
+        if win1 && self.inside_window(1, x, y) {
+            return ((self.winin >> 8) & 0x3F) as u8;
+        }
+        if objwin && obj_window_here {
+            return ((self.winout >> 8) & 0x3F) as u8;
+        }
+        (self.winout & 0x3F) as u8
+    }
+
+    /// Tamanho do mosaic (H, V) deste BG, ou (1,1) se o BG não usa mosaic
+    /// (BGxCNT bit 6). `n` = `campo+1`.
+    fn bg_mosaic(&self, bg: usize) -> (usize, usize) {
+        if self.bgcnt[bg] & (1 << 6) != 0 {
+            (
+                (self.mosaic & 0xF) as usize + 1,
+                ((self.mosaic >> 4) & 0xF) as usize + 1,
+            )
+        } else {
+            (1, 1)
+        }
+    }
+
+    /// O pixel `(x,y)` está dentro da janela `w` (0 ou 1)? X2/Y2 são exclusivos;
+    /// quando o fim < início, a faixa "dá a volta" (quirk do hardware).
+    fn inside_window(&self, w: usize, x: usize, y: usize) -> bool {
+        let x1 = (self.win_h[w] >> 8) as usize;
+        let x2 = (self.win_h[w] & 0xFF) as usize;
+        let y1 = (self.win_v[w] >> 8) as usize;
+        let y2 = (self.win_v[w] & 0xFF) as usize;
+        let in_x = if x1 <= x2 { x >= x1 && x < x2 } else { x >= x1 || x < x2 };
+        let in_y = if y1 <= y2 { y >= y1 && y < y2 } else { y >= y1 || y < y2 };
+        in_x && in_y
+    }
+
+    /// Aplica o efeito de cor ao pixel já resolvido. `top`/`sub` são as duas
+    /// camadas da frente; `effect` diz se a janela permite efeito especial aqui.
+    /// OBJ semitransparente força alpha-blend com a 2ª camada (se ela for 2º
+    /// alvo), independente do modo do BLDCNT.
+    fn apply_effects(
         &self,
-        y: usize,
-        vram: &[u8],
-        palette: &[u8],
-        line: &mut [[u8; 4]; SCREEN_WIDTH],
-        prio: &mut [u8; SCREEN_WIDTH],
-        affine: &[bool; 4],
-    ) {
-        // Coleta os BGs habilitados com (prioridade, índice, afim).
-        let mut order: [(u8, usize, bool); 4] = [(0, 0, false); 4];
-        let mut count = 0;
-        for (bg, &is_affine) in affine.iter().enumerate() {
-            if self.dispcnt & (1 << (8 + bg)) != 0 {
-                let p = (self.bgcnt[bg] & 0b11) as u8;
-                order[count] = (p, bg, is_affine);
-                count += 1;
-            }
+        top: ([u8; 4], u8, bool),
+        sub: ([u8; 4], u8),
+        effect: bool,
+    ) -> [u8; 4] {
+        let (top_c, top_layer, top_semi) = top;
+        let (sub_c, sub_layer) = sub;
+        if !effect {
+            return top_c;
         }
-        // Ordena de trás para frente: maior prioridade-número e maior índice
-        // primeiro; assim o último pintado (prioridade 0, BG0) fica na frente.
-        let active = &mut order[..count];
-        active.sort_by_key(|&(p, bg, _)| std::cmp::Reverse((p, bg)));
+        let sub_is_2nd = self.bldcnt & (1 << (8 + sub_layer)) != 0;
+        let eva = (self.bldalpha & 0x1F).min(16) as u32;
+        let evb = ((self.bldalpha >> 8) & 0x1F).min(16) as u32;
+        let evy = (self.bldy & 0x1F).min(16) as u32;
 
-        for &(p, bg, is_affine) in active.iter() {
-            if is_affine {
-                self.render_affine_bg(bg, p, vram, palette, line, prio);
+        // OBJ semitransparente: sempre 1º alvo, alpha-blend se há 2º alvo embaixo.
+        if top_semi {
+            return if sub_is_2nd {
+                alpha_blend(top_c, sub_c, eva, evb)
             } else {
-                self.render_text_bg(bg, y, p, vram, palette, line, prio);
-            }
+                top_c
+            };
+        }
+
+        let top_is_1st = self.bldcnt & (1 << top_layer) != 0;
+        if !top_is_1st {
+            return top_c;
+        }
+        match (self.bldcnt >> 6) & 0b11 {
+            1 if sub_is_2nd => alpha_blend(top_c, sub_c, eva, evb),
+            2 => brighten(top_c, evy),
+            3 => darken(top_c, evy),
+            _ => top_c,
         }
     }
 
-    /// Renderiza uma scanline de um background em modo texto, pintando os pixels
-    /// opacos sobre `line` e registrando a prioridade `p` em `prio`.
-    #[allow(clippy::too_many_arguments)]
+    /// Renderiza uma scanline de um background em modo texto no buffer do BG:
+    /// marca `opaque[x]` e grava `color[x]` nos pixels não-transparentes.
     fn render_text_bg(
         &self,
         bg: usize,
         y: usize,
-        p: u8,
         vram: &[u8],
         palette: &[u8],
-        line: &mut [[u8; 4]; SCREEN_WIDTH],
-        prio: &mut [u8; SCREEN_WIDTH],
+        color: &mut [[u8; 4]; SCREEN_WIDTH],
+        opaque: &mut [bool; SCREEN_WIDTH],
     ) {
         let cnt = self.bgcnt[bg];
         let char_base = (((cnt >> 2) & 0b11) as usize) * 0x4000;
@@ -287,12 +421,17 @@ impl Ppu {
 
         let hofs = (self.bg_hofs[bg] & 0x1FF) as usize;
         let vofs = (self.bg_vofs[bg] & 0x1FF) as usize;
-        let by = (y + vofs) & (height - 1);
+        // Mosaic: amostra a partir do canto do bloco (replica o pixel do topo-
+        // esquerda), tanto na vertical (scanline) quanto na horizontal.
+        let (mh, mv) = self.bg_mosaic(bg);
+        let ey = (y / mv) * mv;
+        let by = (ey + vofs) & (height - 1);
         let map_y = by / 8;
         let py = by % 8;
 
         for x in 0..SCREEN_WIDTH {
-            let bx = (x + hofs) & (width - 1);
+            let ex = (x / mh) * mh;
+            let bx = (ex + hofs) & (width - 1);
             let map_x = bx / 8;
 
             // Seleção do screenblock (32×32 tiles cada) dentro do BG, conforme
@@ -340,8 +479,8 @@ impl Ppu {
             if color_idx == 0 {
                 continue; // transparente
             }
-            line[x] = palette_color(palette, color_idx);
-            prio[x] = p;
+            color[x] = palette_color(palette, color_idx);
+            opaque[x] = true;
         }
     }
 
@@ -349,11 +488,10 @@ impl Ppu {
     fn render_affine_bg(
         &self,
         bg: usize,
-        p: u8,
         vram: &[u8],
         palette: &[u8],
-        line: &mut [[u8; 4]; SCREEN_WIDTH],
-        prio: &mut [u8; SCREEN_WIDTH],
+        color: &mut [[u8; 4]; SCREEN_WIDTH],
+        opaque: &mut [bool; SCREEN_WIDTH],
     ) {
         let k = bg - 2; // BG2 → 0, BG3 → 1
         let cnt = self.bgcnt[bg];
@@ -402,14 +540,9 @@ impl Ppu {
             if color_idx == 0 {
                 continue; // transparente
             }
-            line[x] = palette_color(palette, color_idx);
-            prio[x] = p;
+            color[x] = palette_color(palette, color_idx);
+            opaque[x] = true;
         }
-    }
-
-    /// Prioridade efetiva de BG2 (camada onde os modos bitmap desenham).
-    fn bg2_priority(&self) -> u8 {
-        (self.bgcnt[2] & 0b11) as u8
     }
 
     /// Modo 3: 240×160, BGR555 direto na VRAM (sem double-buffer).
@@ -417,21 +550,17 @@ impl Ppu {
         &self,
         y: usize,
         vram: &[u8],
-        line: &mut [[u8; 4]; SCREEN_WIDTH],
-        prio: &mut [u8; SCREEN_WIDTH],
+        color: &mut [[u8; 4]; SCREEN_WIDTH],
+        opaque: &mut [bool; SCREEN_WIDTH],
     ) {
-        if self.dispcnt & (1 << 10) == 0 {
-            return; // BG2 desabilitado
-        }
-        let p = self.bg2_priority();
         for x in 0..SCREEN_WIDTH {
             let off = (y * SCREEN_WIDTH + x) * 2;
             if off + 1 >= vram.len() {
                 break;
             }
-            let color = u16::from_le_bytes([vram[off], vram[off + 1]]);
-            line[x] = bgr555_to_rgba8(color);
-            prio[x] = p;
+            let c = u16::from_le_bytes([vram[off], vram[off + 1]]);
+            color[x] = bgr555_to_rgba8(c);
+            opaque[x] = true;
         }
     }
 
@@ -442,13 +571,9 @@ impl Ppu {
         y: usize,
         vram: &[u8],
         palette: &[u8],
-        line: &mut [[u8; 4]; SCREEN_WIDTH],
-        prio: &mut [u8; SCREEN_WIDTH],
+        color: &mut [[u8; 4]; SCREEN_WIDTH],
+        opaque: &mut [bool; SCREEN_WIDTH],
     ) {
-        if self.dispcnt & (1 << 10) == 0 {
-            return;
-        }
-        let p = self.bg2_priority();
         let frame_base = if self.dispcnt & (1 << 4) != 0 {
             0xA000
         } else {
@@ -463,8 +588,8 @@ impl Ppu {
             if idx == 0 {
                 continue; // índice 0 = transparente (mostra backdrop)
             }
-            line[x] = palette_color(palette, idx);
-            prio[x] = p;
+            color[x] = palette_color(palette, idx);
+            opaque[x] = true;
         }
     }
 
@@ -474,13 +599,9 @@ impl Ppu {
         y: usize,
         vram: &[u8],
         _palette: &[u8],
-        line: &mut [[u8; 4]; SCREEN_WIDTH],
-        prio: &mut [u8; SCREEN_WIDTH],
+        color: &mut [[u8; 4]; SCREEN_WIDTH],
+        opaque: &mut [bool; SCREEN_WIDTH],
     ) {
-        if self.dispcnt & (1 << 10) == 0 {
-            return;
-        }
-        let p = self.bg2_priority();
         let frame_base = if self.dispcnt & (1 << 4) != 0 {
             0xA000
         } else {
@@ -494,8 +615,8 @@ impl Ppu {
             if off + 1 >= vram.len() {
                 break;
             }
-            line[x] = bgr555_to_rgba8(u16::from_le_bytes([vram[off], vram[off + 1]]));
-            prio[x] = p;
+            color[x] = bgr555_to_rgba8(u16::from_le_bytes([vram[off], vram[off + 1]]));
+            opaque[x] = true;
         }
     }
 
@@ -511,19 +632,18 @@ impl Ppu {
     ///
     /// Ordem entre sprites: o de menor índice de OAM fica por cima (independe da
     /// prioridade). Já a prioridade do sprite decide quem vence o BG no pixel.
+    #[allow(clippy::too_many_arguments)]
     fn render_sprites(
         &self,
         y: usize,
         vram: &[u8],
         palette: &[u8],
         oam: &[u8],
-        line: &mut [[u8; 4]; SCREEN_WIDTH],
-        prio: &mut [u8; SCREEN_WIDTH],
+        obj_c: &mut [[u8; 4]; SCREEN_WIDTH],
+        obj_prio: &mut [u8; SCREEN_WIDTH],
+        obj_semi: &mut [bool; SCREEN_WIDTH],
+        obj_win: &mut [bool; SCREEN_WIDTH],
     ) {
-        // Buffer dos sprites: cor + prioridade por pixel (255 = vazio).
-        let mut obj = [[0u8; 4]; SCREEN_WIDTH];
-        let mut obj_prio = [255u8; SCREEN_WIDTH];
-
         let one_d = self.dispcnt & (1 << 6) != 0;
         let rd16 = |off: usize| u16::from_le_bytes([oam[off], oam[off + 1]]);
 
@@ -533,12 +653,20 @@ impl Ppu {
             let attr1 = rd16(base + 2);
             let attr2 = rd16(base + 4);
 
-            let obj_mode = (attr0 >> 8) & 0b11;
-            if obj_mode == 2 {
+            // Bits 8-9: rotação/escala. 0=normal, 1=afim, 2=desabilitado,
+            // 3=afim+dobro. NÃO confundir com o "gfx mode" (bits 10-11).
+            let rot = (attr0 >> 8) & 0b11;
+            if rot == 2 {
                 continue; // sprite desabilitado
             }
-            let affine = obj_mode == 1 || obj_mode == 3;
-            let double = obj_mode == 3;
+            let affine = rot == 1 || rot == 3;
+            let double = rot == 3;
+
+            // Gfx mode (bits 10-11): 0=normal, 1=semitransparente (força blend),
+            // 2=janela-OBJ (marca região, não desenha cor), 3=proibido (≈normal).
+            let gfx_mode = (attr0 >> 10) & 0b11;
+            let is_window = gfx_mode == 2;
+            let is_semi = gfx_mode == 1;
 
             let shape = (attr0 >> 14) & 0b11;
             let size = (attr1 >> 14) & 0b11;
@@ -573,14 +701,27 @@ impl Ppu {
             let hflip = !affine && attr1 & (1 << 12) != 0;
             let vflip = !affine && attr1 & (1 << 13) != 0;
 
+            // Mosaic de OBJ (attr0 bit 12): (1,1) = sem efeito, então o snap fica
+            // sendo a identidade.
+            let (moh, mov) = if attr0 & (1 << 12) != 0 {
+                (
+                    ((self.mosaic >> 8) & 0xF) as usize + 1,
+                    ((self.mosaic >> 12) & 0xF) as usize + 1,
+                )
+            } else {
+                (1, 1)
+            };
+
             for col in 0..bw as i32 {
                 let screen_x = (x0 + col) & 0x1FF;
                 if screen_x >= SCREEN_WIDTH as i32 {
                     continue;
                 }
                 let sx = screen_x as usize;
-                if obj_prio[sx] != 255 {
-                    continue; // já pintado por sprite de índice menor
+                // Sprites de cor: o de menor índice de OAM vence (não sobrescreve).
+                // Sprites de janela só marcam região, então não respeitam isso.
+                if !is_window && obj_prio[sx] != 255 {
+                    continue;
                 }
 
                 // Coordenada de textura (tex_x, tex_y) dentro do sprite [0,w)×[0,h).
@@ -598,6 +739,9 @@ impl Ppu {
                 if tex_x < 0 || tex_y < 0 || tex_x >= w as i32 || tex_y >= h as i32 {
                     continue;
                 }
+                // Aplica o mosaic de OBJ (snap ao canto do bloco).
+                let tex_x = (tex_x as usize / moh) * moh;
+                let tex_y = (tex_y as usize / mov) * mov;
 
                 if let Some(color) = self.sample_sprite(
                     vram,
@@ -607,20 +751,17 @@ impl Ppu {
                     pal_bank,
                     one_d,
                     w,
-                    tex_x as usize,
-                    tex_y as usize,
+                    tex_x,
+                    tex_y,
                 ) {
-                    obj[sx] = color;
-                    obj_prio[sx] = priority;
+                    if is_window {
+                        obj_win[sx] = true; // marca a região da janela-OBJ
+                    } else {
+                        obj_c[sx] = color;
+                        obj_prio[sx] = priority;
+                        obj_semi[sx] = is_semi;
+                    }
                 }
-            }
-        }
-
-        // Composição: o sprite vence o BG quando sua prioridade ≤ a do pixel.
-        for x in 0..SCREEN_WIDTH {
-            if obj_prio[x] != 255 && obj_prio[x] <= prio[x] {
-                line[x] = obj[x];
-                prio[x] = obj_prio[x];
             }
         }
     }
@@ -704,7 +845,17 @@ impl Ppu {
                     (v >> 8) as u8
                 }
             }
-            _ => 0, // scroll/afins são write-only
+            // WININ/WINOUT/BLDCNT/BLDALPHA são legíveis; o resto (coords de
+            // janela, MOSAIC, BLDY) é write-only e lê 0.
+            0x48 => self.winin as u8,
+            0x49 => (self.winin >> 8) as u8,
+            0x4A => self.winout as u8,
+            0x4B => (self.winout >> 8) as u8,
+            0x50 => self.bldcnt as u8,
+            0x51 => (self.bldcnt >> 8) as u8,
+            0x52 => self.bldalpha as u8,
+            0x53 => (self.bldalpha >> 8) as u8,
+            _ => 0, // scroll/afins/coords de janela/MOSAIC/BLDY são write-only
         }
     }
 
@@ -747,6 +898,28 @@ impl Ppu {
             // Parâmetros afins de BG2 (0x20..0x2F) e BG3 (0x30..0x3F).
             0x20..=0x2F => self.write_affine_reg(0, reg - 0x20, val),
             0x30..=0x3F => self.write_affine_reg(1, reg - 0x30, val),
+            // Janelas, mosaic e blending (0x40..0x55). Escrita byte-a-byte num
+            // registrador u16 via `set_byte`.
+            0x40 => set_byte(&mut self.win_h[0], false, v),
+            0x41 => set_byte(&mut self.win_h[0], true, v),
+            0x42 => set_byte(&mut self.win_h[1], false, v),
+            0x43 => set_byte(&mut self.win_h[1], true, v),
+            0x44 => set_byte(&mut self.win_v[0], false, v),
+            0x45 => set_byte(&mut self.win_v[0], true, v),
+            0x46 => set_byte(&mut self.win_v[1], false, v),
+            0x47 => set_byte(&mut self.win_v[1], true, v),
+            0x48 => set_byte(&mut self.winin, false, v),
+            0x49 => set_byte(&mut self.winin, true, v),
+            0x4A => set_byte(&mut self.winout, false, v),
+            0x4B => set_byte(&mut self.winout, true, v),
+            0x4C => set_byte(&mut self.mosaic, false, v),
+            0x4D => set_byte(&mut self.mosaic, true, v),
+            0x50 => set_byte(&mut self.bldcnt, false, v),
+            0x51 => set_byte(&mut self.bldcnt, true, v),
+            0x52 => set_byte(&mut self.bldalpha, false, v),
+            0x53 => set_byte(&mut self.bldalpha, true, v),
+            0x54 => set_byte(&mut self.bldy, false, v),
+            0x55 => set_byte(&mut self.bldy, true, v),
             _ => {}
         }
     }
@@ -800,6 +973,37 @@ impl Default for Ppu {
 /// Sign-extend de um valor de 28 bits (registradores BGxX/BGxY) para i32.
 fn sign_extend_28(v: u32) -> i32 {
     ((v << 4) as i32) >> 4
+}
+
+/// Alpha-blend: `top*eva/16 + sub*evb/16`, por canal, saturando em 255.
+#[inline]
+fn alpha_blend(top: [u8; 4], sub: [u8; 4], eva: u32, evb: u32) -> [u8; 4] {
+    let mix = |a: u8, b: u8| (((a as u32 * eva + b as u32 * evb) >> 4).min(255)) as u8;
+    [mix(top[0], sub[0]), mix(top[1], sub[1]), mix(top[2], sub[2]), 0xFF]
+}
+
+/// Clareia em direção ao branco: `c + (255-c)*evy/16`, por canal.
+#[inline]
+fn brighten(c: [u8; 4], evy: u32) -> [u8; 4] {
+    let f = |x: u8| (x as u32 + (((255 - x as u32) * evy) >> 4)) as u8;
+    [f(c[0]), f(c[1]), f(c[2]), 0xFF]
+}
+
+/// Escurece em direção ao preto: `c - c*evy/16`, por canal.
+#[inline]
+fn darken(c: [u8; 4], evy: u32) -> [u8; 4] {
+    let f = |x: u8| (x as u32 - ((x as u32 * evy) >> 4)) as u8;
+    [f(c[0]), f(c[1]), f(c[2]), 0xFF]
+}
+
+/// Escreve o byte baixo (`hi=false`) ou alto (`hi=true`) de um registrador u16.
+#[inline]
+fn set_byte(reg: &mut u16, hi: bool, v: u16) {
+    *reg = if hi {
+        (*reg & 0x00FF) | (v << 8)
+    } else {
+        (*reg & 0xFF00) | v
+    };
 }
 
 /// Dimensões (largura, altura) de um sprite em pixels, conforme shape × size.
@@ -982,6 +1186,149 @@ mod tests {
         p.tick(CYCLES_PER_SCANLINE, &v, &pal, &oam);
         // BG1 (prioridade 0) deve vencer → azul.
         assert_eq!(p.framebuffer[0..4], [0, 0, 0xFF, 0xFF]);
+    }
+
+    const WHITE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
+    const BLACK: [u8; 4] = [0, 0, 0, 0xFF];
+
+    #[test]
+    fn blend_math_helpers() {
+        // Alpha 50/50 de branco com preto = cinza médio.
+        assert_eq!(alpha_blend(WHITE, BLACK, 8, 8), [127, 127, 127, 0xFF]);
+        // Saturação: branco + branco (eva=evb=16) não estoura.
+        assert_eq!(alpha_blend(WHITE, WHITE, 16, 16), WHITE);
+        // Clareia preto ao máximo (evy=16) = branco; metade = cinza.
+        assert_eq!(brighten(BLACK, 16), WHITE);
+        assert_eq!(brighten(BLACK, 8), [127, 127, 127, 0xFF]);
+        // Escurece branco ao máximo = preto; metade = cinza.
+        assert_eq!(darken(WHITE, 16), BLACK);
+        assert_eq!(darken(WHITE, 8), [128, 128, 128, 0xFF]);
+    }
+
+    #[test]
+    fn apply_effects_alpha_mixes_targets() {
+        let mut p = Ppu::new();
+        // BG0 = 1º alvo, modo 1 (alpha), BG1 = 2º alvo. EVA=EVB=8.
+        p.bldcnt = (1 << 0) | (0b01 << 6) | (1 << (8 + 1));
+        p.bldalpha = 8 | (8 << 8);
+        let top = (WHITE, 0u8, false);
+        let sub = (BLACK, 1u8);
+        assert_eq!(p.apply_effects(top, sub, true), [127, 127, 127, 0xFF]);
+        // Janela desliga o efeito → cor do topo intacta.
+        assert_eq!(p.apply_effects(top, sub, false), WHITE);
+        // 2ª camada não é 2º alvo → sem blend.
+        assert_eq!(p.apply_effects(top, (BLACK, 2u8), true), WHITE);
+    }
+
+    #[test]
+    fn apply_effects_brighten_and_darken() {
+        let mut p = Ppu::new();
+        p.bldy = 16;
+        p.bldcnt = (1 << 0) | (0b10 << 6); // BG0 1º alvo, clarear
+        assert_eq!(p.apply_effects((BLACK, 0, false), (BLACK, 5), true), WHITE);
+        p.bldcnt = (1 << 0) | (0b11 << 6); // escurecer
+        assert_eq!(p.apply_effects((WHITE, 0, false), (BLACK, 5), true), BLACK);
+        // BG0 não é 1º alvo → nada acontece.
+        p.bldcnt = 0b11 << 6;
+        assert_eq!(p.apply_effects((WHITE, 0, false), (BLACK, 5), true), WHITE);
+    }
+
+    #[test]
+    fn semi_transparent_obj_forces_blend() {
+        let mut p = Ppu::new();
+        // OBJ NÃO está marcado como 1º alvo e o modo é 0; mesmo assim o OBJ
+        // semitransparente deve misturar com o 2º alvo (BG1).
+        p.bldcnt = 1 << (8 + 1);
+        p.bldalpha = 8 | (8 << 8);
+        let semi_obj = (WHITE, LAYER_OBJ, true);
+        assert_eq!(p.apply_effects(semi_obj, (BLACK, 1), true), [127, 127, 127, 0xFF]);
+        // Embaixo não há 2º alvo → OBJ opaco normal.
+        assert_eq!(p.apply_effects(semi_obj, (BLACK, 2), true), WHITE);
+    }
+
+    #[test]
+    fn window_mask_gates_layers() {
+        let mut p = Ppu::new();
+        // Sem janelas: tudo visível + efeito ligado.
+        assert_eq!(p.window_mask(100, 50, false), 0x3F);
+
+        // WIN0 ativa, retângulo x∈[10,20), y∈[0,160).
+        p.dispcnt = 1 << 13;
+        p.win_h[0] = (10 << 8) | 20;
+        p.win_v[0] = 160; // y1=0, y2=160
+        p.winin = 0x01; // dentro: só BG0
+        p.winout = 0x1E; // fora: BG1-3 + OBJ
+        assert_eq!(p.window_mask(15, 50, false), 0x01);
+        assert_eq!(p.window_mask(25, 50, false), 0x1E);
+        // Fora da faixa vertical também conta como "fora".
+        p.win_v[0] = (40 << 8) | 60; // y∈[40,60)
+        assert_eq!(p.window_mask(15, 50, false), 0x01); // dentro
+        assert_eq!(p.window_mask(15, 70, false), 0x1E); // fora (y)
+    }
+
+    /// Mosaic de BG: com tamanho H=4, os pixels 1..3 de um bloco devem copiar a
+    /// cor do pixel 0 do bloco (pixel-art "esticado").
+    #[test]
+    fn bg_mosaic_replicates_block() {
+        let mut p = Ppu::new();
+        let mut v = vec![0u8; 0x18000];
+        let mut pal = vec![0u8; 0x400];
+
+        // BG0 modo 0, screen base block 1, mosaic ligado (BG0CNT bit 6).
+        p.dispcnt = 0x0100;
+        p.bgcnt[0] = (1 << 8) | (1 << 6);
+        p.mosaic = 0x0003; // H = 3+1 = 4, V = 1
+
+        // Tile 0 (4bpp): pixel 0 = índice 1, pixel 1 = índice 2 (cores diferentes).
+        v[0] = 0x21; // nibble baixo (px0)=1, nibble alto (px1)=2
+        // Map entry (0,0): tile 0, banco 0.
+        v[0x800] = 0;
+        v[0x801] = 0;
+        // Paleta: índice 1 = vermelho, índice 2 = verde.
+        pal[2] = 0x1F; // cor 1 = 0x001F (vermelho)
+        let green: u16 = 0x03E0;
+        pal[4] = green as u8; // cor 2 = verde
+        pal[5] = (green >> 8) as u8;
+
+        let oam = vec![0u8; 0x400];
+        p.tick(CYCLES_PER_SCANLINE, &v, &pal, &oam);
+        // Sem mosaic, px1 seria verde; COM mosaic H=4, px0..3 = vermelho.
+        assert_eq!(p.framebuffer[0..4], [0xFF, 0, 0, 0xFF]); // px0
+        assert_eq!(p.framebuffer[4..8], [0xFF, 0, 0, 0xFF]); // px1 copiou px0
+    }
+
+    /// Round-trip dos registradores de efeito (escrita byte-a-byte + leitura dos
+    /// que são legíveis).
+    #[test]
+    fn effect_registers_roundtrip() {
+        let mut p = Ppu::new();
+        // Escreve via barramento (2 bytes cada).
+        let w16 = |p: &mut Ppu, reg: u32, v: u16| {
+            p.write_u8(0x0400_0000 + reg, v as u8);
+            p.write_u8(0x0400_0000 + reg + 1, (v >> 8) as u8);
+        };
+        w16(&mut p, 0x40, 0x2840); // WIN0H: X1=0x28, X2=0x40
+        w16(&mut p, 0x48, 0x3F1F); // WININ
+        w16(&mut p, 0x4A, 0x203F); // WINOUT
+        w16(&mut p, 0x4C, 0x1234); // MOSAIC
+        w16(&mut p, 0x50, 0x3F41); // BLDCNT
+        w16(&mut p, 0x52, 0x0810); // BLDALPHA
+        w16(&mut p, 0x54, 0x000C); // BLDY
+
+        assert_eq!(p.win_h[0], 0x2840);
+        assert_eq!(p.mosaic, 0x1234);
+        assert_eq!(p.bldy, 0x000C);
+        // Legíveis de volta pelo barramento.
+        let r16 = |p: &Ppu, reg: u32| {
+            (p.read_u8(0x0400_0000 + reg) as u16) | ((p.read_u8(0x0400_0000 + reg + 1) as u16) << 8)
+        };
+        assert_eq!(r16(&p, 0x48), 0x3F1F);
+        assert_eq!(r16(&p, 0x4A), 0x203F);
+        assert_eq!(r16(&p, 0x50), 0x3F41);
+        assert_eq!(r16(&p, 0x52), 0x0810);
+        // Write-only leem 0.
+        assert_eq!(r16(&p, 0x40), 0);
+        assert_eq!(r16(&p, 0x54), 0);
     }
 
     /// Sprite 4bpp em (0,0): monta 1 tile de OBJ e verifica que cobre o backdrop.
