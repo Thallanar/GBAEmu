@@ -51,6 +51,10 @@ pub struct GameProfile {
     pub player_party: u32,
     /// Endereço de `gEnemyParty` (slot 0).
     pub enemy_party: u32,
+    /// Endereço de `gRngValue` (a seed do `Random()` do jogo, na IWRAM). O Hunter
+    /// injeta aqui uma seed aleatória do host a cada tentativa — é o que faz o PID
+    /// variar. `None` = sem injeção (caça determinística; ainda não mapeado).
+    pub rng_addr: Option<u32>,
     /// Alvos de caça suportados neste jogo.
     pub targets: &'static [TargetDef],
 }
@@ -78,6 +82,9 @@ const EMERALD: GameProfile = GameProfile {
     name: "Pokémon Emerald",
     player_party: 0x0202_44EC,
     enemy_party: 0x0202_4744,
+    // gRngValue do Emerald (confirmado empiricamente: injetar aqui no frame ~200
+    // dá 20/20 PIDs distintos; sem injeção, 1 único PID).
+    rng_addr: Some(0x0300_5D80),
     targets: &[
         // species=0 por ora (não verifica espécie): o índice interno do Gen 3
         // difere do dex nacional pros Pokémon de Hoenn; confirmamos na ROM e

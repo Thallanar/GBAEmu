@@ -18,6 +18,7 @@ use auroragba_core::joypad::Button;
 use auroragba_core::Gba;
 
 pub mod games;
+pub mod gfx;
 
 use games::{GameProfile, HuntMethod, TargetDef};
 
@@ -151,42 +152,113 @@ pub struct Hunter {
     /// Espécie (índice interno) lida no último encontro — confirma na UI que a
     /// caça parou no Pokémon certo.
     pub last_species: u16,
+    /// Menor `shiny_value` já visto nesta caça (quão perto chegou de um shiny —
+    /// `0xFFFF` = nada ainda). A UI mostra isso como "mais perto".
+    pub best_shiny_value: u16,
+    /// Número da tentativa em que o `best_shiny_value` aconteceu.
+    pub best_attempt: u64,
     /// Frames já gastos na tentativa em andamento (controle do `tick`).
     frames_this_attempt: u32,
-    /// Frames de "espera" no início da tentativa antes de começar a amassar A.
-    /// Varia por tentativa pra injetar entropia de timing — essencial no Emerald,
-    /// cujo RNG é determinístico (seed 0 no boot); sem isso, todo reset geraria
-    /// o mesmo PID.
-    entropy_delay: u32,
+    /// Seed do RNG do jogo a injetar **nesta** tentativa (sorteada do PRNG do
+    /// host). É o que de fato dá um PID diferente a cada reset — ver
+    /// [`Hunter::maybe_inject_seed`].
+    pending_seed: u32,
+    /// `true` depois que `pending_seed` já foi escrito na RAM nesta tentativa
+    /// (evita reinjetar a cada frame).
+    seed_injected: bool,
+    /// Estado do PRNG do host (SplitMix64). Semeado no `new()` por entropia real
+    /// (relógio + PID do processo), então **único por instância** — é isso que
+    /// faz vários emuladores abertos juntos gerarem PIDs diferentes em vez de
+    /// rodarem a mesma sequência determinística.
+    rng_state: u64,
 }
+
+/// Frame (contado desde o reset) em que injetamos a seed do RNG do jogo. Tem que
+/// cair *depois* de o jogo inicializar `gRngValue` no boot e *antes* de o PID do
+/// encontro ser sorteado. Medido empiricamente no Emerald: a janela segura vai
+/// de ~60 a ~500 frames (o PID é rolado entre 500 e 800); 200 fica folgado nas
+/// duas pontas.
+const SEED_INJECT_FRAME: u32 = 200;
+/// Largura de cada meio-ciclo do tap de A (8 pressionado / 8 solto). Cadência
+/// fixa: a entropia agora vem da seed injetada, não mais do timing.
+const MASH_PERIOD: u32 = 8;
 
 impl Hunter {
     pub fn new() -> Self {
-        Self {
+        let mut h = Self {
             attempts: 0,
             found: false,
             last_pid: 0,
             last_shiny_value: 0xFFFF,
             last_species: 0,
+            best_shiny_value: 0xFFFF,
+            best_attempt: 0,
             frames_this_attempt: 0,
-            entropy_delay: 0,
-        }
+            pending_seed: 0,
+            seed_injected: false,
+            rng_state: Self::host_seed(),
+        };
+        // Sorteia a seed da 1ª tentativa já no boot (a 1ª caça não passa por
+        // soft_reset antes do primeiro encontro).
+        h.reroll_seed();
+        h
     }
 
-    /// Espera (em frames) a aplicar no início da próxima tentativa, derivada do
-    /// nº de tentativas via hash — pseudo-aleatória mas determinística/reproduzível.
-    /// Espalha o "frame de geração" do PID ao longo de ~5s pra variar a seed.
-    fn next_delay(&self) -> u32 {
-        (self.attempts.wrapping_mul(0x9E37_79B1) % 300) as u32
+    /// Semente de entropia **real** do host: instante atual (nanos) misturado com
+    /// o PID do processo. Dois emuladores abertos no mesmo instante ainda diferem
+    /// pelo PID, então cada instância parte de um ponto distinto do PRNG.
+    fn host_seed() -> u64 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        nanos ^ ((std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+    }
+
+    /// Próximo valor do PRNG do host (SplitMix64). Não-periódico na prática
+    /// (período 2⁶⁴) e semeado por entropia real — substitui a antiga fórmula
+    /// `attempts % 300`, que repetia a cada 300 tentativas e era idêntica entre
+    /// instâncias.
+    fn next_rng(&mut self) -> u64 {
+        self.rng_state = self.rng_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.rng_state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Sorteia, do PRNG do host, a seed do RNG do jogo pra próxima tentativa.
+    /// Como vem de um PRNG de período 2⁶⁴ semeado por instância, nunca repete em
+    /// ciclo nem coincide entre emuladores — cada tentativa pega um ponto
+    /// independente do espaço de 2³² PIDs.
+    fn reroll_seed(&mut self) {
+        self.pending_seed = self.next_rng() as u32;
+        self.seed_injected = false;
+    }
+
+    /// No frame certo da tentativa, escreve `pending_seed` em `gRngValue` do jogo
+    /// (endereço no perfil). É a fonte de entropia da caça: sem isso o RNG do
+    /// Emerald é determinístico (seed fixa no boot) e todo reset, com o mesmo
+    /// roteiro de inputs, geraria o **mesmo** PID — medido: 1 único PID em 20
+    /// resets. Com a injeção: 20/20 distintos. Jogos sem `rng_addr` não têm
+    /// entropia (a caça vira determinística) — por ora só Emerald é suportado.
+    fn maybe_inject_seed(&mut self, gba: &mut Gba, profile: &GameProfile) {
+        if self.seed_injected || self.frames_this_attempt != SEED_INJECT_FRAME {
+            return;
+        }
+        if let Some(addr) = profile.rng_addr {
+            gba.bus.write_u32(addr, self.pending_seed);
+            self.seed_injected = true;
+        }
     }
 
     /// Power-cycle do console (preserva o Flash). Volta o jogo à tela de título;
     /// daí o `tick`/`advance_to_encounter` amassa A até a batalha. Sorteia uma
-    /// nova espera de entropia pra próxima tentativa render um PID diferente.
+    /// nova seed pra próxima tentativa render um PID diferente.
     pub fn soft_reset(&mut self, gba: &mut Gba) {
         gba.reset();
         self.frames_this_attempt = 0;
-        self.entropy_delay = self.next_delay();
+        self.reroll_seed();
     }
 
     /// Avança a emulação "amassando" A e Start (passa título → continuar →
@@ -200,11 +272,15 @@ impl Hunter {
         max_frames: u32,
     ) -> bool {
         let base = profile.target_base(target);
-        for frame in 0..max_frames {
+        self.frames_this_attempt = 0;
+        self.seed_injected = false;
+        for _ in 0..max_frames {
+            self.maybe_inject_seed(gba, profile);
             // Tapa A (ver `tick`): cobre título → continuar → bag → diálogos.
-            let press = (frame / 8).is_multiple_of(2);
+            let press = (self.frames_this_attempt / MASH_PERIOD).is_multiple_of(2);
             gba.bus.io.joypad.set_button(Button::A, press);
             gba.run_frame();
+            self.frames_this_attempt += 1;
 
             if self.encounter_ready(gba, base, target) {
                 gba.bus.io.joypad.set_button(Button::A, false);
@@ -245,6 +321,12 @@ impl Hunter {
         self.last_species = target_mon.species;
         self.last_shiny_value = shiny_value(target_mon.pid, tid, sid);
 
+        // Recorde de "quão perto" — menor valor já visto e em que tentativa.
+        if self.last_shiny_value < self.best_shiny_value {
+            self.best_shiny_value = self.last_shiny_value;
+            self.best_attempt = self.attempts;
+        }
+
         if self.last_shiny_value < 8 {
             self.found = true;
             log::info!(
@@ -280,21 +362,14 @@ impl Hunter {
         let base = profile.target_base(target);
 
         for _ in 0..batch {
-            // Espera de entropia: idle no começo da tentativa pra deslocar o
-            // frame de geração do PID (ver `entropy_delay`).
-            if self.frames_this_attempt < self.entropy_delay {
-                gba.bus.io.joypad.set_button(Button::A, false);
-                gba.run_frame();
-                self.frames_this_attempt += 1;
-                continue;
-            }
+            // No frame certo, injeta a seed do RNG do jogo (a entropia da caça).
+            self.maybe_inject_seed(gba, profile);
 
             // Tapa A (8 frames pressionado / 8 solto): confirma no título,
             // escolhe "Continuar", abre a bag, seleciona/confirma o inicial e
             // avança diálogos — tudo com A. Tap (não segurar) pra cada prompt
             // registrar uma borda de tecla.
-            let phase = self.frames_this_attempt - self.entropy_delay;
-            let press = (phase / 8).is_multiple_of(2);
+            let press = (self.frames_this_attempt / MASH_PERIOD).is_multiple_of(2);
             gba.bus.io.joypad.set_button(Button::A, press);
             gba.run_frame();
             self.frames_this_attempt += 1;
@@ -413,6 +488,75 @@ mod tests {
         assert!(!mon.valid);
     }
 
+    /// As seeds de uma única instância não podem repetir em ciclo curto (o bug
+    /// antigo: a fórmula `attempts % 300` repetia a cada 300 tentativas). Colhe
+    /// muitas seeds e exige diversidade quase total.
+    #[test]
+    fn seeds_do_not_cycle() {
+        let mut h = Hunter::new();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..5000 {
+            h.reroll_seed();
+            seen.insert(h.pending_seed);
+        }
+        // PRNG de 32 bits: 5000 sorteios quase não colidem (aniversário ~0.3%).
+        assert!(
+            seen.len() > 4990,
+            "seeds pouco diversas ({} únicas) — voltou a repetir em ciclo?",
+            seen.len()
+        );
+    }
+
+    /// Duas instâncias criadas separadamente não podem produzir a mesma
+    /// sequência de seeds (o bug antigo: 4 emuladores idênticos explorando os
+    /// mesmos PIDs).
+    #[test]
+    fn instances_diverge() {
+        let (mut a, mut b) = (Hunter::new(), Hunter::new());
+        let seq = |h: &mut Hunter| {
+            (0..50)
+                .map(|_| {
+                    h.reroll_seed();
+                    h.pending_seed
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(seq(&mut a), seq(&mut b), "instâncias geraram a MESMA sequência");
+    }
+
+    /// `best_shiny_value`/`best_attempt` guardam o menor valor já visto e quando.
+    #[test]
+    fn tracks_closest_shiny_value() {
+        let mut gba = Gba::new();
+        let profile = GameProfile {
+            code: "TEST",
+            name: "test",
+            player_party: 0x0200_0000,
+            enemy_party: 0x0200_1000,
+            rng_addr: None,
+            targets: &[],
+        };
+        let target = TargetDef {
+            name: "alvo",
+            species: 0,
+            slot: Slot::Enemy,
+            method: HuntMethod::SoftResetLegendary,
+        };
+        let otid = 0x2222_1111; // TID=0x1111, SID=0x2222 → TID^SID = 0x3333
+        write_synthetic_mon(&mut gba, profile.player_party, 0xAAAA_BBBB, otid, 1);
+
+        let mut hunter = Hunter::new();
+        // PIDs escolhidos pra dar shiny_value 50, depois 20, depois 80.
+        for (pid, expected_sv) in [(0x0000_3301u32, 50u16), (0x0000_3327, 20), (0x0000_3363, 80)] {
+            write_synthetic_mon(&mut gba, profile.enemy_party, pid, otid, 100);
+            hunter.check(&mut gba, &profile, &target);
+            assert_eq!(hunter.last_shiny_value, expected_sv);
+        }
+        // O recorde é o menor (20), fixado na 2ª tentativa.
+        assert_eq!(hunter.best_shiny_value, 20);
+        assert_eq!(hunter.best_attempt, 2);
+    }
+
     #[test]
     fn check_detects_shiny_from_player_ids() {
         let mut gba = Gba::new();
@@ -422,6 +566,7 @@ mod tests {
             name: "test",
             player_party: 0x0200_0000,
             enemy_party: 0x0200_1000,
+            rng_addr: None,
             targets: &[],
         };
         let target = TargetDef {
