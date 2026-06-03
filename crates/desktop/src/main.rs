@@ -246,20 +246,39 @@ impl AuroraApp {
             });
         let target = profile.targets[self.selected_target];
 
-        // Sprite do alvo (shiny quando já achou, normal enquanto caça).
+        // Sprite do alvo: normal + shiny lado a lado, pra comparar a cor que
+        // estamos caçando. Quando o shiny aparece, destacamos a coluna dele.
         ui.separator();
         let ctx = ui.ctx().clone();
-        let want_shiny = self.hunter.found;
-        ui.vertical_centered(|ui| match self.target_sprite(&ctx, target.species, want_shiny) {
-            Some(tex) => {
-                ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(128.0, 128.0)));
-            }
-            None => {
-                ui.add_space(40.0);
-                ui.label(egui::RichText::new("?").size(48.0).weak());
-                ui.label("(sprite indisponível)");
-                ui.add_space(40.0);
-            }
+        let normal_tex = self.target_sprite(&ctx, target.species, false);
+        let shiny_tex = self.target_sprite(&ctx, target.species, true);
+        let found = self.hunter.found;
+        ui.horizontal(|ui| {
+            // Distribui as duas colunas igualmente na largura do painel.
+            let col_w = (ui.available_width() - 8.0) / 2.0;
+            let draw = |ui: &mut egui::Ui, tex: &Option<egui::TextureHandle>, label: &str, hot: bool| {
+                ui.allocate_ui(egui::vec2(col_w, 130.0), |ui| {
+                    ui.vertical_centered(|ui| {
+                        match tex {
+                            Some(tex) => {
+                                ui.add(
+                                    egui::Image::new(tex)
+                                        .fit_to_exact_size(egui::vec2(96.0, 96.0)),
+                                );
+                            }
+                            None => {
+                                ui.add_space(24.0);
+                                ui.label(egui::RichText::new("?").size(40.0).weak());
+                                ui.add_space(24.0);
+                            }
+                        }
+                        let rich = egui::RichText::new(label).small();
+                        ui.label(if hot { rich.strong().color(egui::Color32::GOLD) } else { rich.weak() });
+                    });
+                });
+            };
+            draw(ui, &normal_tex, "Normal", false);
+            draw(ui, &shiny_tex, "✨ Shiny", found);
         });
 
         // Contador grande.
