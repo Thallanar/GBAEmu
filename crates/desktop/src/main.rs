@@ -30,6 +30,32 @@ const KEY_MAP: &[(egui::Key, Button)] = &[
     (egui::Key::S, Button::R),
 ];
 
+/// Busca de valor na IWRAM (estilo Cheat Engine) — ferramenta de debug pra
+/// localizar endereços de RAM por versão sem rodar a ROM "no escuro". Guarda os
+/// offsets candidatos dentro da IWRAM e os filtra por valor conhecido a cada
+/// passo. Uso típico: achar o byte do cursor do menu do inicial (0=esq, 1=centro,
+/// 2=dir) movendo ◄/► e filtrando pelo valor a cada movimento.
+#[derive(Default)]
+struct RamSearch {
+    /// Offsets candidatos (0..0x8000) dentro da IWRAM.
+    candidates: Vec<u16>,
+    /// `true` depois de iniciada (distingue de "0 candidatos por filtro").
+    started: bool,
+}
+
+impl RamSearch {
+    /// (Re)inicia: todos os offsets da IWRAM viram candidatos.
+    fn reset(&mut self) {
+        self.candidates = (0..0x8000u16).collect();
+        self.started = true;
+    }
+
+    /// Mantém só os candidatos cujo byte atual vale `value`.
+    fn filter_eq(&mut self, iwram: &[u8], value: u8) {
+        self.candidates.retain(|&off| iwram[off as usize] == value);
+    }
+}
+
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
@@ -77,6 +103,11 @@ struct AuroraApp {
     sprite_cache: HashMap<(u16, bool), Option<egui::TextureHandle>>,
     /// Instante em que a caça atual começou (pra tempo decorrido e taxa).
     hunt_started: Option<Instant>,
+    /// Busca de RAM (debug) pra achar endereços por versão (ex.: cursor do menu
+    /// do inicial). Ver [`RamSearch`].
+    ram_search: RamSearch,
+    /// Valor procurado na busca de RAM (cursor do inicial: 0/1/2).
+    search_value: u8,
 }
 
 impl AuroraApp {
@@ -102,6 +133,8 @@ impl AuroraApp {
             gfx: None,
             sprite_cache: HashMap::new(),
             hunt_started: None,
+            ram_search: RamSearch::default(),
+            search_value: 1,
         }
     }
 
@@ -356,6 +389,48 @@ impl AuroraApp {
                 );
             });
         }
+
+        self.ram_search_ui(ui);
+    }
+
+    /// Ferramenta de debug pra achar o endereço do cursor do menu do inicial na
+    /// RAM: com o jogo em modo manual e a bag aberta, move-se ◄/► e filtra pelo
+    /// valor do cursor (0=esq, 1=centro, 2=dir) a cada movimento até sobrar o
+    /// endereço. Esse endereço vai pro perfil do jogo pra caça em malha fechada.
+    fn ram_search_ui(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        egui::CollapsingHeader::new("🔎 Achar cursor do inicial (debug)").show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Jogue manualmente até a bag do inicial abrir. Defina o valor = \
+                     posição atual do cursor (0=esq, 1=centro, 2=dir), clique Filtrar, \
+                     mova ◄/►, ajuste o valor e Filtrar de novo. Repita até sobrar 1.",
+                )
+                .small()
+                .weak(),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Iniciar/Resetar").clicked() {
+                    self.ram_search.reset();
+                }
+                ui.add(egui::Slider::new(&mut self.search_value, 0..=2).text("cursor"));
+                if ui.button("Filtrar =").clicked() && self.ram_search.started {
+                    self.ram_search
+                        .filter_eq(&self.gba.bus.iwram[..], self.search_value);
+                }
+            });
+            if self.ram_search.started {
+                let n = self.ram_search.candidates.len();
+                ui.label(format!("candidatos: {n}"));
+                if n <= 16 {
+                    for &off in &self.ram_search.candidates {
+                        let addr = 0x0300_0000u32 + off as u32;
+                        let val = self.gba.bus.iwram[off as usize];
+                        ui.monospace(format!("0x{addr:08X} = {val}"));
+                    }
+                }
+            }
+        });
     }
 
     /// Um passo da caça (lote de frames). Para e pausa ao achar o shiny.
