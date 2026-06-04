@@ -31,17 +31,21 @@ const KEY_MAP: &[(egui::Key, Button)] = &[
 ];
 
 /// Detector automático do byte do cursor do menu do inicial (ferramenta de
-/// debug). Enquanto ativo, observa cada byte da IWRAM e registra quais dos
-/// valores {0,1,2} ele já assumiu. O cursor do inicial é o (quase sempre único)
-/// byte que passa por **0 E 1 E 2** quando o jogador move ◄/► pelos três Poké
-/// Balls — sem precisar digitar valor nenhum, ao contrário de uma busca por
-/// valor conhecido.
+/// debug). Enquanto ativo, observa cada byte da IWRAM e, por offset, guarda um
+/// bitmask: bits 0/1/2 marcam que o byte já valeu 0/1/2, e o bit 3 marca que ele
+/// já passou de 2. O cursor do inicial é uma variável **discreta 0..2**: passa
+/// por 0, 1 e 2 (mover ◄/► pelos três Poké Balls) e **nunca** excede 2. Isso
+/// exclui contadores e bytes de animação (que estouram 2 em algum frame), sem
+/// precisar digitar valor nenhum.
 #[derive(Default)]
 struct CursorFinder {
-    /// Por offset da IWRAM: bitmask dos valores 0/1/2 já vistos (bit `v`).
+    /// Por offset da IWRAM: bits 0/1/2 = viu o valor; bit 3 = viu valor > 2.
     /// Vazio = não está rastreando.
     seen: Vec<u8>,
 }
+
+const SEEN_OVER_2: u8 = 0b1000;
+const SEEN_ALL_012: u8 = 0b0111;
 
 impl CursorFinder {
     /// (Re)inicia o rastreamento, zerando o histórico.
@@ -53,24 +57,23 @@ impl CursorFinder {
         !self.seen.is_empty()
     }
 
-    /// Registra os valores 0/1/2 de cada byte neste frame. Chamado 1×/frame.
+    /// Registra os valores de cada byte neste frame. Chamado 1×/frame.
     fn observe(&mut self, iwram: &[u8]) {
         if self.seen.is_empty() {
             return;
         }
         for (slot, &v) in self.seen.iter_mut().zip(iwram.iter()) {
-            if v <= 2 {
-                *slot |= 1 << v;
-            }
+            *slot |= if v <= 2 { 1 << v } else { SEEN_OVER_2 };
         }
     }
 
-    /// Offsets que já mostraram 0, 1 **e** 2 — candidatos fortes a cursor.
+    /// Offsets que mostraram 0, 1 e 2 e **nunca** passaram de 2 — candidatos
+    /// fortes a cursor (discreto, clampado em 0..2).
     fn candidates(&self) -> Vec<u16> {
         self.seen
             .iter()
             .enumerate()
-            .filter(|(_, &m)| m == 0b111)
+            .filter(|(_, &m)| m == SEEN_ALL_012)
             .map(|(i, _)| i as u16)
             .collect()
     }
