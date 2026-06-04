@@ -79,6 +79,11 @@ impl CursorFinder {
     }
 }
 
+/// Mostra o painel de busca de RAM (debug) pra achar endereços por versão (ex.:
+/// o cursor do menu do inicial). Fica desligado por padrão pra não poluir a UI;
+/// vire pra `true` quando precisar mapear um jogo novo.
+const SHOW_RAM_FINDER: bool = false;
+
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
@@ -409,7 +414,9 @@ impl AuroraApp {
             });
         }
 
-        self.cursor_finder_ui(ui);
+        if SHOW_RAM_FINDER {
+            self.cursor_finder_ui(ui);
+        }
     }
 
     /// Ferramenta de debug pra achar o endereço do cursor do menu do inicial na
@@ -548,7 +555,9 @@ impl eframe::App for AuroraApp {
             }
             // Alimenta o detector de cursor (debug) com o estado da RAM deste
             // frame; no-op se não estiver rastreando.
-            self.cursor_finder.observe(&self.gba.bus.iwram[..]);
+            if SHOW_RAM_FINDER {
+                self.cursor_finder.observe(&self.gba.bus.iwram[..]);
+            }
 
             self.refresh_texture();
             ctx.request_repaint();
