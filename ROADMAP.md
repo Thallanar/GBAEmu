@@ -136,11 +136,13 @@ auroragba/
       endereço de `gRngValue` daquele jogo.
 - [X] Endereços de RAM do Emerald confirmados contra ROM real (player/enemy
       party, espécie Torchic=280)
-- [X] Método: starter (Torchic/Treecko/Mudkip) — A-mash chega na bag; iniciais
-      laterais saem segurando a direção. Reveal na batalha
+- [X] Método: starter (Torchic/Treecko/Mudkip) — A-mash chega na bag e a seleção
+      é forçada em malha fechada (escreve `gTasks[0].data[0]` só quando a task de
+      input do menu está ativa). Reveal na batalha
 - [ ] Outros jogos: Ruby/Sapphire, FireRed/LeafGreen (RAM + gRngValue por versão)
-- [X] Starter: Treecko/Mudkip — segura ◄/► a tentativa toda pra estacionar o
-      cursor no Poké Ball lateral (menu clampa, robusto a timing)
+- [X] Starter: Treecko/Mudkip — controle do cursor em malha fechada (lê/escreve
+      `gTasks[0].data[0]` = 0/1/2), endereços achados com o detector de RAM do
+      desktop; robusto a timing, sem mover o personagem
 - [ ] Método: random encounters (detecção de tela de batalha de selvagem)
 - [ ] (Opcional avançado) RNG manipulation
 

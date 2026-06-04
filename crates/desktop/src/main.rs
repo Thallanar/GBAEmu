@@ -30,6 +30,60 @@ const KEY_MAP: &[(egui::Key, Button)] = &[
     (egui::Key::S, Button::R),
 ];
 
+/// Detector automático do byte do cursor do menu do inicial (ferramenta de
+/// debug). Enquanto ativo, observa cada byte da IWRAM e, por offset, guarda um
+/// bitmask: bits 0/1/2 marcam que o byte já valeu 0/1/2, e o bit 3 marca que ele
+/// já passou de 2. O cursor do inicial é uma variável **discreta 0..2**: passa
+/// por 0, 1 e 2 (mover ◄/► pelos três Poké Balls) e **nunca** excede 2. Isso
+/// exclui contadores e bytes de animação (que estouram 2 em algum frame), sem
+/// precisar digitar valor nenhum.
+#[derive(Default)]
+struct CursorFinder {
+    /// Por offset da IWRAM: bits 0/1/2 = viu o valor; bit 3 = viu valor > 2.
+    /// Vazio = não está rastreando.
+    seen: Vec<u8>,
+}
+
+const SEEN_OVER_2: u8 = 0b1000;
+const SEEN_ALL_012: u8 = 0b0111;
+
+impl CursorFinder {
+    /// (Re)inicia o rastreamento, zerando o histórico.
+    fn start(&mut self) {
+        self.seen = vec![0u8; 0x8000];
+    }
+
+    fn tracking(&self) -> bool {
+        !self.seen.is_empty()
+    }
+
+    /// Registra os valores de cada byte neste frame. Chamado 1×/frame.
+    fn observe(&mut self, iwram: &[u8]) {
+        if self.seen.is_empty() {
+            return;
+        }
+        for (slot, &v) in self.seen.iter_mut().zip(iwram.iter()) {
+            *slot |= if v <= 2 { 1 << v } else { SEEN_OVER_2 };
+        }
+    }
+
+    /// Offsets que mostraram 0, 1 e 2 e **nunca** passaram de 2 — candidatos
+    /// fortes a cursor (discreto, clampado em 0..2).
+    fn candidates(&self) -> Vec<u16> {
+        self.seen
+            .iter()
+            .enumerate()
+            .filter(|(_, &m)| m == SEEN_ALL_012)
+            .map(|(i, _)| i as u16)
+            .collect()
+    }
+}
+
+/// Mostra o painel de busca de RAM (debug) pra achar endereços por versão (ex.:
+/// o cursor do menu do inicial). Fica desligado por padrão pra não poluir a UI;
+/// vire pra `true` quando precisar mapear um jogo novo.
+const SHOW_RAM_FINDER: bool = false;
+
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
@@ -77,6 +131,8 @@ struct AuroraApp {
     sprite_cache: HashMap<(u16, bool), Option<egui::TextureHandle>>,
     /// Instante em que a caça atual começou (pra tempo decorrido e taxa).
     hunt_started: Option<Instant>,
+    /// Detector (debug) do byte do cursor do inicial na RAM. Ver [`CursorFinder`].
+    cursor_finder: CursorFinder,
 }
 
 impl AuroraApp {
@@ -102,6 +158,7 @@ impl AuroraApp {
             gfx: None,
             sprite_cache: HashMap::new(),
             hunt_started: None,
+            cursor_finder: CursorFinder::default(),
         }
     }
 
@@ -356,6 +413,56 @@ impl AuroraApp {
                 );
             });
         }
+
+        if SHOW_RAM_FINDER {
+            self.cursor_finder_ui(ui);
+        }
+    }
+
+    /// Ferramenta de debug pra achar o endereço do cursor do menu do inicial na
+    /// RAM, **automaticamente**: com o jogo em modo manual e a bag aberta, basta
+    /// clicar "Detectar" e mover ◄/► pelos três Poké Balls. A ferramenta acha o
+    /// byte que passou por 0, 1 e 2. Esse endereço vai pro perfil do jogo pra
+    /// caça em malha fechada.
+    fn cursor_finder_ui(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        egui::CollapsingHeader::new("🔎 Achar cursor do inicial (debug)").show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Com a bag aberta, clique Detectar e mova ◄ e ► passando por \
+                     TODOS os 3 Poké Balls (esquerda, centro, direita) — até o nome \
+                     no canto mudar entre os três. O endereço aparece sozinho.",
+                )
+                .small()
+                .weak(),
+            );
+            if ui.button("Detectar (resetar)").clicked() {
+                self.cursor_finder.start();
+            }
+            if self.cursor_finder.tracking() {
+                let cands = self.cursor_finder.candidates();
+                ui.label(format!("candidatos (viram 0,1,2): {}", cands.len()));
+                for &off in cands.iter().take(16) {
+                    let addr = 0x0300_0000u32 + off as u32;
+                    let val = self.gba.bus.iwram[off as usize];
+                    // Se o candidato for `gTasks[i].data[0]`, a função da task fica
+                    // 8 bytes antes (offset 0 da struct Task) — mostrá-la permite
+                    // cravar a detecção do menu aberto.
+                    let func = if off >= 8 {
+                        let b = off as usize - 8;
+                        u32::from_le_bytes([
+                            self.gba.bus.iwram[b],
+                            self.gba.bus.iwram[b + 1],
+                            self.gba.bus.iwram[b + 2],
+                            self.gba.bus.iwram[b + 3],
+                        ])
+                    } else {
+                        0
+                    };
+                    ui.monospace(format!("0x{addr:08X} = {val}   (func: 0x{func:08X})"));
+                }
+            }
+        });
     }
 
     /// Um passo da caça (lote de frames). Para e pausa ao achar o shiny.
@@ -446,6 +553,12 @@ impl eframe::App for AuroraApp {
                     self.frame_count += 1;
                 }
             }
+            // Alimenta o detector de cursor (debug) com o estado da RAM deste
+            // frame; no-op se não estiver rastreando.
+            if SHOW_RAM_FINDER {
+                self.cursor_finder.observe(&self.gba.bus.iwram[..]);
+            }
+
             self.refresh_texture();
             ctx.request_repaint();
 

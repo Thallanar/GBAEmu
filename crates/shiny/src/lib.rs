@@ -20,20 +20,28 @@ use auroragba_core::Gba;
 pub mod games;
 pub mod gfx;
 
-use games::{GameProfile, HuntMethod, StarterCursor, TargetDef};
+use games::{GameProfile, HuntMethod, TargetDef};
 
-/// Direção a **segurar** durante a tentativa pra estacionar o cursor no inicial
-/// certo. Só os iniciais laterais precisam; o resto (Torchic e lendários) não
-/// move o cursor. Ver [`StarterCursor`].
-fn hold_direction(target: &TargetDef) -> Option<Button> {
+/// Força (em malha fechada) a seleção do inicial pro Poké Ball do alvo.
+///
+/// Em vez de "apertar direção" (que andava com o personagem no overworld e
+/// confirmava o centro assim que a bag abria), escrevemos o byte da seleção
+/// (`gTasks[i].data[0]`) direto — **mas só** quando a task que processa a direção
+/// está ativa (`gTasks[i].func == input_func`), i.e. a bag está aberta aceitando
+/// input. Fora disso é no-op, então não há clobber em cutscene nem chute de
+/// frame. O A do loop, ao registrar uma borda, confirma a seleção já forçada.
+fn force_starter_cursor(gba: &mut Gba, profile: &GameProfile, target: &TargetDef) {
     if target.method != HuntMethod::Starter {
-        return None;
+        return;
     }
-    match target.cursor {
-        StarterCursor::Left => Some(Button::Left),
-        StarterCursor::Right => Some(Button::Right),
-        StarterCursor::Center => None,
+    let Some(menu) = profile.starter_menu else {
+        return;
+    };
+    // `func` (offset 0 da struct Task) fica 8 bytes antes de `data[0]`.
+    if gba.bus.read_u32(menu.cursor_addr - 8) != menu.input_func {
+        return; // menu não está aberto/aceitando direção
     }
+    gba.bus.write_u8(menu.cursor_addr, target.cursor.value());
 }
 
 /// Fórmula shiny da Gen 3.
@@ -286,26 +294,21 @@ impl Hunter {
         max_frames: u32,
     ) -> bool {
         let base = profile.target_base(target);
-        let dir = hold_direction(target);
         self.frames_this_attempt = 0;
         self.seed_injected = false;
         for _ in 0..max_frames {
             self.maybe_inject_seed(gba, profile);
+            // Força o cursor do inicial pro alvo quando a bag está aberta (no-op
+            // pros demais alvos/telas).
+            force_starter_cursor(gba, profile, target);
             // Tapa A (ver `tick`): cobre título → continuar → bag → diálogos.
             let press = (self.frames_this_attempt / MASH_PERIOD).is_multiple_of(2);
             gba.bus.io.joypad.set_button(Button::A, press);
-            // Segura a direção do inicial lateral (no-op pros demais alvos).
-            if let Some(d) = dir {
-                gba.bus.io.joypad.set_button(d, true);
-            }
             gba.run_frame();
             self.frames_this_attempt += 1;
 
             if self.encounter_ready(gba, base, target) {
                 gba.bus.io.joypad.set_button(Button::A, false);
-                if let Some(d) = dir {
-                    gba.bus.io.joypad.set_button(d, false);
-                }
                 return true;
             }
         }
@@ -382,32 +385,26 @@ impl Hunter {
             return CheckResult::Shiny;
         }
         let base = profile.target_base(target);
-        let dir = hold_direction(target);
 
         for _ in 0..batch {
             // No frame certo, injeta a seed do RNG do jogo (a entropia da caça).
             self.maybe_inject_seed(gba, profile);
 
+            // Com a bag aberta, força o cursor pro inicial alvo (malha fechada);
+            // no-op nas demais telas e pros demais alvos.
+            force_starter_cursor(gba, profile, target);
+
             // Tapa A (8 frames pressionado / 8 solto): confirma no título,
-            // escolhe "Continuar", abre a bag, seleciona/confirma o inicial e
+            // escolhe "Continuar", abre a bag, confirma o inicial (já forçado) e
             // avança diálogos — tudo com A. Tap (não segurar) pra cada prompt
             // registrar uma borda de tecla.
             let press = (self.frames_this_attempt / MASH_PERIOD).is_multiple_of(2);
             gba.bus.io.joypad.set_button(Button::A, press);
-            // Segura a direção do inicial lateral o tempo todo: nas telas antes
-            // da bag (título/continuar/diálogos) ◄/► é inócuo; na bag o cursor
-            // vai pro extremo e clampa. No-op pros demais alvos.
-            if let Some(d) = dir {
-                gba.bus.io.joypad.set_button(d, true);
-            }
             gba.run_frame();
             self.frames_this_attempt += 1;
 
             if self.encounter_ready(gba, base, target) {
                 gba.bus.io.joypad.set_button(Button::A, false);
-                if let Some(d) = dir {
-                    gba.bus.io.joypad.set_button(d, false);
-                }
                 let result = self.check(gba, profile, target);
                 if result != CheckResult::Shiny {
                     self.soft_reset(gba);
@@ -451,32 +448,53 @@ impl Default for Hunter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use games::{Slot, StarterCursor, TargetDef};
+    use games::{Slot, StarterCursor, StarterMenu, TargetDef};
 
     #[test]
-    fn hold_direction_maps_starter_cursor() {
-        let mk = |method, cursor| TargetDef {
-            name: "x",
-            species: 0,
-            slot: Slot::Player,
-            method,
-            cursor,
+    fn force_starter_cursor_only_writes_when_menu_open() {
+        let cursor_addr = 0x0300_5E08;
+        let func_addr = cursor_addr - 8;
+        let input_func = 0x0813_425D;
+        let profile = GameProfile {
+            code: "TEST",
+            name: "test",
+            player_party: 0x0200_0000,
+            enemy_party: 0x0200_1000,
+            rng_addr: None,
+            starter_menu: Some(StarterMenu {
+                cursor_addr,
+                input_func,
+            }),
+            targets: &[],
         };
-        // Iniciais laterais seguram a direção; o centro (Torchic) não.
-        assert_eq!(
-            hold_direction(&mk(HuntMethod::Starter, StarterCursor::Left)),
-            Some(Button::Left)
-        );
-        assert_eq!(
-            hold_direction(&mk(HuntMethod::Starter, StarterCursor::Right)),
-            Some(Button::Right)
-        );
-        assert_eq!(hold_direction(&mk(HuntMethod::Starter, StarterCursor::Center)), None);
-        // Fora do método Starter, o cursor é ignorado (lendário não mexe menu).
-        assert_eq!(
-            hold_direction(&mk(HuntMethod::SoftResetLegendary, StarterCursor::Left)),
-            None
-        );
+        let mudkip = TargetDef {
+            name: "Mudkip",
+            species: 283,
+            slot: Slot::Player,
+            method: HuntMethod::Starter,
+            cursor: StarterCursor::Right, // valor 2
+        };
+
+        let mut gba = Gba::new();
+        // Menu fechado (func != input_func): não escreve.
+        gba.bus.write_u32(func_addr, 0xDEAD_BEEF);
+        gba.bus.write_u8(cursor_addr, 1);
+        force_starter_cursor(&mut gba, &profile, &mudkip);
+        assert_eq!(gba.bus.read_u8(cursor_addr), 1, "menu fechado não deve forçar");
+
+        // Menu aberto: força a seleção pro Poké Ball do alvo (2 = direita).
+        gba.bus.write_u32(func_addr, input_func);
+        force_starter_cursor(&mut gba, &profile, &mudkip);
+        assert_eq!(gba.bus.read_u8(cursor_addr), 2, "deveria forçar Mudkip (2)");
+
+        // Método não-Starter (lendário) é no-op mesmo com a func batendo.
+        let legend = TargetDef {
+            method: HuntMethod::SoftResetLegendary,
+            ..mudkip
+        };
+        gba.bus.write_u8(cursor_addr, 1);
+        force_starter_cursor(&mut gba, &profile, &legend);
+        assert_eq!(gba.bus.read_u8(cursor_addr), 1, "lendário não mexe no cursor");
     }
 
     #[test]
@@ -592,6 +610,7 @@ mod tests {
             player_party: 0x0200_0000,
             enemy_party: 0x0200_1000,
             rng_addr: None,
+            starter_menu: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -626,6 +645,7 @@ mod tests {
             player_party: 0x0200_0000,
             enemy_party: 0x0200_1000,
             rng_addr: None,
+            starter_menu: None,
             targets: &[],
         };
         let target = TargetDef {

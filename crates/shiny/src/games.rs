@@ -26,18 +26,44 @@ pub enum HuntMethod {
 }
 
 /// No menu de seleção do inicial (3 Poké Balls em linha), de que lado fica o
-/// alvo. O cursor abre no **centro** (Torchic), então o método A-mash já o pega
-/// sem direção. Para os laterais, o loop **segura** a direção a tentativa
-/// inteira: como o menu clampa nos extremos (não dá wrap), o cursor "estaciona"
-/// no Poké Ball certo independentemente do timing exato em que a bag abre.
+/// alvo. Mapeia direto pro valor do byte da seleção (`gTasks[i].data[0]`): a
+/// caça lê esse byte e o **força** pro valor do alvo enquanto o menu está aberto
+/// (ver [`StarterMenu`]) — controle em malha fechada, sem depender de timing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StarterCursor {
-    /// Treecko — Poké Ball da esquerda (segura ◄).
+    /// Treecko — Poké Ball da esquerda (`data[0] == 0`).
     Left,
-    /// Torchic — Poké Ball do centro (default, sem direção).
+    /// Torchic — Poké Ball do centro (`data[0] == 1`, default).
     Center,
-    /// Mudkip — Poké Ball da direita (segura ►).
+    /// Mudkip — Poké Ball da direita (`data[0] == 2`).
     Right,
+}
+
+impl StarterCursor {
+    /// Valor que o byte da seleção (`gTasks[i].data[0]`) assume nesta posição.
+    pub fn value(self) -> u8 {
+        match self {
+            StarterCursor::Left => 0,
+            StarterCursor::Center => 1,
+            StarterCursor::Right => 2,
+        }
+    }
+}
+
+/// Endereços do menu de seleção do inicial (Gen 3), pra caça em **malha fechada**.
+/// Em pokeemerald a seleção fica em `gTasks[i].data[0]` (0=esq, 1=centro, 2=dir)
+/// e a task que processa ◄/► tem um `func` conhecido. O Hunter só força a
+/// seleção quando esse `func` está ativo (menu de fato aberto), evitando escrever
+/// em RAM compartilhada por outras telas. Endereços por versão — descobertos com
+/// o detector de cursor do desktop.
+#[derive(Debug, Clone, Copy)]
+pub struct StarterMenu {
+    /// Endereço do byte da seleção (`gTasks[i].data[0]`).
+    pub cursor_addr: u32,
+    /// Valor de `gTasks[i].func` (8 bytes antes do cursor, offset 0 da `Task`)
+    /// quando a task que processa a direção está ativa — assinatura de "menu
+    /// aberto". O bit 0 setado é o flag Thumb do ponteiro.
+    pub input_func: u32,
 }
 
 /// Um alvo de caça concreto dentro de um jogo.
@@ -74,6 +100,9 @@ pub struct GameProfile {
     /// injeta aqui uma seed aleatória do host a cada tentativa — é o que faz o PID
     /// variar. `None` = sem injeção (caça determinística; ainda não mapeado).
     pub rng_addr: Option<u32>,
+    /// Endereços do menu do inicial, pra forçar a seleção em malha fechada.
+    /// `None` = jogo sem método Starter mapeado (a direção é ignorada).
+    pub starter_menu: Option<StarterMenu>,
     /// Alvos de caça suportados neste jogo.
     pub targets: &'static [TargetDef],
 }
@@ -104,6 +133,12 @@ const EMERALD: GameProfile = GameProfile {
     // gRngValue do Emerald (confirmado empiricamente: injetar aqui no frame ~200
     // dá 20/20 PIDs distintos; sem injeção, 1 único PID).
     rng_addr: Some(0x0300_5D80),
+    // Menu do inicial confirmado na ROM real com o detector de cursor: a seleção
+    // é `gTasks[0].data[0]` em 0x03005E08 e a task de input tem func 0x0813425D.
+    starter_menu: Some(StarterMenu {
+        cursor_addr: 0x0300_5E08,
+        input_func: 0x0813_425D,
+    }),
     targets: &[
         // species=0 por ora (não verifica espécie): o índice interno do Gen 3
         // difere do dex nacional pros Pokémon de Hoenn; confirmamos na ROM e
