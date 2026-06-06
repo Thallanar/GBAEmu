@@ -34,6 +34,8 @@ pub struct Cartridge {
     save_data: Vec<u8>,
     /// Estado volátil da máquina de comandos do Flash (ignorado nos outros tipos).
     flash: Flash,
+    /// Estado da máquina serial da EEPROM (ignorado nos outros tipos).
+    eeprom: Eeprom,
     /// GPIO + RTC do cartucho (presente em RSE; inofensivo nos demais).
     pub gpio: crate::rtc::Gpio,
     /// Marcado a cada escrita; o frontend usa pra saber quando salvar em disco.
@@ -45,6 +47,7 @@ impl Cartridge {
         self.save_type = detect_save_type(&rom);
         self.rom = rom;
         self.flash = Flash::default();
+        self.eeprom = Eeprom::default();
         self.dirty = false;
 
         // Aloca o backup do tamanho certo, em estado "apagado" (0xFF, como flash
@@ -143,6 +146,122 @@ impl Cartridge {
     pub fn has_save(&self) -> bool {
         self.save_type != SaveType::None
     }
+
+    // ───────────────────── EEPROM (região 0x0D, serial via DMA) ──────────────
+
+    /// O save deste jogo é EEPROM? (O bus roteia a região 0x0D pra cá.)
+    pub fn is_eeprom(&self) -> bool {
+        self.save_type == SaveType::Eeprom
+    }
+
+    /// Recebe 1 bit (cada escrita de halfword na região 0x0D = 1 bit; só o bit 0
+    /// importa). Acumula o comando até o jogo começar a ler.
+    pub fn eeprom_write_bit(&mut self, bit: u8) {
+        let e = &mut self.eeprom;
+        // Uma escrita logo após uma leitura inicia um novo comando.
+        if e.reading {
+            *e = Eeprom {
+                addr_bits: e.addr_bits, // o tamanho detectado persiste
+                ..Eeprom::default()
+            };
+        }
+        if e.buffer_len < 81 {
+            e.buffer = (e.buffer << 1) | (bit & 1) as u128;
+            e.buffer_len += 1;
+        }
+    }
+
+    /// Devolve 1 bit lido (cada leitura de halfword na região 0x0D). Na primeira
+    /// leitura após um comando, decodifica o que foi escrito.
+    pub fn eeprom_read_bit(&mut self) -> u8 {
+        if !self.eeprom.reading {
+            self.eeprom_decode();
+            self.eeprom.reading = true;
+        }
+        let e = &mut self.eeprom;
+        if e.status_poll {
+            return 1; // após escrita: "pronto"
+        }
+        // Sequência de leitura: 4 bits dummy (0) + 64 bits de dado (MSB first).
+        let b = if e.read_pos < 4 {
+            0
+        } else {
+            let idx = e.read_pos - 4; // 0..=63
+            ((e.read_value >> (63 - idx)) & 1) as u8
+        };
+        if e.read_pos < 68 {
+            e.read_pos += 1;
+        }
+        b
+    }
+
+    /// Decodifica o comando bufferizado. O tamanho do endereço (6 bits = 512 B,
+    /// 14 bits = 8 KB) é deduzido do comprimento do primeiro comando.
+    fn eeprom_decode(&mut self) {
+        let len = self.eeprom.buffer_len;
+        if len < 2 {
+            self.eeprom.status_poll = true; // comando incompleto: responde "pronto"
+            return;
+        }
+        let buf = self.eeprom.buffer;
+        let cmd = (buf >> (len - 2)) & 0b11;
+        self.eeprom.read_pos = 0;
+        match cmd {
+            // Leitura: 2 (cmd) + n (addr) + 1 (stop).
+            0b11 => {
+                let n = if self.eeprom.addr_bits != 0 {
+                    self.eeprom.addr_bits
+                } else {
+                    len.saturating_sub(3)
+                };
+                self.eeprom.addr_bits = n;
+                let addr = ((buf >> 1) & block_mask(n)) as usize;
+                self.eeprom.read_value = self.eeprom_load(addr);
+                self.eeprom.status_poll = false;
+            }
+            // Escrita: 2 (cmd) + n (addr) + 64 (dado) + 1 (stop).
+            0b10 => {
+                let n = if self.eeprom.addr_bits != 0 {
+                    self.eeprom.addr_bits
+                } else {
+                    len.saturating_sub(67)
+                };
+                self.eeprom.addr_bits = n;
+                let data = (buf >> 1) as u64; // 64 bits de dado, acima do stop
+                let addr = ((buf >> 65) & block_mask(n)) as usize;
+                self.eeprom_store(addr, data);
+                self.dirty = true;
+                self.eeprom.status_poll = true;
+            }
+            _ => self.eeprom.status_poll = true,
+        }
+    }
+
+    /// Lê um bloco de 8 bytes (64 bits) da EEPROM como u64 big-endian.
+    fn eeprom_load(&self, block: usize) -> u64 {
+        let len = self.save_data.len();
+        if len == 0 {
+            return 0;
+        }
+        let base = (block * 8) & (len - 1);
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&self.save_data[base..base + 8]);
+        u64::from_be_bytes(bytes)
+    }
+
+    fn eeprom_store(&mut self, block: usize, data: u64) {
+        let len = self.save_data.len();
+        if len == 0 {
+            return;
+        }
+        let base = (block * 8) & (len - 1);
+        self.save_data[base..base + 8].copy_from_slice(&data.to_be_bytes());
+    }
+}
+
+/// Máscara dos `n` bits baixos (endereço de bloco da EEPROM). `n` ≤ 14.
+fn block_mask(n: u8) -> u128 {
+    (1u128 << n) - 1
 }
 
 /// Detecta o tipo de save procurando strings conhecidas na ROM.
@@ -285,6 +404,37 @@ impl Flash {
     }
 }
 
+// ───────────────────────────── EEPROM ───────────────────────────────────────
+
+/// Máquina de estados serial da EEPROM (GBATEK, "GBA Cart Backup EEPROM").
+///
+/// O acesso é bit-serial via DMA na região 0x0D: cada halfword escrito empurra 1
+/// bit de comando; cada halfword lido puxa 1 bit. Comandos:
+///   - **Leitura**: `11` + endereço (6 ou 14 bits) + `0`; depois o jogo lê 4 bits
+///     dummy + 64 bits de dado (MSB first).
+///   - **Escrita**: `10` + endereço + 64 bits de dado + `0`; depois o jogo lê o
+///     bit de "pronto" (sempre 1 aqui).
+///
+/// Cada endereço seleciona um bloco de 64 bits (8 bytes). O tamanho (512 B vs
+/// 8 KB) é deduzido do comprimento do primeiro comando.
+#[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
+struct Eeprom {
+    /// Bits de endereço do jogo: 0 = ainda não detectado, 6 = 512 B, 14 = 8 KB.
+    addr_bits: u8,
+    /// Bits de comando acumulados (MSB primeiro). Máx. 2+14+64+1 = 81 bits.
+    buffer: u128,
+    buffer_len: u8,
+    /// O jogo está na fase de leitura (puxando bits)?
+    reading: bool,
+    /// A leitura atual é o "pronto" pós-escrita (devolve sempre 1)?
+    status_poll: bool,
+    /// 64 bits de dado sendo enviados na leitura.
+    read_value: u64,
+    /// Posição na sequência de leitura (0..=67: 4 dummy + 64 dado).
+    read_pos: u8,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,9 +456,97 @@ mod tests {
                 c.flash.configure(true, FLASH_ID_128K);
                 c.save_data = vec![0xFF; 0x2_0000];
             }
+            SaveType::Eeprom => c.save_data = vec![0xFF; 0x2000],
             _ => {}
         }
         c
+    }
+
+    // Helpers da EEPROM: empurram/puxam bits como o jogo faria via DMA.
+    fn ee_write_bits(c: &mut Cartridge, value: u128, nbits: usize) {
+        for i in (0..nbits).rev() {
+            c.eeprom_write_bit(((value >> i) & 1) as u8);
+        }
+    }
+
+    fn ee_write_block(c: &mut Cartridge, addr: u128, data: u64, addr_bits: usize) {
+        ee_write_bits(c, 0b10, 2); // comando de escrita
+        ee_write_bits(c, addr, addr_bits);
+        ee_write_bits(c, data as u128, 64);
+        c.eeprom_write_bit(0); // stop
+        let _ = c.eeprom_read_bit(); // poll "pronto"
+    }
+
+    fn ee_read_block(c: &mut Cartridge, addr: u128, addr_bits: usize) -> u64 {
+        ee_write_bits(c, 0b11, 2); // comando de leitura
+        ee_write_bits(c, addr, addr_bits);
+        c.eeprom_write_bit(0); // stop
+        let mut v = 0u64;
+        for k in 0..68 {
+            let b = c.eeprom_read_bit();
+            if k >= 4 {
+                v = (v << 1) | b as u64; // ignora os 4 bits dummy
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn eeprom_8k_round_trip() {
+        let mut c = cart_with(SaveType::Eeprom);
+        ee_write_block(&mut c, 0x2A, 0x0123_4567_89AB_CDEF, 14);
+        assert_eq!(c.eeprom.addr_bits, 14, "tamanho 8 KB detectado");
+        assert!(c.dirty);
+        assert_eq!(ee_read_block(&mut c, 0x2A, 14), 0x0123_4567_89AB_CDEF);
+        // Outro bloco continua apagado (0xFF…).
+        assert_eq!(ee_read_block(&mut c, 0x2B, 14), u64::MAX);
+    }
+
+    #[test]
+    fn eeprom_512b_detects_6bit_address() {
+        let mut c = cart_with(SaveType::Eeprom);
+        ee_write_block(&mut c, 0x05, 0xDEAD_BEEF_CAFE_F00D, 6);
+        assert_eq!(c.eeprom.addr_bits, 6, "tamanho 512 B detectado");
+        assert_eq!(ee_read_block(&mut c, 0x05, 6), 0xDEAD_BEEF_CAFE_F00D);
+    }
+
+    #[test]
+    fn eeprom_distinct_blocks() {
+        let mut c = cart_with(SaveType::Eeprom);
+        ee_write_block(&mut c, 0x00, 0x1111_1111_1111_1111, 14);
+        ee_write_block(&mut c, 0x10, 0x2222_2222_2222_2222, 14);
+        assert_eq!(ee_read_block(&mut c, 0x00, 14), 0x1111_1111_1111_1111);
+        assert_eq!(ee_read_block(&mut c, 0x10, 14), 0x2222_2222_2222_2222);
+    }
+
+    #[test]
+    fn eeprom_routes_through_bus() {
+        use crate::bus::Bus;
+        let mut bus = Bus::new();
+        bus.cartridge = cart_with(SaveType::Eeprom);
+        // Escreve um bloco bit a bit via halfwords na região 0x0D (como o DMA).
+        let send = |bus: &mut Bus, v: u128, n: usize| {
+            for i in (0..n).rev() {
+                bus.write_u16(0x0D00_0000, ((v >> i) & 1) as u16);
+            }
+        };
+        send(&mut bus, 0b10, 2);
+        send(&mut bus, 0x07, 14);
+        send(&mut bus, 0xA5A5_5A5A_0F0F_F0F0u64 as u128, 64);
+        bus.write_u16(0x0D00_0000, 0); // stop
+        let _ = bus.read_u16(0x0D00_0000); // poll
+        // Lê de volta via bus.
+        send(&mut bus, 0b11, 2);
+        send(&mut bus, 0x07, 14);
+        bus.write_u16(0x0D00_0000, 0);
+        let mut v = 0u64;
+        for k in 0..68 {
+            let b = (bus.read_u16(0x0D00_0000) & 1) as u64;
+            if k >= 4 {
+                v = (v << 1) | b;
+            }
+        }
+        assert_eq!(v, 0xA5A5_5A5A_0F0F_F0F0);
     }
 
     /// Escreve a sequência de desbloqueio AA/55 seguida de um comando em 0x5555.

@@ -110,8 +110,10 @@ auroragba/
 - [X] Flash 64K/128K — máquina de comandos (chip ID, apagar chip/setor, gravar
       byte, troca de banco)
 - [X] Persistência `.sav` (carrega no boot, grava throttled + ao fechar)
-- [ ] EEPROM (protocolo serial via DMA na região 0x0D)
-- [ ] Save states (snapshot completo do emulador)
+- [X] EEPROM (protocolo serial via DMA na região 0x0D; 512 B / 8 KB, detecção
+      automática do tamanho pelo comprimento do comando)
+- [X] Save states (snapshot completo do emulador via serde+bincode, atrás da
+      feature `save-states`; ROM/BIOS/framebuffer ficam fora e são restaurados)
 
 ### Fase 5 — Frontend Desktop (3–4 semanas)
 
@@ -220,8 +222,8 @@ auroragba/
   input, persistência de save, slider de velocidade. Faltam save states UI,
   gamepad (gilrs), fast-forward/rewind, screenshots, biblioteca de ROMs.
 
-- [~] Fase 4 — saves: SRAM + Flash 64K/128K + persistência `.sav` (ok). EEPROM
-  (detecção presente; protocolo não) e save states ainda pendentes.
+- [X] Fase 4 — saves: SRAM + Flash 64K/128K + **EEPROM** (512 B/8 KB) +
+  persistência `.sav` + **save states** (serde+bincode). Fase completa.
 - [~] Fase 6 — Shiny Hunter: perfis data-driven + leitura/descripto Gen 3 + loop
   de soft-reset + **injeção de seed no RNG** + UI + painel com sprite normal/shiny
   da ROM, **validado na ROM real do Emerald**. Os 3 iniciais de Hoenn
@@ -243,7 +245,8 @@ auroragba/
   HLE não foram formatados); arquivos novos/reescritos já estão fmt-clean.
 - **Timing de ciclos**: hoje cada instrução conta como 1 ciclo (placeholder);
   falta wait states por região de memória (afeta precisão fina e pitch de áudio).
-- **Faltam**: EEPROM (protocolo serial), save states, gamepad/fast-forward/
-  screenshots no frontend, mosaic afim (só BG texto + OBJ implementados), e o
-  port Android.
-- Suíte: **110 testes** passam, clippy estrito limpo.
+- **Faltam**: UX do frontend (gamepad, save states UI, fast-forward/rewind/
+  screenshots, biblioteca de ROMs — Fase 5), mosaic afim (só BG texto + OBJ
+  implementados), e o port Android.
+- Suíte: **108 testes** passam (com a feature `save-states`), clippy estrito
+  limpo com e sem a feature.
