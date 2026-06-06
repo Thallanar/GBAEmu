@@ -20,20 +20,29 @@ use crate::dma::{self, Dma, Timing, DMA_BASE, DMA_END};
 use crate::io::Io;
 use crate::ppu::Ppu;
 
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct Bus {
+    // A BIOS é constante (HLE embutida) e não muda em runtime — fora do save
+    // state; restaurada da instância viva no `load_state`.
+    #[cfg_attr(feature = "save-states", serde(skip))]
     pub bios: Vec<u8>,
     /// Quando true, chamadas SWI são tratadas por HLE (BIOS embutida).
     /// Vira false se uma BIOS oficial for carregada no futuro.
     pub hle_bios: bool,
+    #[cfg_attr(feature = "save-states", serde(with = "crate::boxed_bytes"))]
     pub ewram: Box<[u8; 0x40000]>, // 256 KB
-    pub iwram: Box<[u8; 0x8000]>,  // 32 KB
+    #[cfg_attr(feature = "save-states", serde(with = "crate::boxed_bytes"))]
+    pub iwram: Box<[u8; 0x8000]>, // 32 KB
     pub io: Io,
     pub dma: Dma,
     pub ppu: Ppu,
     pub apu: crate::apu::Apu,
+    #[cfg_attr(feature = "save-states", serde(with = "crate::boxed_bytes"))]
     pub palette: Box<[u8; 0x400]>, // 1 KB
-    pub vram: Box<[u8; 0x18000]>,  // 96 KB
-    pub oam: Box<[u8; 0x400]>,     // 1 KB
+    #[cfg_attr(feature = "save-states", serde(with = "crate::boxed_bytes"))]
+    pub vram: Box<[u8; 0x18000]>, // 96 KB
+    #[cfg_attr(feature = "save-states", serde(with = "crate::boxed_bytes"))]
+    pub oam: Box<[u8; 0x400]>, // 1 KB
     pub cartridge: Cartridge,
 }
 

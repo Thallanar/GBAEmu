@@ -11,6 +11,7 @@ use super::psr::CpuMode;
 /// Conjunto de bancos auxiliares por modo. Os "ativos" ficam em
 /// [`RegisterFile::active`], e quando o modo muda fazemos swap.
 #[derive(Default, Clone)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 struct BankedSet {
     /// R13 (SP) e R14 (LR) bancados.
     sp: u32,
@@ -18,6 +19,7 @@ struct BankedSet {
 }
 
 #[derive(Default, Clone)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 struct FiqBank {
     /// R8..R12 bancados além de SP e LR.
     r8_12: [u32; 5],
@@ -25,6 +27,7 @@ struct FiqBank {
     lr: u32,
 }
 
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegisterFile {
     /// Registradores atualmente visíveis (R0..R15).
     pub active: [u32; 16],

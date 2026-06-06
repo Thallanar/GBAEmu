@@ -37,8 +37,17 @@ const DISPSTAT_VCOUNT_IRQ: u16 = 1 << 5;
 const LAYER_OBJ: u8 = 4;
 const LAYER_BD: u8 = 5; // backdrop
 
+/// Framebuffer preto — `default` do campo pulado no save state.
+#[cfg(feature = "save-states")]
+fn black_framebuffer() -> Box<[u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4]> {
+    Box::new([0; SCREEN_WIDTH * SCREEN_HEIGHT * 4])
+}
+
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ppu {
-    /// Framebuffer RGBA8, 240×160.
+    /// Framebuffer RGBA8, 240×160. Fora do save state: é só saída de vídeo,
+    /// regenerada no próximo frame (começa preto ao restaurar).
+    #[cfg_attr(feature = "save-states", serde(skip, default = "black_framebuffer"))]
     pub framebuffer: Box<[u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4]>,
 
     pub dispcnt: u16,

@@ -12,6 +12,7 @@
 //! estados do Flash guarda só o estado volátil (banco atual, fase de comando).
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub enum SaveType {
     #[default]
     None,
@@ -22,7 +23,11 @@ pub enum SaveType {
 }
 
 #[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cartridge {
+    // A ROM não vai no save state (é grande e imutável; restaurada da instância
+    // viva no `load_state`).
+    #[cfg_attr(feature = "save-states", serde(skip))]
     pub rom: Vec<u8>,
     pub save_type: SaveType,
     /// Bytes físicos do backup (o que vai pro arquivo `.sav`).
@@ -177,6 +182,7 @@ const FLASH_ID_128K: (u8, u8) = (0x62, 0x13);
 ///     0xA0 = grava um byte (a próxima escrita é o dado)
 ///     0xB0 = troca de banco (próxima escrita em 0x0000 = nº do banco) [128 KB]
 #[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 struct Flash {
     /// Banco ativo (0 ou 1), só relevante nos 128 KB.
     bank: usize,

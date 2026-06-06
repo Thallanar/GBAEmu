@@ -23,6 +23,7 @@ pub const GPIO_CONTROL: u32 = 0xC8;
 pub const GPIO_END: u32 = 0xC9;
 
 #[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct Gpio {
     data: u8,
     direction: u8,
@@ -67,6 +68,7 @@ impl Gpio {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 enum Phase {
     #[default]
     Idle,
@@ -75,6 +77,7 @@ enum Phase {
 }
 
 #[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 struct Rtc {
     sck: bool,
     cs: bool,

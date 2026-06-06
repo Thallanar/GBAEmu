@@ -11,12 +11,13 @@ description = "Core emulation engine for AuroraGBA (CPU, PPU, APU, memory)"
 log.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, optional = true }
+bincode = { workspace = true, optional = true }
 bitflags.workspace = true
 
 [features]
 default = []
 # Habilita serialização do estado completo (save states)
-save-states = ["dep:serde"]
+save-states = ["dep:serde", "dep:bincode"]
 
 [lib]
 # Biblioteca pura, sem I/O. Frontends consomem esta crate.

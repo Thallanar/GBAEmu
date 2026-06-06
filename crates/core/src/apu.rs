@@ -33,6 +33,7 @@ const DUTY: [[u8; 8]; 4] = [
 ];
 
 #[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct Apu {
     /// Master enable (SOUNDCNT_X / NR52 bit 7).
     enabled: bool,
@@ -63,7 +64,9 @@ pub struct Apu {
     /// Frações de ciclo de CPU não consumidas (CPU roda a 4× o APU).
     cpu_frac: u32,
 
-    /// Ring buffer de saída, intercalado L,R,L,R... em i16.
+    /// Ring buffer de saída, intercalado L,R,L,R... em i16. Transitório (drenado
+    /// pelo frontend a cada frame) — fora do save state.
+    #[cfg_attr(feature = "save-states", serde(skip))]
     pub buffer: Vec<i16>,
 }
 
@@ -307,6 +310,7 @@ fn push_fifo(fifo: &mut std::collections::VecDeque<i8>, sample: i8) {
 // ───────────────────────── Envelope (canais 1,2,4) ─────────────────────────
 
 #[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 struct Envelope {
     initial: u8, // volume inicial 0..15
     add: bool,   // true = aumenta
@@ -341,6 +345,7 @@ impl Envelope {
 // ───────────────────────── Canal de onda quadrada ─────────────────────────
 
 #[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 struct Square {
     on: bool,
     duty: u8,
@@ -489,6 +494,7 @@ impl Square {
 // ───────────────────────────── Canal wave ─────────────────────────────────
 
 #[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 struct Wave {
     on: bool,
     dac_on: bool,
@@ -578,6 +584,7 @@ impl Wave {
 // ───────────────────────────── Canal de ruído ──────────────────────────────
 
 #[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 struct Noise {
     on: bool,
     env: Envelope,
