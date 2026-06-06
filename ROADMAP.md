@@ -136,13 +136,16 @@ auroragba/
       endereço de `gRngValue` daquele jogo.
 - [X] Endereços de RAM do Emerald confirmados contra ROM real (player/enemy
       party, espécie Torchic=280)
-- [X] Método: starter (Torchic/Treecko/Mudkip) — A-mash chega na bag e a seleção
-      é forçada em malha fechada (escreve `gTasks[0].data[0]` só quando a task de
-      input do menu está ativa). Reveal na batalha
-- [ ] Outros jogos: Ruby/Sapphire, FireRed/LeafGreen (RAM + gRngValue por versão)
-- [X] Starter: Treecko/Mudkip — controle do cursor em malha fechada (lê/escreve
-      `gTasks[0].data[0]` = 0/1/2), endereços achados com o detector de RAM do
-      desktop; robusto a timing, sem mover o personagem
+- [X] Método: starter — os 3 iniciais de Hoenn (Torchic/Treecko/Mudkip). A-mash
+      chega na bag e a seleção é forçada em **malha fechada**: escreve o byte do
+      cursor `gTasks[0].data[0]` (0=esq/1=centro/2=dir) pro alvo, só quando a task
+      de input do menu está ativa (`func == 0x0813425D`). Robusto a timing, sem
+      mover o personagem. Reveal na batalha. **Validado na ROM real.**
+- [X] Detector de RAM (debug) no desktop — acha endereços por versão (estilo
+      Cheat Engine: o byte que passou por 0/1/2 e nunca excedeu 2). Oculto atrás
+      da flag `SHOW_RAM_FINDER`; reutilizável pra mapear jogos novos.
+- [ ] Outros jogos: Ruby/Sapphire, FireRed/LeafGreen (RAM + gRngValue + endereços
+      do menu do inicial por versão)
 - [ ] Método: random encounters (detecção de tela de batalha de selvagem)
 - [ ] (Opcional avançado) RNG manipulation
 
@@ -220,9 +223,11 @@ auroragba/
 - [~] Fase 4 — saves: SRAM + Flash 64K/128K + persistência `.sav` (ok). EEPROM
   (detecção presente; protocolo não) e save states ainda pendentes.
 - [~] Fase 6 — Shiny Hunter: perfis data-driven + leitura/descripto Gen 3 + loop
-  de soft-reset + **injeção de seed no RNG** + UI, **validado no Emerald/Torchic**
-  (10/10 PIDs distintos). Os 3 iniciais de Hoenn (Torchic/Treecko/Mudkip) já
-  caçam. Faltam outros jogos e o método de random encounters.
+  de soft-reset + **injeção de seed no RNG** + UI + painel com sprite normal/shiny
+  da ROM, **validado na ROM real do Emerald**. Os 3 iniciais de Hoenn
+  (Torchic/Treecko/Mudkip) caçam via controle do cursor do menu em **malha
+  fechada** (endereços achados com o detector de RAM do desktop). Faltam outros
+  jogos e o método de random encounters.
 - [ ] Fase 7 — Android
 
 ### Validação (jsmolka gba-tests)
