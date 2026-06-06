@@ -31,6 +31,7 @@ bitflags! {
 
 /// Modos de operação do ARM7TDMI (campo M[4:0] do CPSR).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub enum CpuMode {
     User       = 0b10000,
     Fiq        = 0b10001,
@@ -70,6 +71,7 @@ impl CpuMode {
 
 /// Wrapper tipado em volta do CPSR. Útil para evitar manipular bits "soltos".
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cpsr(pub u32);
 
 impl Cpsr {

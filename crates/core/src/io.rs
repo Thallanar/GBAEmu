@@ -37,6 +37,7 @@ pub mod irq_bits {
 }
 
 #[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct Io {
     /// Interrupt Enable.
     pub ie: u16,

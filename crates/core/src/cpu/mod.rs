@@ -18,6 +18,7 @@ use registers::RegisterFile;
 
 pub use psr::CpuMode;
 
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cpu {
     pub regs: RegisterFile,
     pub cpsr: Cpsr,
@@ -32,6 +33,7 @@ pub struct Cpu {
 }
 
 #[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct CpuStats {
     pub arm_executed: u64,
     pub thumb_executed: u64,

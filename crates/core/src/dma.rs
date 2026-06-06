@@ -26,6 +26,7 @@ pub enum Timing {
 }
 
 #[derive(Default, Clone, Copy)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct DmaChannel {
     pub sad: u32,     // registrador de origem
     pub dad: u32,     // registrador de destino
@@ -75,6 +76,7 @@ impl DmaChannel {
 }
 
 #[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct Dma {
     pub channels: [DmaChannel; 4],
 }

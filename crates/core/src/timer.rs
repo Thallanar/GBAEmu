@@ -18,6 +18,7 @@ use crate::io::irq_bits;
 const PRESCALER_TABLE: [u32; 4] = [1, 64, 256, 1024];
 
 #[derive(Default, Clone, Copy)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct Timer {
     pub counter: u16,
     pub reload: u16,
@@ -42,6 +43,7 @@ impl Timer {
 }
 
 #[derive(Default)]
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct Timers {
     pub units: [Timer; 4],
 }

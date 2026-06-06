@@ -21,6 +21,7 @@ pub enum Button {
     L = 9,
 }
 
+#[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub struct Joypad {
     /// Estado das teclas (ativo-baixo): 1 = solta, 0 = pressionada.
     keyinput: u16,
