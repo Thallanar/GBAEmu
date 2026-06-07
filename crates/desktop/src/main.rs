@@ -27,9 +27,14 @@ const SAVE_SLOTS: usize = 8;
 const REWIND_INTERVAL_FRAMES: u64 = 4;
 const REWIND_MAX_SNAPSHOTS: usize = 150;
 
-/// Fast-forward: frames de emulação por update enquanto a tecla está segurada
-/// (ignora o pacing de áudio).
-const FAST_FORWARD_FRAMES: u32 = 8;
+/// Fast-forward: em vez de um número fixo de frames por update, roda frames até
+/// gastar este orçamento de tempo de parede. Com vsync, cada update tem ~16 ms;
+/// gastar ~12 ms emulando (deixando ~4 ms pra UI) extrai o máximo de throughput
+/// da janela em vez de rodar só uns poucos frames e ficar bloqueado no vsync.
+const FAST_FORWARD_BUDGET: Duration = Duration::from_millis(12);
+/// Teto de segurança de frames por update no fast-forward (evita travar a UI se
+/// um frame for muito barato e o orçamento nunca estourar).
+const FAST_FORWARD_MAX_FRAMES: u32 = 200;
 
 /// Por quanto tempo a mensagem de status fica visível.
 const STATUS_DURATION: Duration = Duration::from_secs(3);
@@ -157,6 +162,10 @@ struct AuroraApp {
     rewind: VecDeque<Vec<u8>>,
     /// Mensagem efêmera de status (texto + instante em que foi mostrada).
     status: Option<(String, Instant)>,
+    /// Medição de velocidade: fps emulado calculado a cada ~1 s.
+    fps: f64,
+    /// Marca da última amostragem de fps (instante + `frame_count` na hora).
+    fps_sample: (Instant, u64),
 }
 
 impl AuroraApp {
@@ -186,6 +195,8 @@ impl AuroraApp {
             current_slot: 0,
             rewind: VecDeque::new(),
             status: None,
+            fps: 0.0,
+            fps_sample: (Instant::now(), 0),
         }
     }
 
@@ -713,9 +724,17 @@ impl eframe::App for AuroraApp {
                 self.rewind_step();
                 self.gba.bus.apu.buffer.clear();
             } else if fast_forward {
-                // Acelera: roda um lote fixo de frames ignorando o pacing de áudio.
-                for _ in 0..FAST_FORWARD_FRAMES {
+                // Acelera: roda frames (sem o gate de áudio) até gastar o orçamento
+                // de tempo desta janela de update. Assim o ganho não fica preso em
+                // "N frames fixos × taxa de refresh" — usa toda a CPU disponível.
+                let start = Instant::now();
+                let mut n = 0;
+                loop {
                     self.step_frame(true);
+                    n += 1;
+                    if n >= FAST_FORWARD_MAX_FRAMES || start.elapsed() >= FAST_FORWARD_BUDGET {
+                        break;
+                    }
                 }
             } else {
                 // Ritmo normal pelo consumo de áudio: roda frames só até repor o
@@ -750,6 +769,14 @@ impl eframe::App for AuroraApp {
             // escritas byte-a-byte no Flash; não faz sentido tocar o disco a cada).
             if self.frame_count.is_multiple_of(60) {
                 self.flush_save();
+            }
+
+            // Mede o fps emulado (frames avançados por segundo de tempo real),
+            // reamostrando ~1×/s. Útil pra ver o efeito do fast-forward.
+            let elapsed = self.fps_sample.0.elapsed().as_secs_f64();
+            if elapsed >= 0.5 {
+                self.fps = (self.frame_count - self.fps_sample.1) as f64 / elapsed;
+                self.fps_sample = (Instant::now(), self.frame_count);
             }
         }
 
@@ -839,6 +866,16 @@ impl eframe::App for AuroraApp {
         // Rodapé: mensagem efêmera de status (esq.) + lembrete dos atalhos (dir.).
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                // Velocidade emulada: fps e múltiplo do tempo real (GBA ≈ 59,73 fps).
+                if self.running {
+                    let speed = self.fps / 59.7275;
+                    ui.label(
+                        egui::RichText::new(format!("{:.0} fps · {:.1}×", self.fps, speed))
+                            .monospace()
+                            .small(),
+                    );
+                    ui.separator();
+                }
                 if let Some((msg, t)) = &self.status {
                     if t.elapsed() < STATUS_DURATION {
                         ui.label(msg);
