@@ -16,7 +16,7 @@ name = "smoke"
 path = "src/bin/smoke.rs"
 
 [dependencies]
-auroragba-core = { path = "../core" }
+auroragba-core = { path = "../core", features = ["save-states"] }
 auroragba-shiny = { path = "../shiny" }
 
 log.workspace = true

@@ -3,9 +3,9 @@
 //! Roda 1 frame por update da UI e exibe o framebuffer da PPU numa textura
 //! 240×160 escalada.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use auroragba_core::joypad::Button;
 use auroragba_core::{Gba, SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -15,6 +15,24 @@ use auroragba_shiny::{CheckResult, Hunter};
 use eframe::egui;
 
 mod audio;
+mod png;
+
+/// Quantidade de slots de save state em disco (`<rom>.ss1`..`.ss8`).
+const SAVE_SLOTS: usize = 8;
+
+/// Rewind: a cada quantos frames tiramos um snapshot e quantos guardamos no anel.
+/// Cada snapshot é o estado serializado inteiro (centenas de KB), então isto é uma
+/// troca de RAM por duração: ~150 snapshots a cada 4 frames ≈ 10 s de rewind a
+/// 60 fps, custando algumas dezenas de MB de RAM.
+const REWIND_INTERVAL_FRAMES: u64 = 4;
+const REWIND_MAX_SNAPSHOTS: usize = 150;
+
+/// Fast-forward: frames de emulação por update enquanto a tecla está segurada
+/// (ignora o pacing de áudio).
+const FAST_FORWARD_FRAMES: u32 = 8;
+
+/// Por quanto tempo a mensagem de status fica visível.
+const STATUS_DURATION: Duration = Duration::from_secs(3);
 
 /// Mapeamento teclado → botões do GBA.
 const KEY_MAP: &[(egui::Key, Button)] = &[
@@ -133,6 +151,12 @@ struct AuroraApp {
     hunt_started: Option<Instant>,
     /// Detector (debug) do byte do cursor do inicial na RAM. Ver [`CursorFinder`].
     cursor_finder: CursorFinder,
+    /// Slot de save state atual (0-indexado) usado por F5/F9.
+    current_slot: usize,
+    /// Anel de estados serializados pro rewind (o mais recente no fim).
+    rewind: VecDeque<Vec<u8>>,
+    /// Mensagem efêmera de status (texto + instante em que foi mostrada).
+    status: Option<(String, Instant)>,
 }
 
 impl AuroraApp {
@@ -159,6 +183,9 @@ impl AuroraApp {
             sprite_cache: HashMap::new(),
             hunt_started: None,
             cursor_finder: CursorFinder::default(),
+            current_slot: 0,
+            rewind: VecDeque::new(),
+            status: None,
         }
     }
 
@@ -189,6 +216,7 @@ impl AuroraApp {
                 // Localiza as tabelas de gráficos pra decodificar sprites do alvo.
                 self.gfx = RomGfx::locate(&self.gba.bus.cartridge.rom);
                 self.sprite_cache.clear();
+                self.rewind.clear();
                 match self.profile {
                     Some(p) => log::info!("Jogo reconhecido: {} ({code})", p.name),
                     None => log::info!("Jogo não reconhecido pelo Shiny Hunter (code={code})"),
@@ -234,6 +262,113 @@ impl AuroraApp {
                 }
                 Err(e) => log::error!("Falha ao gravar save: {e}"),
             }
+        }
+    }
+
+    /// Mostra uma mensagem efêmera de status no rodapé (some após
+    /// [`STATUS_DURATION`]).
+    fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = Some((msg.into(), Instant::now()));
+    }
+
+    /// Caminho do arquivo do slot de save state `slot` (0-indexado): a ROM com
+    /// extensão `.ssN` (N = slot + 1).
+    fn slot_path(&self, slot: usize) -> Option<PathBuf> {
+        self.rom_path
+            .as_ref()
+            .map(|p| p.with_extension(format!("ss{}", slot + 1)))
+    }
+
+    /// Salva o estado atual no slot informado (arquivo `.ssN` ao lado da ROM).
+    fn save_state_slot(&mut self, slot: usize) {
+        if self.rom_path.is_none() {
+            self.set_status("Carregue uma ROM antes de salvar estado");
+            return;
+        }
+        let blob = self.gba.save_state();
+        match self.slot_path(slot) {
+            Some(path) => match std::fs::write(&path, &blob) {
+                Ok(()) => self.set_status(format!("Estado salvo no slot {}", slot + 1)),
+                Err(e) => self.set_status(format!("Falha ao salvar estado: {e}")),
+            },
+            None => self.set_status("Carregue uma ROM antes de salvar estado"),
+        }
+    }
+
+    /// Carrega o estado do slot informado por cima do jogo atual. Recusa estados
+    /// de outro jogo (o cabeçalho do save state guarda o game code).
+    fn load_state_slot(&mut self, slot: usize) {
+        let Some(path) = self.slot_path(slot) else {
+            self.set_status("Carregue uma ROM antes de carregar estado");
+            return;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => match self.gba.load_state(&bytes) {
+                Ok(()) => {
+                    // O estado restaurado é um novo "agora": o anel de rewind
+                    // antigo não bate mais com esta linha do tempo.
+                    self.rewind.clear();
+                    self.running = true;
+                    self.set_status(format!("Estado carregado do slot {}", slot + 1));
+                }
+                Err(e) => self.set_status(format!("Falha ao carregar estado: {e}")),
+            },
+            Err(_) => self.set_status(format!("Slot {} vazio", slot + 1)),
+        }
+    }
+
+    /// True se o slot tem um arquivo de save state em disco.
+    fn slot_exists(&self, slot: usize) -> bool {
+        self.slot_path(slot).is_some_and(|p| p.exists())
+    }
+
+    /// Empilha um snapshot do estado atual no anel de rewind, descartando o mais
+    /// antigo se passar da capacidade.
+    fn push_rewind_snapshot(&mut self) {
+        self.rewind.push_back(self.gba.save_state());
+        if self.rewind.len() > REWIND_MAX_SNAPSHOTS {
+            self.rewind.pop_front();
+        }
+    }
+
+    /// Volta um snapshot no tempo (consome o mais recente do anel). No-op se o
+    /// anel está vazio (já voltou tudo que tinha guardado).
+    fn rewind_step(&mut self) {
+        if let Some(snap) = self.rewind.pop_back() {
+            // `load_state` só falha por incompatibilidade de jogo/versão, o que
+            // não acontece com snapshots que nós mesmos geramos agora.
+            let _ = self.gba.load_state(&snap);
+        }
+    }
+
+    /// Salva um PNG do framebuffer atual em `<dir-da-rom>/screenshots/`.
+    fn screenshot(&mut self) {
+        let Some(rom) = self.rom_path.clone() else {
+            self.set_status("Carregue uma ROM antes de capturar a tela");
+            return;
+        };
+        let dir = rom
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("screenshots");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.set_status(format!("Falha ao criar pasta de screenshots: {e}"));
+            return;
+        }
+        let stem = rom.file_stem().and_then(|s| s.to_str()).unwrap_or("rom");
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = dir.join(format!("{stem}-{ts}.png"));
+        let bytes = png::encode_rgba(
+            SCREEN_WIDTH,
+            SCREEN_HEIGHT,
+            &self.gba.bus.ppu.framebuffer[..],
+        );
+        match std::fs::write(&path, bytes) {
+            Ok(()) => self.set_status(format!("Screenshot: {}", path.display())),
+            Err(e) => self.set_status(format!("Falha ao salvar screenshot: {e}")),
         }
     }
 
@@ -502,6 +637,27 @@ impl AuroraApp {
         });
     }
 
+    /// Roda exatamente 1 frame, lidando com o áudio: com dispositivo, drena as
+    /// amostras pro host (ou descarta se `mute`, no fast-forward, pra não estourar
+    /// o buffer nem sair em pitch errado); sem dispositivo, só esvazia o APU.
+    fn step_frame(&mut self, mute: bool) {
+        self.gba.run_frame();
+        if let Some(audio) = &mut self.audio {
+            if mute {
+                self.gba.bus.apu.buffer.clear();
+            } else {
+                let samples = self.gba.bus.apu.drain();
+                audio.push(&samples, auroragba_core::apu::OUTPUT_RATE);
+            }
+        } else {
+            self.gba.bus.apu.buffer.clear();
+        }
+        self.frame_count += 1;
+        if self.frame_count.is_multiple_of(REWIND_INTERVAL_FRAMES) {
+            self.push_rewind_snapshot();
+        }
+    }
+
     /// Copia o framebuffer da PPU (RGBA8) para a textura egui.
     fn refresh_texture(&mut self) {
         let pixels: &[u8] = &*self.gba.bus.ppu.framebuffer;
@@ -522,6 +678,28 @@ impl AuroraApp {
 
 impl eframe::App for AuroraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Hotkeys globais. F5/F9/F12 disparam na borda (key_pressed); rewind e
+        // fast-forward agem enquanto a tecla está segurada (key_down). Nenhuma
+        // está em KEY_MAP, então não conflitam com os botões do GBA.
+        let (f5, f9, f12, rewinding, fast_forward) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::F5),
+                i.key_pressed(egui::Key::F9),
+                i.key_pressed(egui::Key::F12),
+                i.key_down(egui::Key::R),
+                i.key_down(egui::Key::Space),
+            )
+        });
+        if f5 {
+            self.save_state_slot(self.current_slot);
+        }
+        if f9 {
+            self.load_state_slot(self.current_slot);
+        }
+        if f12 {
+            self.screenshot();
+        }
+
         if self.hunting {
             // Modo caça: o Hunter dirige a emulação (amassa A/Start, reseta entre
             // tentativas). Roda um lote de frames por update pra não travar a UI.
@@ -530,27 +708,33 @@ impl eframe::App for AuroraApp {
             ctx.request_repaint();
         } else if self.running {
             self.poll_input(ctx);
-            match &mut self.audio {
-                Some(audio) => {
-                    // Pacing pelo áudio: roda frames só até repor o buffer-alvo
-                    // (no máx. 4 por update, pra não travar se a UI ficar lenta).
-                    // Como o áudio é consumido em tempo real, isso ancora a
-                    // emulação ao tempo real e corrige a "aceleração".
-                    let target = audio.target();
-                    let mut ran = 0;
-                    while audio.queued() < target && ran < 4 {
-                        self.gba.run_frame();
-                        let samples = self.gba.bus.apu.drain();
-                        audio.push(&samples, auroragba_core::apu::OUTPUT_RATE);
-                        self.frame_count += 1;
-                        ran += 1;
-                    }
+            if rewinding {
+                // Volta no tempo consumindo o anel de snapshots.
+                self.rewind_step();
+                self.gba.bus.apu.buffer.clear();
+            } else if fast_forward {
+                // Acelera: roda um lote fixo de frames ignorando o pacing de áudio.
+                for _ in 0..FAST_FORWARD_FRAMES {
+                    self.step_frame(true);
                 }
-                None => {
-                    // Sem áudio: 1 frame por update (sincroniza pelo vsync da UI).
-                    self.gba.run_frame();
-                    self.gba.bus.apu.buffer.clear();
-                    self.frame_count += 1;
+            } else {
+                // Ritmo normal pelo consumo de áudio: roda frames só até repor o
+                // buffer-alvo (no máx. 4 por update, pra não travar se a UI ficar
+                // lenta). Como o áudio é consumido em tempo real, isso ancora a
+                // emulação ao tempo real e corrige a "aceleração".
+                let target = self.audio.as_ref().map(|a| a.target());
+                let mut ran = 0;
+                loop {
+                    let go = match (target, self.audio.as_ref()) {
+                        (Some(t), Some(audio)) => audio.queued() < t && ran < 4,
+                        // Sem áudio: 1 frame por update (sincroniza pelo vsync).
+                        _ => ran < 1,
+                    };
+                    if !go {
+                        break;
+                    }
+                    self.step_frame(false);
+                    ran += 1;
                 }
             }
             // Alimenta o detector de cursor (debug) com o estado da RAM deste
@@ -606,9 +790,69 @@ impl eframe::App for AuroraApp {
                         ui.close_menu();
                     }
                 });
+                ui.menu_button("Estado", |ui| {
+                    ui.label("Slot (● = ocupado):");
+                    ui.horizontal(|ui| {
+                        for slot in 0..SAVE_SLOTS {
+                            let label = if self.slot_exists(slot) {
+                                format!("●{}", slot + 1)
+                            } else {
+                                format!("{}", slot + 1)
+                            };
+                            ui.selectable_value(&mut self.current_slot, slot, label);
+                        }
+                    });
+                    ui.separator();
+                    if ui
+                        .button(format!("💾 Salvar no slot {} (F5)", self.current_slot + 1))
+                        .clicked()
+                    {
+                        self.save_state_slot(self.current_slot);
+                        ui.close_menu();
+                    }
+                    let can_load = self.slot_exists(self.current_slot);
+                    if ui
+                        .add_enabled(
+                            can_load,
+                            egui::Button::new(format!(
+                                "📂 Carregar slot {} (F9)",
+                                self.current_slot + 1
+                            )),
+                        )
+                        .clicked()
+                    {
+                        self.load_state_slot(self.current_slot);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("📷 Captura de tela (F12)").clicked() {
+                        self.screenshot();
+                        ui.close_menu();
+                    }
+                });
                 ui.separator();
                 ui.label(format!("Scale: {:.0}x", self.scale));
                 ui.add(egui::Slider::new(&mut self.scale, 1.0..=6.0).show_value(false));
+            });
+        });
+
+        // Rodapé: mensagem efêmera de status (esq.) + lembrete dos atalhos (dir.).
+        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if let Some((msg, t)) = &self.status {
+                    if t.elapsed() < STATUS_DURATION {
+                        ui.label(msg);
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "F5 salvar · F9 carregar · F12 screenshot · Espaço FF · R rewind",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                });
             });
         });
 
