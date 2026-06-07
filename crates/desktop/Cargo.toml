@@ -23,7 +23,7 @@ log.workspace = true
 env_logger.workspace = true
 anyhow.workspace = true
 
-eframe.workspace = true
+eframe = { workspace = true, features = ["persistence"] }
 egui.workspace = true
 gilrs.workspace = true
 cpal.workspace = true
