@@ -3,7 +3,7 @@
 > Arquivo de continuidade: "de onde paramos". O roadmap completo está em
 > [`ROADMAP.md`](./ROADMAP.md); aqui fica o estado atual + o que atacar a seguir.
 
-_Última atualização: 2026-06-03_
+_Última atualização: 2026-06-07_
 
 ---
 
@@ -34,7 +34,9 @@ Funcionando e validado:
 - ✅ **jsmolka gba-tests: arm.gba, thumb.gba, memory.gba passam 100%**.
 
 Controles do desktop: Z=A, X=B, Enter=Start, Backspace=Select, setas=direcional,
-A=L, S=R.
+A=L, S=R. Atalhos: **F5** salva / **F9** carrega o slot atual de save state,
+**F12** screenshot (PNG em `<rom>/screenshots/`), **Espaço** (segurar) fast-forward,
+**R** (segurar) rewind. Menu "Estado" escolhe o slot (1–8) e salva/carrega.
 
 ### 🌟 Shiny Hunter — funcional e validado (Emerald/Torchic)
 Arquitetura **data-driven**: identifica o jogo pelo game code do header e carrega
@@ -62,12 +64,14 @@ um `GameProfile` de `crates/shiny/src/games.rs` (1 entrada por jogo).
       na grama / repel) e ler o slot inimigo.
 
 ### 2. Frontend — qualidade de vida (Fase 5)
-- [ ] **Save states** (snapshot do estado — `serde`+`bincode` já estão nas deps;
-      derivar `Serialize`/`Deserialize` no `Gba` e serializar). Diferente do
-      `.sav` do jogo; habilita save/load instantâneo na UI.
-- [ ] Ligar **gamepad** (`gilrs` está nas deps, mas não foi conectado ao input).
-- [ ] Fast-forward / rewind / screenshots.
-- [ ] Biblioteca de ROMs / file picker melhor.
+- [X] **Save states** (core: serde+bincode atrás da feature `save-states`).
+- [X] **Save states UI** (desktop): 8 slots em disco (`<rom>.ss1`..`.ss8`),
+      F5 salva / F9 carrega o slot atual, menu "Estado" pra escolher slot.
+- [X] **Fast-forward** (segurar Espaço) / **rewind** (segurar R, anel de snapshots
+      em RAM) / **screenshots** (F12 → PNG, encoder próprio em `png.rs`).
+- [ ] Ligar **gamepad** (`gilrs` está nas deps, mas não foi conectado ao input)
+      + **configuração de teclas** (próximo PR).
+- [ ] Biblioteca de ROMs / file picker melhor (grid com capas).
 
 ### 3. Correção / base
 - [ ] **Timing de ciclos exato** (wait states por região de memória) — hoje cada
