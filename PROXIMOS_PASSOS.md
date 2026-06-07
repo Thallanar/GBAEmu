@@ -33,10 +33,13 @@ Funcionando e validado:
 - **110** testes unitários, clippy estrito limpo.
 - ✅ **jsmolka gba-tests: arm.gba, thumb.gba, memory.gba passam 100%**.
 
-Controles do desktop: Z=A, X=B, Enter=Start, Backspace=Select, setas=direcional,
-A=L, S=R. Atalhos: **F5** salva / **F9** carrega o slot atual de save state,
-**F12** screenshot (PNG em `<rom>/screenshots/`), **Espaço** (segurar) fast-forward,
-**R** (segurar) rewind. Menu "Estado" escolhe o slot (1–8) e salva/carrega.
+Controles do desktop (padrão, **remapeáveis** em Configurações → Controles): Z=A,
+X=B, Enter=Start, Backspace=Select, setas=direcional, A=L, S=R. **Gamepad**
+suportado (gilrs): East=A, South=B, Select/Start, D-Pad, R/L gatilhos. O
+mapeamento é persistido (storage do eframe). Atalhos: **F5** salva / **F9**
+carrega o slot atual de save state, **F12** screenshot (PNG em
+`<rom>/screenshots/`), **Espaço** (segurar) fast-forward, **R** (segurar) rewind.
+Menu "Estado" escolhe o slot (1–8) e salva/carrega.
 
 ### 🌟 Shiny Hunter — funcional e validado (Emerald/Torchic)
 Arquitetura **data-driven**: identifica o jogo pelo game code do header e carrega
@@ -69,9 +72,10 @@ um `GameProfile` de `crates/shiny/src/games.rs` (1 entrada por jogo).
       F5 salva / F9 carrega o slot atual, menu "Estado" pra escolher slot.
 - [X] **Fast-forward** (segurar Espaço) / **rewind** (segurar R, anel de snapshots
       em RAM) / **screenshots** (F12 → PNG, encoder próprio em `png.rs`).
-- [ ] Ligar **gamepad** (`gilrs` está nas deps, mas não foi conectado ao input)
-      + **configuração de teclas** (próximo PR).
-- [ ] Biblioteca de ROMs / file picker melhor (grid com capas).
+- [X] **Gamepad** (gilrs) + **configuração de teclas**: remapeável em
+      Configurações → Controles (teclado e gamepad por botão), persistido via
+      storage do eframe (feature `persistence`).
+- [ ] Biblioteca de ROMs / file picker melhor (grid com capas) — **próximo PR**.
 
 ### 3. Correção / base
 - [ ] **Timing de ciclos exato** (wait states por região de memória) — hoje cada

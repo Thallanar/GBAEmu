@@ -7,7 +7,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use auroragba_core::joypad::Button;
+use auroragba_core::joypad::Button as GbaButton;
 use auroragba_core::{Gba, SCREEN_HEIGHT, SCREEN_WIDTH};
 use auroragba_shiny::games::GameProfile;
 use auroragba_shiny::gfx::RomGfx;
@@ -39,19 +39,170 @@ const FAST_FORWARD_MAX_FRAMES: u32 = 200;
 /// Por quanto tempo a mensagem de status fica visível.
 const STATUS_DURATION: Duration = Duration::from_secs(3);
 
-/// Mapeamento teclado → botões do GBA.
-const KEY_MAP: &[(egui::Key, Button)] = &[
-    (egui::Key::Z, Button::A),
-    (egui::Key::X, Button::B),
-    (egui::Key::Enter, Button::Start),
-    (egui::Key::Backspace, Button::Select),
-    (egui::Key::ArrowUp, Button::Up),
-    (egui::Key::ArrowDown, Button::Down),
-    (egui::Key::ArrowLeft, Button::Left),
-    (egui::Key::ArrowRight, Button::Right),
-    (egui::Key::A, Button::L),
-    (egui::Key::S, Button::R),
+/// Os 10 botões do GBA na ordem dos bits de KEYINPUT (= valor do enum). Os
+/// arrays de [`InputConfig`] são indexados por `botão as usize`, então esta ordem
+/// precisa casar com a do enum [`GbaButton`].
+const GBA_BUTTONS: [GbaButton; 10] = [
+    GbaButton::A,
+    GbaButton::B,
+    GbaButton::Select,
+    GbaButton::Start,
+    GbaButton::Right,
+    GbaButton::Left,
+    GbaButton::Up,
+    GbaButton::Down,
+    GbaButton::R,
+    GbaButton::L,
 ];
+/// Nomes dos botões na mesma ordem de [`GBA_BUTTONS`] (rótulos + chaves de
+/// persistência).
+const GBA_NAMES: [&str; 10] = [
+    "A", "B", "Select", "Start", "Right", "Left", "Up", "Down", "R", "L",
+];
+
+/// Configuração de input: uma tecla de teclado e (opcionalmente) um botão de
+/// gamepad por botão do GBA. Indexada por `botão as usize` (ver [`GBA_BUTTONS`]).
+#[derive(Clone)]
+struct InputConfig {
+    keys: [egui::Key; 10],
+    pads: [Option<gilrs::Button>; 10],
+}
+
+impl Default for InputConfig {
+    fn default() -> Self {
+        use egui::Key;
+        use gilrs::Button as P;
+        // Ordem: A, B, Select, Start, Right, Left, Up, Down, R, L.
+        Self {
+            keys: [
+                Key::Z,
+                Key::X,
+                Key::Backspace,
+                Key::Enter,
+                Key::ArrowRight,
+                Key::ArrowLeft,
+                Key::ArrowUp,
+                Key::ArrowDown,
+                Key::S,
+                Key::A,
+            ],
+            pads: [
+                Some(P::East),
+                Some(P::South),
+                Some(P::Select),
+                Some(P::Start),
+                Some(P::DPadRight),
+                Some(P::DPadLeft),
+                Some(P::DPadUp),
+                Some(P::DPadDown),
+                Some(P::RightTrigger),
+                Some(P::LeftTrigger),
+            ],
+        }
+    }
+}
+
+impl InputConfig {
+    /// Serializa num texto simples de linhas `key.<Botão>=<Tecla>` /
+    /// `pad.<Botão>=<BotãoDoPad>` (`-` = sem binding), pra guardar no storage.
+    fn serialize(&self) -> String {
+        let mut s = String::new();
+        for (i, name) in GBA_NAMES.iter().enumerate() {
+            s.push_str(&format!("key.{}={}\n", name, self.keys[i].name()));
+            let pad = self.pads[i].map(pad_name).unwrap_or("-");
+            s.push_str(&format!("pad.{name}={pad}\n"));
+        }
+        s
+    }
+
+    /// Lê o formato de [`serialize`](Self::serialize), partindo do padrão e
+    /// sobrescrevendo o que reconhecer (linhas inválidas são ignoradas).
+    fn parse(text: &str) -> Self {
+        let mut cfg = Self::default();
+        for line in text.lines() {
+            let Some((lhs, val)) = line.split_once('=') else {
+                continue;
+            };
+            let Some((kind, name)) = lhs.split_once('.') else {
+                continue;
+            };
+            let Some(idx) = GBA_NAMES.iter().position(|n| *n == name) else {
+                continue;
+            };
+            match kind {
+                "key" => {
+                    if let Some(key) = egui::Key::from_name(val) {
+                        cfg.keys[idx] = key;
+                    }
+                }
+                "pad" => cfg.pads[idx] = pad_from_name(val),
+                _ => {}
+            }
+        }
+        cfg
+    }
+}
+
+/// O que está sendo remapeado agora (índice do botão do GBA).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Rebind {
+    Key(usize),
+    Pad(usize),
+}
+
+/// Nome estável de um botão de gamepad (pra UI e persistência).
+fn pad_name(b: gilrs::Button) -> &'static str {
+    use gilrs::Button::*;
+    match b {
+        South => "South",
+        East => "East",
+        North => "North",
+        West => "West",
+        C => "C",
+        Z => "Z",
+        LeftTrigger => "LeftTrigger",
+        LeftTrigger2 => "LeftTrigger2",
+        RightTrigger => "RightTrigger",
+        RightTrigger2 => "RightTrigger2",
+        Select => "Select",
+        Start => "Start",
+        Mode => "Mode",
+        LeftThumb => "LeftThumb",
+        RightThumb => "RightThumb",
+        DPadUp => "DPadUp",
+        DPadDown => "DPadDown",
+        DPadLeft => "DPadLeft",
+        DPadRight => "DPadRight",
+        Unknown => "Unknown",
+    }
+}
+
+/// Inverso de [`pad_name`].
+fn pad_from_name(s: &str) -> Option<gilrs::Button> {
+    use gilrs::Button::*;
+    Some(match s {
+        "South" => South,
+        "East" => East,
+        "North" => North,
+        "West" => West,
+        "C" => C,
+        "Z" => Z,
+        "LeftTrigger" => LeftTrigger,
+        "LeftTrigger2" => LeftTrigger2,
+        "RightTrigger" => RightTrigger,
+        "RightTrigger2" => RightTrigger2,
+        "Select" => Select,
+        "Start" => Start,
+        "Mode" => Mode,
+        "LeftThumb" => LeftThumb,
+        "RightThumb" => RightThumb,
+        "DPadUp" => DPadUp,
+        "DPadDown" => DPadDown,
+        "DPadLeft" => DPadLeft,
+        "DPadRight" => DPadRight,
+        _ => return None,
+    })
+}
 
 /// Detector automático do byte do cursor do menu do inicial (ferramenta de
 /// debug). Enquanto ativo, observa cada byte da IWRAM e, por offset, guarda um
@@ -166,6 +317,14 @@ struct AuroraApp {
     fps: f64,
     /// Marca da última amostragem de fps (instante + `frame_count` na hora).
     fps_sample: (Instant, u64),
+    /// Mapeamento de teclado/gamepad → botões do GBA (persistido no storage).
+    input: InputConfig,
+    /// Contexto do gilrs pra ler gamepads (None se indisponível no host).
+    gilrs: Option<gilrs::Gilrs>,
+    /// Janela de configuração de controles aberta?
+    show_input_config: bool,
+    /// Binding em remapeamento (aguardando a próxima tecla/botão). None = nenhum.
+    rebinding: Option<Rebind>,
 }
 
 impl AuroraApp {
@@ -197,6 +356,20 @@ impl AuroraApp {
             status: None,
             fps: 0.0,
             fps_sample: (Instant::now(), 0),
+            input: cc
+                .storage
+                .and_then(|s| s.get_string("input_config"))
+                .map(|t| InputConfig::parse(&t))
+                .unwrap_or_default(),
+            gilrs: match gilrs::Gilrs::new() {
+                Ok(g) => Some(g),
+                Err(e) => {
+                    log::warn!("gilrs indisponível (sem gamepad): {e}");
+                    None
+                }
+            },
+            show_input_config: false,
+            rebinding: None,
         }
     }
 
@@ -639,13 +812,113 @@ impl AuroraApp {
         }
     }
 
-    /// Lê o teclado e atualiza o estado dos botões do GBA.
+    /// Lê teclado + gamepad e atualiza o estado dos botões do GBA. Um botão fica
+    /// pressionado se a tecla **ou** o botão do pad correspondente estiver. (Os
+    /// eventos do gilrs já são bombeados em `update`; aqui só consultamos o estado.)
     fn poll_input(&mut self, ctx: &egui::Context) {
+        let mut pressed = [false; 10];
         ctx.input(|i| {
-            for (key, button) in KEY_MAP {
-                self.gba.bus.io.joypad.set_button(*button, i.key_down(*key));
+            for (idx, key) in self.input.keys.iter().enumerate() {
+                if i.key_down(*key) {
+                    pressed[idx] = true;
+                }
             }
         });
+        if let Some(gilrs) = &self.gilrs {
+            for (_id, gamepad) in gilrs.gamepads() {
+                for (idx, pad) in self.input.pads.iter().enumerate() {
+                    if let Some(b) = pad {
+                        if gamepad.is_pressed(*b) {
+                            pressed[idx] = true;
+                        }
+                    }
+                }
+            }
+        }
+        for (idx, &p) in pressed.iter().enumerate() {
+            self.gba.bus.io.joypad.set_button(GBA_BUTTONS[idx], p);
+        }
+    }
+
+    /// Bombeia os eventos pendentes do gilrs (necessário pra `is_pressed` refletir
+    /// o estado atual) e devolve o último botão **pressionado** neste tick, se
+    /// houver — usado pra capturar o remapeamento de gamepad.
+    fn pump_gamepad(&mut self) -> Option<gilrs::Button> {
+        let mut last = None;
+        if let Some(gilrs) = &mut self.gilrs {
+            while let Some(ev) = gilrs.next_event() {
+                if let gilrs::EventType::ButtonPressed(b, _) = ev.event {
+                    if b != gilrs::Button::Unknown {
+                        last = Some(b);
+                    }
+                }
+            }
+        }
+        last
+    }
+
+    /// Janela de configuração de controles: uma grade Botão × (Teclado, Gamepad)
+    /// com remapeamento ao clicar (aguarda a próxima tecla/botão).
+    fn input_config_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_input_config;
+        egui::Window::new("🎮 Controles")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new("Clique num campo e pressione a tecla/botão. Esc cancela.")
+                        .small()
+                        .weak(),
+                );
+                egui::Grid::new("input_grid")
+                    .num_columns(3)
+                    .spacing([12.0, 6.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Botão").strong());
+                        ui.label(egui::RichText::new("Teclado").strong());
+                        ui.label(egui::RichText::new("Gamepad").strong());
+                        ui.end_row();
+                        for (i, name) in GBA_NAMES.iter().enumerate() {
+                            ui.label(*name);
+                            let key_label = if self.rebinding == Some(Rebind::Key(i)) {
+                                "[pressione…]".to_string()
+                            } else {
+                                self.input.keys[i].name().to_string()
+                            };
+                            if ui.button(key_label).clicked() {
+                                self.rebinding = Some(Rebind::Key(i));
+                            }
+                            let pad_label = if self.rebinding == Some(Rebind::Pad(i)) {
+                                "[pressione…]".to_string()
+                            } else {
+                                self.input.pads[i].map(pad_name).unwrap_or("—").to_string()
+                            };
+                            if ui.button(pad_label).clicked() {
+                                self.rebinding = Some(Rebind::Pad(i));
+                            }
+                            ui.end_row();
+                        }
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Restaurar padrão").clicked() {
+                        self.input = InputConfig::default();
+                        self.rebinding = None;
+                    }
+                    if self.rebinding.is_some() && ui.button("Cancelar (Esc)").clicked() {
+                        self.rebinding = None;
+                    }
+                });
+                let pads = self.gilrs.as_ref().map_or(0, |g| g.gamepads().count());
+                ui.label(
+                    egui::RichText::new(format!("Gamepads conectados: {pads}"))
+                        .small()
+                        .weak(),
+                );
+            });
+        self.show_input_config = open;
     }
 
     /// Roda exatamente 1 frame, lidando com o áudio: com dispositivo, drena as
@@ -669,6 +942,64 @@ impl AuroraApp {
         }
     }
 
+    /// Ritmo normal pelo consumo de áudio: roda frames só até repor o buffer-alvo
+    /// (no máx. 4 por update, pra não travar se a UI ficar lenta). Como o áudio é
+    /// consumido em tempo real, isso ancora a emulação ao tempo real. Sem áudio,
+    /// roda 1 frame por update (sincroniza pelo vsync).
+    fn run_paced(&mut self) {
+        let target = self.audio.as_ref().map(|a| a.target());
+        let mut ran = 0;
+        loop {
+            let go = match (target, self.audio.as_ref()) {
+                (Some(t), Some(audio)) => audio.queued() < t && ran < 4,
+                _ => ran < 1,
+            };
+            if !go {
+                break;
+            }
+            self.step_frame(false);
+            ran += 1;
+        }
+    }
+
+    /// Aplica o remapeamento em andamento: Esc cancela; senão grava a primeira
+    /// tecla (rebind de teclado) ou o `pad_event` capturado (rebind de gamepad).
+    fn apply_rebind(
+        &mut self,
+        ctx: &egui::Context,
+        rebind: Rebind,
+        pad_event: Option<gilrs::Button>,
+    ) {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.rebinding = None;
+            return;
+        }
+        match rebind {
+            Rebind::Key(idx) => {
+                let key = ctx.input(|i| {
+                    i.events.iter().find_map(|e| match e {
+                        egui::Event::Key {
+                            key, pressed: true, ..
+                        } => Some(*key),
+                        _ => None,
+                    })
+                });
+                if let Some(key) = key {
+                    self.input.keys[idx] = key;
+                    self.rebinding = None;
+                    self.set_status(format!("{} → tecla {}", GBA_NAMES[idx], key.name()));
+                }
+            }
+            Rebind::Pad(idx) => {
+                if let Some(b) = pad_event {
+                    self.input.pads[idx] = Some(b);
+                    self.rebinding = None;
+                    self.set_status(format!("{} → pad {}", GBA_NAMES[idx], pad_name(b)));
+                }
+            }
+        }
+    }
+
     /// Copia o framebuffer da PPU (RGBA8) para a textura egui.
     fn refresh_texture(&mut self) {
         let pixels: &[u8] = &*self.gba.bus.ppu.framebuffer;
@@ -689,9 +1020,19 @@ impl AuroraApp {
 
 impl eframe::App for AuroraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Bombeia o gamepad (mantém `is_pressed` atualizado) e, se estamos
+        // remapeando um botão, captura a próxima tecla/botão pressionado. Enquanto
+        // `configuring`, não repassamos input ao jogo nem disparamos hotkeys (pra
+        // a tecla capturada não "vazar" pro emulador).
+        let pad_event = self.pump_gamepad();
+        let configuring = self.rebinding.is_some();
+        if let Some(rebind) = self.rebinding {
+            self.apply_rebind(ctx, rebind, pad_event);
+        }
+
         // Hotkeys globais. F5/F9/F12 disparam na borda (key_pressed); rewind e
-        // fast-forward agem enquanto a tecla está segurada (key_down). Nenhuma
-        // está em KEY_MAP, então não conflitam com os botões do GBA.
+        // fast-forward agem enquanto a tecla está segurada (key_down). Nenhuma é
+        // um binding do GBA por padrão, então não conflitam com os botões.
         let (f5, f9, f12, rewinding, fast_forward) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::F5),
@@ -701,14 +1042,16 @@ impl eframe::App for AuroraApp {
                 i.key_down(egui::Key::Space),
             )
         });
-        if f5 {
-            self.save_state_slot(self.current_slot);
-        }
-        if f9 {
-            self.load_state_slot(self.current_slot);
-        }
-        if f12 {
-            self.screenshot();
+        if !configuring {
+            if f5 {
+                self.save_state_slot(self.current_slot);
+            }
+            if f9 {
+                self.load_state_slot(self.current_slot);
+            }
+            if f12 {
+                self.screenshot();
+            }
         }
 
         if self.hunting {
@@ -718,42 +1061,30 @@ impl eframe::App for AuroraApp {
             self.refresh_texture();
             ctx.request_repaint();
         } else if self.running {
-            self.poll_input(ctx);
-            if rewinding {
-                // Volta no tempo consumindo o anel de snapshots.
-                self.rewind_step();
-                self.gba.bus.apu.buffer.clear();
-            } else if fast_forward {
-                // Acelera: roda frames (sem o gate de áudio) até gastar o orçamento
-                // de tempo desta janela de update. Assim o ganho não fica preso em
-                // "N frames fixos × taxa de refresh" — usa toda a CPU disponível.
-                let start = Instant::now();
-                let mut n = 0;
-                loop {
-                    self.step_frame(true);
-                    n += 1;
-                    if n >= FAST_FORWARD_MAX_FRAMES || start.elapsed() >= FAST_FORWARD_BUDGET {
-                        break;
-                    }
-                }
+            if configuring {
+                // Remapeando controles: roda no ritmo normal, sem repassar input.
+                self.run_paced();
             } else {
-                // Ritmo normal pelo consumo de áudio: roda frames só até repor o
-                // buffer-alvo (no máx. 4 por update, pra não travar se a UI ficar
-                // lenta). Como o áudio é consumido em tempo real, isso ancora a
-                // emulação ao tempo real e corrige a "aceleração".
-                let target = self.audio.as_ref().map(|a| a.target());
-                let mut ran = 0;
-                loop {
-                    let go = match (target, self.audio.as_ref()) {
-                        (Some(t), Some(audio)) => audio.queued() < t && ran < 4,
-                        // Sem áudio: 1 frame por update (sincroniza pelo vsync).
-                        _ => ran < 1,
-                    };
-                    if !go {
-                        break;
+                self.poll_input(ctx);
+                if rewinding {
+                    // Volta no tempo consumindo o anel de snapshots.
+                    self.rewind_step();
+                    self.gba.bus.apu.buffer.clear();
+                } else if fast_forward {
+                    // Acelera: roda frames (sem o gate de áudio) até gastar o
+                    // orçamento de tempo desta janela de update. Assim o ganho não
+                    // fica preso em "N frames fixos × refresh" — usa toda a CPU.
+                    let start = Instant::now();
+                    let mut n = 0;
+                    loop {
+                        self.step_frame(true);
+                        n += 1;
+                        if n >= FAST_FORWARD_MAX_FRAMES || start.elapsed() >= FAST_FORWARD_BUDGET {
+                            break;
+                        }
                     }
-                    self.step_frame(false);
-                    ran += 1;
+                } else {
+                    self.run_paced();
                 }
             }
             // Alimenta o detector de cursor (debug) com o estado da RAM deste
@@ -857,6 +1188,12 @@ impl eframe::App for AuroraApp {
                         ui.close_menu();
                     }
                 });
+                ui.menu_button("Configurações", |ui| {
+                    if ui.button("🎮 Controles…").clicked() {
+                        self.show_input_config = true;
+                        ui.close_menu();
+                    }
+                });
                 ui.separator();
                 ui.label(format!("Scale: {:.0}x", self.scale));
                 ui.add(egui::Slider::new(&mut self.scale, 1.0..=6.0).show_value(false));
@@ -893,6 +1230,16 @@ impl eframe::App for AuroraApp {
             });
         });
 
+        // Janela de configuração de controles (quando aberta).
+        if self.show_input_config {
+            self.input_config_window(ctx);
+        }
+        // Mantém repintando enquanto remapeia (pra capturar a tecla/botão sem
+        // depender de outro evento) ou se a janela está aberta.
+        if self.show_input_config {
+            ctx.request_repaint();
+        }
+
         // Painel do Shiny Hunter (só quando o jogo é reconhecido).
         if self.profile.is_some() {
             egui::SidePanel::right("shiny_panel")
@@ -923,5 +1270,42 @@ impl eframe::App for AuroraApp {
                 ));
             });
         });
+    }
+
+    /// Persiste a configuração de controles no storage do eframe (chamado
+    /// periodicamente e ao fechar).
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string("input_config", self.input.serialize());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_config_roundtrips() {
+        let cfg = InputConfig::default();
+        let parsed = InputConfig::parse(&cfg.serialize());
+        assert_eq!(cfg.keys, parsed.keys);
+        assert_eq!(cfg.pads, parsed.pads);
+    }
+
+    #[test]
+    fn input_config_parse_overrides_known_and_ignores_garbage() {
+        let mut text = InputConfig::default().serialize();
+        text.push_str("key.A=W\nlinha invalida\npad.B=North\nkey.Inexistente=Q\n");
+        let cfg = InputConfig::parse(&text);
+        assert_eq!(cfg.keys[0], egui::Key::W); // A → W
+        assert_eq!(cfg.pads[1], Some(gilrs::Button::North)); // B → North
+        // O resto permanece no padrão.
+        assert_eq!(cfg.keys[1], InputConfig::default().keys[1]);
+    }
+
+    #[test]
+    fn pad_name_roundtrips() {
+        for b in InputConfig::default().pads.into_iter().flatten() {
+            assert_eq!(pad_from_name(pad_name(b)), Some(b));
+        }
     }
 }
