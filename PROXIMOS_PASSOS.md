@@ -26,7 +26,8 @@ Funcionando e validado:
   special) + saída no host via `cpal`; a emulação é **paçada pelo consumo de
   áudio** (corrige aceleração). RTC/GPIO (S-3511A).
 - **Saves**: SRAM (32 KB) + Flash 64K/128K (máquina de comandos completa) +
-  persistência em `.sav`. EEPROM e save states ainda pendentes.
+  **EEPROM** (512 B/8 KB, serial via DMA na região 0x0D) + persistência em
+  `.sav` + **save states** (serde+bincode, feature `save-states`). Fase 4 ✅.
 - **Frontend desktop** (egui): abrir ROM, framebuffer escalável, input, save,
   slider de velocidade, menu Shiny Hunter.
 - **110** testes unitários, clippy estrito limpo.
@@ -76,7 +77,7 @@ um `GameProfile` de `crates/shiny/src/games.rs` (1 entrada por jogo).
 - [ ] Testes de integração rodando ROMs homebrew/comerciais.
 
 ### 4. Cartridge / Saves — resto
-- [ ] EEPROM via DMA (região 0x0D) — Pokémon Gen 3 **não usa**, baixa prioridade.
+- [X] EEPROM via DMA (região 0x0D) — 512 B/8 KB, detecção automática do tamanho.
 
 ### 5. Android (Fase 7)
 - [ ] Concretizar o port (a crate `crates/android/` tem só o esqueleto JNI).

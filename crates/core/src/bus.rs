@@ -104,6 +104,10 @@ impl Bus {
     }
 
     pub fn read_u16(&mut self, addr: u32) -> u16 {
+        // EEPROM (região 0x0D) responde 1 bit por halfword lido, via DMA.
+        if (addr >> 24) & 0xF == 0xD && self.cartridge.is_eeprom() {
+            return self.cartridge.eeprom_read_bit() as u16;
+        }
         let a = addr & !1; // alinhamento half-word
         let lo = self.read_u8(a) as u16;
         let hi = self.read_u8(a + 1) as u16;
@@ -180,6 +184,11 @@ impl Bus {
 
     pub fn write_u16(&mut self, addr: u32, val: u16) {
         let a = addr & !1;
+        // EEPROM (região 0x0D): cada halfword escrito empurra 1 bit de comando.
+        if (a >> 24) & 0xF == 0xD && self.cartridge.is_eeprom() {
+            self.cartridge.eeprom_write_bit((val & 1) as u8);
+            return;
+        }
         let [lo, hi] = val.to_le_bytes();
         // As regiões de vídeo são escritas diretamente: o quirk de duplicação
         // só vale para STRB (byte), não para STRH/STR (halfword/word).
