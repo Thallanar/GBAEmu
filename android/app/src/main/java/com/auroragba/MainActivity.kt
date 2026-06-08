@@ -3,36 +3,39 @@ package com.auroragba
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Rect
-import android.graphics.RectF
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.opengl.GLES20
+import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.util.Log
-import android.view.SurfaceHolder
-import android.view.SurfaceView
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.Toast
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import javax.microedition.khronos.egl.EGLConfig
+import javax.microedition.khronos.opengles.GL10
 
 /**
- * Tela única do emulador: uma [SurfaceView] mostra o framebuffer e um
- * [ControlsView] por cima trata o toque. Uma thread dedicada roda o loop de
- * emulação+render; **todo** acesso ao ponteiro nativo do [Gba][NativeBridge]
- * acontece nessa thread. A UI passa input (máscara de botões) e a ROM escolhida
- * por estruturas atômicas.
+ * Tela única do emulador: um [GLSurfaceView] mostra o framebuffer (o core entrega
+ * 240×160 RGBA, enviado como textura e escalado pela GPU) e um [ControlsView] por
+ * cima trata o toque. O loop de emulação roda **na thread de render do GL**
+ * (`onDrawFrame`): **todo** acesso ao ponteiro nativo do [Gba][NativeBridge]
+ * acontece nessa thread. A UI passa input (máscara de botões), a ROM escolhida e
+ * os comandos do menu por estruturas atômicas.
+ *
+ * Antes o render era por software (`SurfaceView.lockCanvas` + `drawBitmap`
+ * escalando na CPU 60×/s); a GPU fazia nada e o aparelho esquentava. Agora a
+ * escala 240×160→tela sai de graça na GPU.
  */
-class MainActivity : Activity(), SurfaceHolder.Callback {
+class MainActivity : Activity() {
 
     private companion object {
         const val W = 240
@@ -44,34 +47,42 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         val MATCH = FrameLayout.LayoutParams.MATCH_PARENT
     }
 
-    private lateinit var surface: SurfaceView
+    private lateinit var glView: GLSurfaceView
     private val buttonMask = AtomicInteger(0)
     private val pendingRom = AtomicReference<ByteArray?>(null)
 
-    // Comandos do menu, executados na thread de emulação (acesso ao ponteiro):
-    // salvar estado (flag) e carregar estado (bytes lidos do arquivo na UI).
+    // Comandos do menu, executados na thread GL (acesso ao ponteiro): salvar
+    // estado (flag) e carregar estado (bytes lidos do arquivo na UI).
     private val pendingSaveState = AtomicBoolean(false)
     private val pendingLoadState = AtomicReference<ByteArray?>(null)
 
-    // Game code do jogo atual (chave dos arquivos de save). Escrito na thread de
-    // emulação ao carregar a ROM, lido na UI pra montar os caminhos.
+    // Game code do jogo atual (chave dos arquivos de save). Escrito na thread GL
+    // ao carregar a ROM, lido na UI pra montar os caminhos.
     @Volatile private var currentGameCode: String? = null
 
-    // Ponteiro nativo: criado pela thread de render, liberado em onDestroy (vive
-    // entre destruições da surface — pause/resume não reseta o jogo).
+    // Ponteiro nativo: criado pela thread GL, liberado em onDestroy (vive entre
+    // recriações do contexto — pause/resume não reseta o jogo).
     @Volatile private var handle = 0L
-    @Volatile private var running = false
     @Volatile private var romLoaded = false
-    private var renderThread: Thread? = null
+
+    // Áudio: 32768 Hz estéreo (taxa nativa do APU, sem reamostragem). Criado na
+    // thread GL; o `write` bloqueante ancora a emulação ao tempo real (pacing
+    // pelo consumo de áudio, mesmo modelo do desktop). Pausado/retomado no
+    // lifecycle, liberado no fim.
+    @Volatile private var audio: AudioTrack? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         val root = FrameLayout(this)
-        surface = SurfaceView(this)
-        surface.holder.addCallback(this)
-        root.addView(surface, FrameLayout.LayoutParams(MATCH, MATCH))
+        glView = GLSurfaceView(this).apply {
+            setEGLContextClientVersion(2)
+            preserveEGLContextOnPause = true
+            setRenderer(GbaRenderer())
+            renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+        }
+        root.addView(glView, FrameLayout.LayoutParams(MATCH, MATCH))
 
         val controls = ControlsView(this)
         controls.onMask = { buttonMask.set(it) }
@@ -81,6 +92,31 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         setContentView(root)
 
         if (savedInstanceState == null) openRomPicker()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        glView.onResume()
+        audio?.play()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Garante a gravação do .sav ao sair (a fila do GL é drenada na thread do
+        // ponteiro); o flush periódico é a rede de segurança.
+        glView.queueEvent { flushBackup() }
+        audio?.pause()
+        glView.onPause()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (handle != 0L) {
+            NativeBridge.destroy(handle)
+            handle = 0L
+        }
+        audio?.release()
+        audio = null
     }
 
     private fun openRomPicker() {
@@ -117,7 +153,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     /** Arquivo do save state (slot único `.ss1`) do jogo, em `filesDir`. */
     private fun stateFile(code: String) = File(filesDir, "$code.ss1")
 
-    /** Pede pra thread de emulação salvar o estado no slot único. */
+    /** Pede pra thread GL salvar o estado no slot único. */
     private fun saveStateFromMenu() {
         if (!romLoaded || currentGameCode == null) {
             toast("Carregue uma ROM antes de salvar estado")
@@ -126,7 +162,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         pendingSaveState.set(true)
     }
 
-    /** Lê o save state do disco (na UI) e entrega pra thread de emulação aplicar. */
+    /** Lê o save state do disco (na UI) e entrega pra thread GL aplicar. */
     private fun loadStateFromMenu() {
         val code = currentGameCode
         if (!romLoaded || code == null) {
@@ -154,108 +190,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        stopRenderThread()
-        if (handle != 0L) {
-            NativeBridge.destroy(handle)
-            handle = 0L
-        }
-    }
-
-    // ── SurfaceHolder.Callback ───────────────────────────────────────────────
-    override fun surfaceCreated(holder: SurfaceHolder) = startRenderThread()
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-    override fun surfaceDestroyed(holder: SurfaceHolder) = stopRenderThread()
-
-    private fun startRenderThread() {
-        if (renderThread != null) return
-        running = true
-        renderThread = Thread(::renderLoop, "emu").also { it.start() }
-    }
-
-    private fun stopRenderThread() {
-        running = false
-        renderThread?.join()
-        renderThread = null
-    }
-
-    private fun renderLoop() {
-        if (handle == 0L) handle = NativeBridge.create()
-        val buf = ByteBuffer.allocateDirect(W * H * 4).order(ByteOrder.nativeOrder())
-        val bitmap = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888)
-        val paint = Paint().apply { isFilterBitmap = false }
-        val src = Rect(0, 0, W, H)
-        val frameNanos = (1_000_000_000.0 / 59.7275).toLong()
-
-        // Áudio: 32768 Hz estéreo (taxa nativa do APU, sem reamostragem). O
-        // `write` bloqueante do AudioTrack ancora a emulação ao tempo real —
-        // mesmo modelo do desktop (pacing pelo consumo de áudio). Se o áudio não
-        // estiver disponível, caímos pro pacing por relógio (frameNanos).
-        val audio = createAudioTrack()
-        val audioBuf = ShortArray(8192)
-        var frames = 0
-
-        try {
-            while (running) {
-                val start = System.nanoTime()
-
-                pendingRom.getAndSet(null)?.let {
-                    // Grava o save do jogo anterior antes de trocar de cartucho.
-                    flushBackup()
-                    NativeBridge.loadRom(handle, it)
-                    romLoaded = true
-                    onRomLoaded()
-                }
-                // Comandos do menu (save states), na thread do ponteiro.
-                if (romLoaded && pendingSaveState.getAndSet(false)) doSaveState()
-                pendingLoadState.getAndSet(null)?.let { if (romLoaded) doLoadState(it) }
-
-                if (romLoaded) {
-                    NativeBridge.setButtons(handle, buttonMask.get())
-                    buf.clear()
-                    NativeBridge.renderFrame(handle, buf)
-                    buf.rewind()
-                    bitmap.copyPixelsFromBuffer(buf)
-                    if (++frames % FLUSH_EVERY_FRAMES == 0) flushBackup()
-                }
-
-                val canvas = surface.holder.lockCanvas()
-                if (canvas == null) {
-                    Thread.sleep(8)
-                    continue
-                }
-                try {
-                    canvas.drawColor(Color.BLACK)
-                    if (romLoaded) {
-                        canvas.drawBitmap(bitmap, src, fitRect(canvas.width, canvas.height), paint)
-                    }
-                } finally {
-                    surface.holder.unlockCanvasAndPost(canvas)
-                }
-
-                // Pacing: pelo áudio (write bloqueia até abrir espaço) ou, sem
-                // áudio/ROM, pelo relógio.
-                if (romLoaded && audio != null) {
-                    val n = NativeBridge.drainAudio(handle, audioBuf)
-                    if (n > 0) audio.write(audioBuf, 0, n) else Thread.sleep(2)
-                } else {
-                    val sleep = frameNanos - (System.nanoTime() - start)
-                    if (sleep > 0) Thread.sleep(sleep / 1_000_000, (sleep % 1_000_000).toInt())
-                }
-            }
-        } finally {
-            // Garante a gravação do .sav ao sair (background/fechar app).
-            flushBackup()
-            audio?.run {
-                pause()
-                flush()
-                release()
-            }
-        }
-    }
-
-    // ── Persistência de saves (chamadas na thread de emulação) ───────────────
+    // ── Persistência de saves (chamadas na thread GL) ────────────────────────
 
     /** Após carregar a ROM: guarda o game code e carrega o `.sav` existente. */
     private fun onRomLoaded() {
@@ -274,7 +209,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     /** Grava o `.sav` em disco se houve alteração desde a última gravação. */
     private fun flushBackup() {
         val code = currentGameCode ?: return
-        if (!NativeBridge.backupDirty(handle)) return
+        if (handle == 0L || !NativeBridge.backupDirty(handle)) return
         try {
             savFile(code).writeBytes(NativeBridge.saveBackup(handle))
             NativeBridge.clearBackupDirty(handle)
@@ -326,17 +261,176 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             .build()
             .also { it.play() }
     } catch (e: Exception) {
-        Log.e("AuroraGBA", "AudioTrack indisponível: $e")
+        Log.e(TAG, "AudioTrack indisponível: $e")
         null
     }
 
-    /** Retângulo de destino preservando o aspecto 240:160, centralizado. */
-    private fun fitRect(cw: Int, ch: Int): RectF {
-        val scale = minOf(cw.toFloat() / W, ch.toFloat() / H)
-        val w = W * scale
-        val h = H * scale
-        val left = (cw - w) / 2f
-        val top = (ch - h) / 2f
-        return RectF(left, top, left + w, top + h)
+    /**
+     * Renderer GL: roda o loop de emulação em `onDrawFrame` (thread GL). Envia o
+     * framebuffer do core como textura 240×160 (`GL_NEAREST`, pixel art nítido) e
+     * desenha um quad em tela cheia; a `glViewport` faz o letterbox preservando o
+     * aspecto 240:160. Os recursos GL são recriados a cada `onSurfaceCreated` (o
+     * contexto pode ser perdido no pause); o ponteiro do [Gba][NativeBridge] não.
+     */
+    private inner class GbaRenderer : GLSurfaceView.Renderer {
+        private lateinit var buf: ByteBuffer
+        private lateinit var quad: FloatBuffer
+        private var program = 0
+        private var texId = 0
+        private var posLoc = 0
+        private var texLoc = 0
+        private var frames = 0
+        private val audioBuf = ShortArray(8192)
+        private val frameNanos = (1_000_000_000.0 / 59.7275).toLong()
+
+        override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+            if (handle == 0L) handle = NativeBridge.create()
+            if (audio == null) audio = createAudioTrack()
+            buf = ByteBuffer.allocateDirect(W * H * 4).order(ByteOrder.nativeOrder())
+
+            // Triangle strip: pos.xy + tex.uv por vértice. tex v=0 no topo casa
+            // com a linha 0 do framebuffer (topo da imagem GBA).
+            val verts = floatArrayOf(
+                -1f, 1f, 0f, 0f, // sup-esq
+                -1f, -1f, 0f, 1f, // inf-esq
+                1f, 1f, 1f, 0f, // sup-dir
+                1f, -1f, 1f, 1f, // inf-dir
+            )
+            quad = ByteBuffer.allocateDirect(verts.size * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer()
+                .apply { put(verts); position(0) }
+
+            program = buildProgram()
+            posLoc = GLES20.glGetAttribLocation(program, "aPos")
+            texLoc = GLES20.glGetAttribLocation(program, "aTex")
+            texId = createTexture()
+            GLES20.glClearColor(0f, 0f, 0f, 1f)
+        }
+
+        override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
+            // Letterbox: maior retângulo 240:160 centralizado.
+            val scale = minOf(width.toFloat() / W, height.toFloat() / H)
+            val vw = (W * scale).toInt()
+            val vh = (H * scale).toInt()
+            GLES20.glViewport((width - vw) / 2, (height - vh) / 2, vw, vh)
+        }
+
+        override fun onDrawFrame(gl: GL10?) {
+            val start = System.nanoTime()
+
+            pendingRom.getAndSet(null)?.let {
+                // Grava o save do jogo anterior antes de trocar de cartucho.
+                flushBackup()
+                NativeBridge.loadRom(handle, it)
+                romLoaded = true
+                onRomLoaded()
+            }
+            if (romLoaded && pendingSaveState.getAndSet(false)) doSaveState()
+            pendingLoadState.getAndSet(null)?.let { if (romLoaded) doLoadState(it) }
+
+            if (romLoaded) {
+                NativeBridge.setButtons(handle, buttonMask.get())
+                buf.clear()
+                NativeBridge.renderFrame(handle, buf)
+                buf.rewind()
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+                GLES20.glTexSubImage2D(
+                    GLES20.GL_TEXTURE_2D, 0, 0, 0, W, H,
+                    GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf,
+                )
+                if (++frames % FLUSH_EVERY_FRAMES == 0) flushBackup()
+            }
+
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            if (romLoaded) {
+                GLES20.glUseProgram(program)
+                quad.position(0)
+                GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 16, quad)
+                GLES20.glEnableVertexAttribArray(posLoc)
+                quad.position(2)
+                GLES20.glVertexAttribPointer(texLoc, 2, GLES20.GL_FLOAT, false, 16, quad)
+                GLES20.glEnableVertexAttribArray(texLoc)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            }
+
+            // Pacing: pelo áudio (write bloqueia até abrir espaço) ou, sem
+            // áudio/ROM, pelo relógio.
+            val a = audio
+            if (romLoaded && a != null) {
+                val n = NativeBridge.drainAudio(handle, audioBuf)
+                if (n > 0) a.write(audioBuf, 0, n) else Thread.sleep(2)
+            } else {
+                val sleep = frameNanos - (System.nanoTime() - start)
+                if (sleep > 0) Thread.sleep(sleep / 1_000_000, (sleep % 1_000_000).toInt())
+            }
+        }
+
+        private fun createTexture(): Int {
+            val ids = IntArray(1)
+            GLES20.glGenTextures(1, ids, 0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0])
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexImage2D(
+                GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, W, H, 0,
+                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null,
+            )
+            return ids[0]
+        }
+
+        private fun buildProgram(): Int {
+            val vs = compileShader(
+                GLES20.GL_VERTEX_SHADER,
+                """
+                attribute vec2 aPos;
+                attribute vec2 aTex;
+                varying vec2 vTex;
+                void main() {
+                    vTex = aTex;
+                    gl_Position = vec4(aPos, 0.0, 1.0);
+                }
+                """.trimIndent(),
+            )
+            val fs = compileShader(
+                GLES20.GL_FRAGMENT_SHADER,
+                """
+                precision mediump float;
+                uniform sampler2D uTex;
+                varying vec2 vTex;
+                void main() {
+                    gl_FragColor = texture2D(uTex, vTex);
+                }
+                """.trimIndent(),
+            )
+            val prog = GLES20.glCreateProgram()
+            GLES20.glAttachShader(prog, vs)
+            GLES20.glAttachShader(prog, fs)
+            GLES20.glLinkProgram(prog)
+            val status = IntArray(1)
+            GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, status, 0)
+            if (status[0] == 0) {
+                Log.e(TAG, "link do programa GL falhou: ${GLES20.glGetProgramInfoLog(prog)}")
+            }
+            GLES20.glDeleteShader(vs)
+            GLES20.glDeleteShader(fs)
+            return prog
+        }
+
+        private fun compileShader(type: Int, src: String): Int {
+            val shader = GLES20.glCreateShader(type)
+            GLES20.glShaderSource(shader, src)
+            GLES20.glCompileShader(shader)
+            val status = IntArray(1)
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, status, 0)
+            if (status[0] == 0) {
+                Log.e(TAG, "compilação de shader falhou: ${GLES20.glGetShaderInfoLog(shader)}")
+            }
+            return shader
+        }
     }
 }
