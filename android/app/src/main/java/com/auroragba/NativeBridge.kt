@@ -102,4 +102,10 @@ object NativeBridge {
 
     /** Menor shiny_value visto nesta caça (0xFFFF = nada ainda). */
     external fun huntBestShinyValue(handle: Long): Int
+
+    /**
+     * Sprite de frente do alvo (64×64) em ARGB8888, pronto pra `Bitmap`. Array
+     * vazio se não der. `shiny` escolhe a paleta normal ou shiny.
+     */
+    external fun huntTargetSprite(handle: Long, target: Int, shiny: Boolean): IntArray
 }

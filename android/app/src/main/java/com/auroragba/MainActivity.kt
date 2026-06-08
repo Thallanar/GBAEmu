@@ -3,6 +3,8 @@ package com.auroragba
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -15,8 +17,12 @@ import android.os.Looper
 import android.util.Log
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import java.io.File
@@ -100,26 +106,36 @@ class MainActivity : Activity() {
     private lateinit var huntStatus: TextView
     private val uiHandler = Handler(Looper.getMainLooper())
 
+    // Sprites do alvo (ARGB8888 64×64), decodificados na thread GL ao iniciar a
+    // caça e lidos pela UI ao montar o painel do retrato.
+    @Volatile private var spriteNormal: IntArray? = null
+    @Volatile private var spriteShiny: IntArray? = null
+
+    // Views persistentes (reaproveitadas entre paisagem/retrato em [applyLayout]).
+    private lateinit var controls: ControlsView
+    private lateinit var hunterPanel: LinearLayout
+    private lateinit var panelSpriteNormal: ImageView
+    private lateinit var panelSpriteShiny: ImageView
+    private lateinit var panelStats: TextView
+    private var portrait = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        val root = FrameLayout(this)
         glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(2)
             preserveEGLContextOnPause = true
             setRenderer(GbaRenderer())
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
-        root.addView(glView, FrameLayout.LayoutParams(MATCH, MATCH))
 
-        val controls = ControlsView(this)
-        controls.onMask = { buttonMask.set(it) }
-        controls.onMenu = { showMenu() }
-        root.addView(controls, FrameLayout.LayoutParams(MATCH, MATCH))
+        controls = ControlsView(this).apply {
+            onMask = { buttonMask.set(it) }
+            onMenu = { showMenu() }
+        }
 
-        // Overlay de status da caça (escondido fora do hunt). Acima dos controles,
-        // logo abaixo do botão ☰; toques nele passam (não é clicável).
+        // Overlay compacto de status da caça (paisagem): topo, abaixo do ☰.
         huntStatus = TextView(this).apply {
             setBackgroundColor(Color.argb(170, 0, 0, 0))
             setTextColor(Color.WHITE)
@@ -127,20 +143,136 @@ class MainActivity : Activity() {
             setPadding(28, 18, 28, 18)
             visibility = View.GONE
         }
-        root.addView(
-            huntStatus,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-            ).apply {
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                topMargin = 220
-            },
-        )
 
-        setContentView(root)
+        buildHunterPanel()
+
+        // Monta o layout conforme a orientação atual (rebuild em rotação).
+        applyLayout()
 
         if (savedInstanceState == null) openRomPicker()
+    }
+
+    /** Cria o painel completo do hunter (usado no retrato): sprites + stats + parar. */
+    private fun buildHunterPanel() {
+        val dp = resources.displayMetrics.density
+        fun spriteView() = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = LinearLayout.LayoutParams((96 * dp).toInt(), (96 * dp).toInt())
+        }
+        panelSpriteNormal = spriteView()
+        panelSpriteShiny = spriteView()
+
+        val sprites = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            fun labeled(label: String, img: ImageView) = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding((16 * dp).toInt(), 0, (16 * dp).toInt(), 0)
+                addView(img)
+                addView(
+                    TextView(this@MainActivity).apply {
+                        text = label
+                        setTextColor(Color.LTGRAY)
+                        gravity = Gravity.CENTER
+                    },
+                )
+            }
+            addView(labeled("Normal", panelSpriteNormal))
+            addView(labeled("✨ Shiny", panelSpriteShiny))
+        }
+
+        panelStats = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setPadding(0, (12 * dp).toInt(), 0, (12 * dp).toInt())
+        }
+
+        val stop = Button(this).apply {
+            text = "⏹ Parar caça"
+            setOnClickListener { pendingHuntStop.set(true) }
+        }
+
+        hunterPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(Color.rgb(18, 18, 22))
+            setPadding(0, (16 * dp).toInt(), 0, (16 * dp).toInt())
+            addView(sprites)
+            addView(panelStats)
+            addView(stop)
+            visibility = View.GONE
+        }
+    }
+
+    /**
+     * (Re)monta a hierarquia conforme a orientação. Paisagem: tela cheia + controles
+     * por cima (overlay) + status compacto. Retrato: tela no topo (aspecto 240:160)
+     * e, abaixo, os controles OU o painel do hunter (durante a caça). As views são
+     * reaproveitadas — só mudam de pai —, então o ponteiro nativo e o áudio seguem
+     * vivos na rotação (a Activity não recria, graças ao `configChanges`).
+     */
+    private fun applyLayout() {
+        portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+        // Solta as views dos pais antigos antes de re-parentar.
+        for (v in listOf<View>(glView, controls, huntStatus, hunterPanel)) {
+            (v.parent as? ViewGroup)?.removeView(v)
+        }
+
+        val root: View
+        if (portrait) {
+            // Tela no topo com a altura exata do aspecto 240:160 (sem letterbox).
+            val screenW = resources.displayMetrics.widthPixels
+            val glH = screenW * H / W
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(glView, LinearLayout.LayoutParams(MATCH, glH))
+            val bottom = FrameLayout(this).apply {
+                setBackgroundColor(Color.BLACK)
+                layoutParams = LinearLayout.LayoutParams(MATCH, 0, 1f)
+            }
+            bottom.addView(controls, FrameLayout.LayoutParams(MATCH, MATCH))
+            bottom.addView(hunterPanel, FrameLayout.LayoutParams(MATCH, MATCH))
+            col.addView(bottom)
+            root = col
+        } else {
+            val frame = FrameLayout(this)
+            frame.addView(glView, FrameLayout.LayoutParams(MATCH, MATCH))
+            frame.addView(controls, FrameLayout.LayoutParams(MATCH, MATCH))
+            frame.addView(
+                huntStatus,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                    topMargin = 220
+                },
+            )
+            root = frame
+        }
+        setContentView(root)
+        refreshHuntViews()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyLayout()
+    }
+
+    /** Mostra/esconde controles, overlay e painel conforme caça × orientação. */
+    private fun refreshHuntViews() {
+        if (portrait) {
+            huntStatus.visibility = View.GONE
+            controls.visibility = if (hunting) View.GONE else View.VISIBLE
+            hunterPanel.visibility = if (hunting) View.VISIBLE else View.GONE
+            if (hunting) updateHunterPanel()
+        } else {
+            controls.visibility = View.VISIBLE
+            hunterPanel.visibility = View.GONE
+            huntStatus.visibility = if (hunting) View.VISIBLE else View.GONE
+            if (hunting) huntStatus.text = huntStatusText()
+        }
     }
 
     override fun onResume() {
@@ -241,25 +373,49 @@ class MainActivity : Activity() {
             "Espécie lida: $statSpecies    (☰ para parar)"
     }
 
-    /** Atualiza o overlay a cada 200 ms enquanto a caça roda. */
+    /** Texto detalhado do painel do retrato (sprites à parte). */
+    private fun huntPanelText(): String {
+        val best = if (statBestSV == 0xFFFF) "—" else statBestSV.toString()
+        val prob = 1.0 - Math.pow(1.0 - 1.0 / 8192.0, statAttempts.toDouble())
+        return "✨ Caçando $currentTargetName\n\n" +
+            "Tentativas: $statAttempts\n" +
+            "Melhor SV: $best   (shiny < 8)\n" +
+            "Espécie lida: $statSpecies\n" +
+            "Chance acumulada: ${"%.1f".format(prob * 100)}%"
+    }
+
+    /** Atualiza o painel do retrato (sprites + stats). */
+    private fun updateHunterPanel() {
+        spriteNormal?.let { panelSpriteNormal.setImageBitmap(spriteBitmap(it)) }
+        spriteShiny?.let { panelSpriteShiny.setImageBitmap(spriteBitmap(it)) }
+        panelStats.text = huntPanelText()
+    }
+
+    /** Bitmap nítido (sem suavização) de um sprite ARGB 64×64, escalado 4×. */
+    private fun spriteBitmap(argb: IntArray): Bitmap? {
+        if (argb.size < 64 * 64) return null
+        val src = Bitmap.createBitmap(argb, 64, 64, Bitmap.Config.ARGB_8888)
+        return Bitmap.createScaledBitmap(src, 256, 256, false)
+    }
+
+    /** Atualiza o status visível (painel no retrato, overlay na paisagem) a 200 ms. */
     private val huntStatsUpdater = object : Runnable {
         override fun run() {
             if (!hunting) return
-            huntStatus.text = huntStatusText()
+            if (portrait) updateHunterPanel() else huntStatus.text = huntStatusText()
             uiHandler.postDelayed(this, 200)
         }
     }
 
     private fun startHuntUI() {
-        huntStatus.text = huntStatusText()
-        huntStatus.visibility = View.VISIBLE
+        refreshHuntViews()
         uiHandler.removeCallbacks(huntStatsUpdater)
         uiHandler.post(huntStatsUpdater)
     }
 
     private fun stopHuntUI() {
         uiHandler.removeCallbacks(huntStatsUpdater)
-        huntStatus.visibility = View.GONE
+        refreshHuntViews()
     }
 
     /** Arquivo `.sav` (backup do cartucho) do jogo, em `filesDir`. */
@@ -481,6 +637,11 @@ class MainActivity : Activity() {
             // Comandos da caça (menu).
             val startTarget = pendingHuntStart.getAndSet(-1)
             if (startTarget >= 0 && romLoaded && NativeBridge.huntStart(handle, startTarget)) {
+                // Decodifica os sprites do alvo (thread do ponteiro) pro painel.
+                spriteNormal = NativeBridge.huntTargetSprite(handle, startTarget, false)
+                    .takeIf { it.isNotEmpty() }
+                spriteShiny = NativeBridge.huntTargetSprite(handle, startTarget, true)
+                    .takeIf { it.isNotEmpty() }
                 hunting = true
                 runOnUiThread { startHuntUI() }
             }
