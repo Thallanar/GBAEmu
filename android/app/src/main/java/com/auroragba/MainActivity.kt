@@ -215,6 +215,7 @@ class MainActivity : Activity() {
      */
     private fun applyLayout() {
         portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+        controls.portrait = portrait
         // Solta as views dos pais antigos antes de re-parentar.
         for (v in listOf<View>(glView, controls, huntStatus, hunterPanel)) {
             (v.parent as? ViewGroup)?.removeView(v)
