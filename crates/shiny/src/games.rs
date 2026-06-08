@@ -140,26 +140,51 @@ const EMERALD: GameProfile = GameProfile {
         input_func: 0x0813_425D,
     }),
     targets: &[
-        // species=0 por ora (não verifica espécie): o índice interno do Gen 3
-        // difere do dex nacional pros Pokémon de Hoenn; confirmamos na ROM e
-        // preenchemos depois.
+        // Lendários estáticos (soft-reset na frente). Índices INTERNOS do Gen 3
+        // (≠ dex nacional): a cauda de Hoenn é REORDENADA — não é um offset fixo.
+        // Valores tirados do `SPECIES_*` do pokeemerald (ordem interna da ROM) e
+        // confirmados pelo sprite no próprio app: Regirock 401, Regice 402,
+        // Registeel 403, Kyogre 404, Groudon 405, Rayquaza 406, Latias 407,
+        // Latios 408 (Jirachi 409, Deoxys 410). O trio do clima vem ANTES dos
+        // Lati internamente.
         TargetDef {
             name: "Rayquaza",
-            species: 0,
+            species: 406,
             slot: Slot::Enemy,
             method: HuntMethod::SoftResetLegendary,
             cursor: StarterCursor::Center,
         },
         TargetDef {
             name: "Groudon",
-            species: 0,
+            species: 405,
             slot: Slot::Enemy,
             method: HuntMethod::SoftResetLegendary,
             cursor: StarterCursor::Center,
         },
         TargetDef {
             name: "Kyogre",
-            species: 0,
+            species: 404,
+            slot: Slot::Enemy,
+            method: HuntMethod::SoftResetLegendary,
+            cursor: StarterCursor::Center,
+        },
+        TargetDef {
+            name: "Regirock",
+            species: 401,
+            slot: Slot::Enemy,
+            method: HuntMethod::SoftResetLegendary,
+            cursor: StarterCursor::Center,
+        },
+        TargetDef {
+            name: "Regice",
+            species: 402,
+            slot: Slot::Enemy,
+            method: HuntMethod::SoftResetLegendary,
+            cursor: StarterCursor::Center,
+        },
+        TargetDef {
+            name: "Registeel",
+            species: 403,
             slot: Slot::Enemy,
             method: HuntMethod::SoftResetLegendary,
             cursor: StarterCursor::Center,
