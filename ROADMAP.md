@@ -117,7 +117,8 @@ auroragba/
 
 ### Fase 5 — Frontend Desktop (3–4 semanas)
 
-- [ ] File picker e biblioteca de ROMs
+- [X] Biblioteca de ROMs (grid com capas: box art do libretro + fallback de
+      screenshot; varredura de pasta, cache em disco, worker em background)
 - [X] Configuração de teclas e gamepad (gilrs; remapeável na UI, persistido)
 - [X] Save states UI (8 slots em disco, F5/F9, menu "Estado")
 - [X] Fast-forward (Espaço), rewind (R, anel em RAM), screenshots (F12, PNG)
@@ -218,11 +219,12 @@ auroragba/
 - [X] BIOS HLE (SWI + trampolim de IRQ + direct boot) — sem BIOS oficial
 - [X] Joypad (KEYINPUT/KEYCNT + IRQ de keypad + input no desktop)
 
-- [~] Fase 5 — Frontend desktop: janela egui, abrir ROM, framebuffer escalável,
+- [X] Fase 5 — Frontend desktop: janela egui, abrir ROM, framebuffer escalável,
   input, persistência de save, slider de velocidade, **save states UI** (8 slots,
   F5/F9), **fast-forward** (Espaço), **rewind** (R), **screenshots** (F12),
-  **config de teclas + gamepad** (gilrs, remapeável e persistido). Falta a
-  biblioteca de ROMs (grid com capas).
+  **config de teclas + gamepad** (gilrs, remapeável e persistido) e **biblioteca
+  de ROMs** (grid com capas: box art do libretro + fallback de screenshot). Fase
+  completa.
 
 - [X] Fase 4 — saves: SRAM + Flash 64K/128K + **EEPROM** (512 B/8 KB) +
   persistência `.sav` + **save states** (serde+bincode). Fase completa.
@@ -247,7 +249,8 @@ auroragba/
   HLE não foram formatados); arquivos novos/reescritos já estão fmt-clean.
 - **Timing de ciclos**: hoje cada instrução conta como 1 ciclo (placeholder);
   falta wait states por região de memória (afeta precisão fina e pitch de áudio).
-- **Faltam**: UX do frontend (biblioteca de ROMs — Fase 5), mosaic afim (só BG
-  texto + OBJ implementados), e o port Android.
-- Suíte: **108 testes** no core (com a feature `save-states`) + 6 no desktop
-  (encoder PNG + round-trip da config de input), clippy estrito limpo.
+- **Faltam**: Fase 6 (mais jogos/métodos no Shiny Hunter), mosaic afim (só BG
+  texto + OBJ implementados), e o port Android (Fase 7).
+- Suíte: **108 testes** no core (com a feature `save-states`) + 10 no desktop
+  (encoder PNG, round-trip da config de input, cache de capa, lookup de box art),
+  clippy estrito limpo.

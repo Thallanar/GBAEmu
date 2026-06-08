@@ -66,7 +66,7 @@ um `GameProfile` de `crates/shiny/src/games.rs` (1 entrada por jogo).
 - [ ] **Método random encounters**: detectar a tela de batalha de selvagem (andar
       na grama / repel) e ler o slot inimigo.
 
-### 2. Frontend — qualidade de vida (Fase 5)
+### 2. Frontend — qualidade de vida (Fase 5) ✅ COMPLETA
 - [X] **Save states** (core: serde+bincode atrás da feature `save-states`).
 - [X] **Save states UI** (desktop): 8 slots em disco (`<rom>.ss1`..`.ss8`),
       F5 salva / F9 carrega o slot atual, menu "Estado" pra escolher slot.
@@ -75,7 +75,11 @@ um `GameProfile` de `crates/shiny/src/games.rs` (1 entrada por jogo).
 - [X] **Gamepad** (gilrs) + **configuração de teclas**: remapeável em
       Configurações → Controles (teclado e gamepad por botão), persistido via
       storage do eframe (feature `persistence`).
-- [ ] Biblioteca de ROMs / file picker melhor (grid com capas) — **próximo PR**.
+- [X] **Biblioteca de ROMs** (Arquivo → Biblioteca): varre uma pasta por `.gba`,
+      grid de capas clicáveis. Capa = box art do libretro (jogos conhecidos,
+      casados pelo game code) com **fallback de screenshot** (boota a ROM headless
+      e captura o frame). Worker em background (rede + emulação fora da thread da
+      UI) + cache em disco; pasta persistida.
 
 ### 3. Correção / base
 - [ ] **Timing de ciclos exato** (wait states por região de memória) — hoje cada
