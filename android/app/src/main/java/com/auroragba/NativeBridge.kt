@@ -31,4 +31,11 @@ object NativeBridge {
 
     /** Atualiza os botões (bits do KEYINPUT: 0=A,1=B,2=Sel,3=Start,4=R,5=L,6=Up,7=Down,8=R,9=L). */
     external fun setButtons(handle: Long, mask: Int)
+
+    /**
+     * Copia até `out.size` amostras (i16 intercaladas L,R a 32768 Hz) do APU pro
+     * array e devolve quantas copiou. Escreve direto num `AudioTrack` 32768 Hz
+     * estéreo.
+     */
+    external fun drainAudio(handle: Long, out: ShortArray): Int
 }

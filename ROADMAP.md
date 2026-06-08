@@ -157,8 +157,8 @@ auroragba/
 - [X] Wrapper JNI sobre o core Rust (create/destroy/loadRom/renderFrame/setButtons)
 - [X] App Kotlin (Gradle): SurfaceView com o framebuffer + overlay de controles touch
 - [X] Build via cargo-ndk + Gradle; **validado rodando Pokémon Emerald no emulador**
-- [ ] Áudio (AudioTrack) — próximo PR
-- [ ] Saves (.sav + estados) no armazenamento do app — PR seguinte
+- [X] Áudio (AudioTrack 32768 Hz estéreo; pacing pelo write bloqueante)
+- [ ] Saves (.sav + estados) no armazenamento do app — próximo PR
 - [ ] Suporte a controle Bluetooth / gamepad físico
 - [ ] Empacotamento APK assinado / distribuição
 
@@ -237,9 +237,9 @@ auroragba/
   (Torchic/Treecko/Mudkip) caçam via controle do cursor do menu em **malha
   fechada** (endereços achados com o detector de RAM do desktop). Faltam outros
   jogos e o método de random encounters.
-- [~] Fase 7 — Android: ponte JNI + app Kotlin (SurfaceView + controles touch),
-  build via cargo-ndk + Gradle, **vídeo + input validados no emulador rodando
-  Pokémon Emerald**. Faltam áudio, saves e gamepad físico.
+- [~] Fase 7 — Android: ponte JNI + app Kotlin (SurfaceView + controles touch +
+  **áudio via AudioTrack**), build via cargo-ndk + Gradle, **validado no emulador
+  rodando Pokémon Emerald**. Faltam saves e gamepad físico.
 
 ### Validação (jsmolka gba-tests)
 
