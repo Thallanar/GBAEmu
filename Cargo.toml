@@ -39,6 +39,10 @@ cpal = "0.15"
 # Input
 gilrs = "0.10"
 
+# Biblioteca de ROMs: HTTP (box art do libretro) + decodificação de imagem
+ureq = "2"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # Bitfield helpers (úteis para registradores do GBA)
 bitflags = "2.5"
 

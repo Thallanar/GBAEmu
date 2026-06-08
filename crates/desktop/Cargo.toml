@@ -27,4 +27,6 @@ eframe = { workspace = true, features = ["persistence"] }
 egui.workspace = true
 gilrs.workspace = true
 cpal.workspace = true
+ureq.workspace = true
+image.workspace = true
 rfd = "0.14"

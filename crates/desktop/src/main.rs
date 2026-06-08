@@ -15,6 +15,7 @@ use auroragba_shiny::{CheckResult, Hunter};
 use eframe::egui;
 
 mod audio;
+mod library;
 mod png;
 
 /// Quantidade de slots de save state em disco (`<rom>.ss1`..`.ss8`).
@@ -148,6 +149,53 @@ impl InputConfig {
 enum Rebind {
     Key(usize),
     Pad(usize),
+}
+
+/// Tamanho da capa (caixa) no grid da biblioteca.
+const COVER_W: f32 = 110.0;
+const COVER_H: f32 = 124.0;
+
+/// Desenha uma célula da biblioteca (capa + título) e devolve `true` se clicada.
+fn cover_cell(ui: &mut egui::Ui, entry: &library::RomEntry) -> bool {
+    let mut clicked = false;
+    ui.allocate_ui(egui::vec2(COVER_W + 8.0, COVER_H + 30.0), |ui| {
+        ui.vertical_centered(|ui| {
+            let resp = match &entry.cover {
+                Some(tex) => {
+                    // Preserva o aspecto da capa dentro da caixa (box art é
+                    // retrato, screenshot é paisagem).
+                    let ts = tex.size_vec2();
+                    let scale = (COVER_W / ts.x).min(COVER_H / ts.y);
+                    let img = egui::Image::new(tex).fit_to_exact_size(ts * scale);
+                    ui.add(egui::ImageButton::new(img))
+                }
+                None => {
+                    // Placeholder enquanto o worker gera a capa.
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(COVER_W, COVER_H), egui::Sense::click());
+                    ui.painter()
+                        .rect_filled(rect, 4.0, egui::Color32::from_gray(40));
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "…",
+                        egui::FontId::proportional(24.0),
+                        egui::Color32::GRAY,
+                    );
+                    resp
+                }
+            };
+            clicked = resp.clicked();
+            let label = if entry.title.is_empty() {
+                entry.code.as_str()
+            } else {
+                entry.title.as_str()
+            };
+            ui.label(egui::RichText::new(label).small())
+                .on_hover_text(entry.path.display().to_string());
+        });
+    });
+    clicked
 }
 
 /// Nome estável de um botão de gamepad (pra UI e persistência).
@@ -325,6 +373,10 @@ struct AuroraApp {
     show_input_config: bool,
     /// Binding em remapeamento (aguardando a próxima tecla/botão). None = nenhum.
     rebinding: Option<Rebind>,
+    /// Biblioteca de ROMs (varredura de pasta + capas).
+    library: library::Library,
+    /// Janela da biblioteca aberta?
+    show_library: bool,
 }
 
 impl AuroraApp {
@@ -334,7 +386,17 @@ impl AuroraApp {
             cc.egui_ctx
                 .load_texture("gba-framebuffer", image, egui::TextureOptions::NEAREST);
 
-        Self {
+        // Pasta de cache das capas: <dados-do-app>/covers (ou ./covers se o
+        // diretório de dados não estiver disponível).
+        let cache_dir = eframe::storage_dir("AuroraGBA")
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("covers");
+        let saved_lib_dir = cc
+            .storage
+            .and_then(|s| s.get_string("library_dir"))
+            .map(PathBuf::from);
+
+        let mut app = Self {
             gba: Gba::new(),
             rom_path: None,
             texture,
@@ -370,7 +432,18 @@ impl AuroraApp {
             },
             show_input_config: false,
             rebinding: None,
+            library: library::Library::new(cache_dir),
+            show_library: false,
+        };
+
+        // Restaura a última pasta de ROMs e já mostra a biblioteca no boot.
+        if let Some(dir) = saved_lib_dir {
+            if dir.is_dir() {
+                app.library.scan(dir);
+                app.show_library = true;
+            }
         }
+        app
     }
 
     fn open_rom(&mut self, path: PathBuf) {
@@ -632,27 +705,32 @@ impl AuroraApp {
         ui.horizontal(|ui| {
             // Distribui as duas colunas igualmente na largura do painel.
             let col_w = (ui.available_width() - 8.0) / 2.0;
-            let draw = |ui: &mut egui::Ui, tex: &Option<egui::TextureHandle>, label: &str, hot: bool| {
-                ui.allocate_ui(egui::vec2(col_w, 130.0), |ui| {
-                    ui.vertical_centered(|ui| {
-                        match tex {
-                            Some(tex) => {
-                                ui.add(
-                                    egui::Image::new(tex)
-                                        .fit_to_exact_size(egui::vec2(96.0, 96.0)),
-                                );
+            let draw =
+                |ui: &mut egui::Ui, tex: &Option<egui::TextureHandle>, label: &str, hot: bool| {
+                    ui.allocate_ui(egui::vec2(col_w, 130.0), |ui| {
+                        ui.vertical_centered(|ui| {
+                            match tex {
+                                Some(tex) => {
+                                    ui.add(
+                                        egui::Image::new(tex)
+                                            .fit_to_exact_size(egui::vec2(96.0, 96.0)),
+                                    );
+                                }
+                                None => {
+                                    ui.add_space(24.0);
+                                    ui.label(egui::RichText::new("?").size(40.0).weak());
+                                    ui.add_space(24.0);
+                                }
                             }
-                            None => {
-                                ui.add_space(24.0);
-                                ui.label(egui::RichText::new("?").size(40.0).weak());
-                                ui.add_space(24.0);
-                            }
-                        }
-                        let rich = egui::RichText::new(label).small();
-                        ui.label(if hot { rich.strong().color(egui::Color32::GOLD) } else { rich.weak() });
+                            let rich = egui::RichText::new(label).small();
+                            ui.label(if hot {
+                                rich.strong().color(egui::Color32::GOLD)
+                            } else {
+                                rich.weak()
+                            });
+                        });
                     });
-                });
-            };
+                };
             draw(ui, &normal_tex, "Normal", false);
             draw(ui, &shiny_tex, "✨ Shiny", found);
         });
@@ -921,6 +999,51 @@ impl AuroraApp {
         self.show_input_config = open;
     }
 
+    /// Janela da biblioteca: escolher pasta + grid de capas clicáveis.
+    fn library_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_library;
+        let mut pick = false;
+        let mut launch: Option<PathBuf> = None;
+        egui::Window::new("📚 Biblioteca")
+            .open(&mut open)
+            .default_size([700.0, 480.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("📁 Escolher pasta…").clicked() {
+                        pick = true;
+                    }
+                    match &self.library.dir {
+                        Some(d) => ui.label(d.display().to_string()),
+                        None => ui.label("Nenhuma pasta selecionada."),
+                    };
+                });
+                ui.separator();
+                if self.library.entries.is_empty() {
+                    ui.label("Nenhuma ROM .gba aqui. Escolha uma pasta com seus jogos.");
+                    return;
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for entry in &self.library.entries {
+                            if cover_cell(ui, entry) {
+                                launch = Some(entry.path.clone());
+                            }
+                        }
+                    });
+                });
+            });
+        self.show_library = open;
+        if pick {
+            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                self.library.scan(dir);
+            }
+        }
+        if let Some(path) = launch {
+            self.open_rom(path);
+            self.show_library = false;
+        }
+    }
+
     /// Roda exatamente 1 frame, lidando com o áudio: com dispositivo, drena as
     /// amostras pro host (ou descarta se `mute`, no fast-forward, pra não estourar
     /// o buffer nem sair em pitch errado); sem dispositivo, só esvazia o APU.
@@ -1026,6 +1149,13 @@ impl eframe::App for AuroraApp {
         // a tecla capturada não "vazar" pro emulador).
         let pad_event = self.pump_gamepad();
         let configuring = self.rebinding.is_some();
+
+        // Recebe as capas que o worker da biblioteca terminou; se ainda há
+        // pendentes e a janela está aberta, segue repintando pra elas aparecerem.
+        let covers_pending = self.library.poll(ctx);
+        if covers_pending && self.show_library {
+            ctx.request_repaint();
+        }
         if let Some(rebind) = self.rebinding {
             self.apply_rebind(ctx, rebind, pad_event);
         }
@@ -1126,6 +1256,10 @@ impl eframe::App for AuroraApp {
                         {
                             self.open_rom(path);
                         }
+                        ui.close_menu();
+                    }
+                    if ui.button("📚 Biblioteca de ROMs").clicked() {
+                        self.show_library = !self.show_library;
                         ui.close_menu();
                     }
                     ui.separator();
@@ -1234,6 +1368,10 @@ impl eframe::App for AuroraApp {
         if self.show_input_config {
             self.input_config_window(ctx);
         }
+        // Janela da biblioteca de ROMs (quando aberta).
+        if self.show_library {
+            self.library_window(ctx);
+        }
         // Mantém repintando enquanto remapeia (pra capturar a tecla/botão sem
         // depender de outro evento) ou se a janela está aberta.
         if self.show_input_config {
@@ -1276,6 +1414,9 @@ impl eframe::App for AuroraApp {
     /// periodicamente e ao fechar).
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("input_config", self.input.serialize());
+        if let Some(dir) = &self.library.dir {
+            storage.set_string("library_dir", dir.display().to_string());
+        }
     }
 }
 
@@ -1298,7 +1439,7 @@ mod tests {
         let cfg = InputConfig::parse(&text);
         assert_eq!(cfg.keys[0], egui::Key::W); // A → W
         assert_eq!(cfg.pads[1], Some(gilrs::Button::North)); // B → North
-        // O resto permanece no padrão.
+                                                             // O resto permanece no padrão.
         assert_eq!(cfg.keys[1], InputConfig::default().keys[1]);
     }
 
