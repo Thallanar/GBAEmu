@@ -1,0 +1,9 @@
+# Gradle / Android build
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+
+# .so geradas pelo cargo-ndk (artefato de build; ver README)
+app/src/main/jniLibs/
