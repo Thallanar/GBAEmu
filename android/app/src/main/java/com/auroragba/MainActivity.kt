@@ -1,6 +1,7 @@
 package com.auroragba
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -16,8 +17,11 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.Toast
+import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
@@ -34,12 +38,24 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         const val W = 240
         const val H = 160
         const val OPEN_ROM = 1
+        const val TAG = "AuroraGBA"
+        // Grava o .sav periodicamente quando há alteração (~5 s a 60 fps).
+        const val FLUSH_EVERY_FRAMES = 300
         val MATCH = FrameLayout.LayoutParams.MATCH_PARENT
     }
 
     private lateinit var surface: SurfaceView
     private val buttonMask = AtomicInteger(0)
     private val pendingRom = AtomicReference<ByteArray?>(null)
+
+    // Comandos do menu, executados na thread de emulação (acesso ao ponteiro):
+    // salvar estado (flag) e carregar estado (bytes lidos do arquivo na UI).
+    private val pendingSaveState = AtomicBoolean(false)
+    private val pendingLoadState = AtomicReference<ByteArray?>(null)
+
+    // Game code do jogo atual (chave dos arquivos de save). Escrito na thread de
+    // emulação ao carregar a ROM, lido na UI pra montar os caminhos.
+    @Volatile private var currentGameCode: String? = null
 
     // Ponteiro nativo: criado pela thread de render, liberado em onDestroy (vive
     // entre destruições da surface — pause/resume não reseta o jogo).
@@ -59,7 +75,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
         val controls = ControlsView(this)
         controls.onMask = { buttonMask.set(it) }
-        controls.onOpenRom = { openRomPicker() }
+        controls.onMenu = { showMenu() }
         root.addView(controls, FrameLayout.LayoutParams(MATCH, MATCH))
 
         setContentView(root)
@@ -74,6 +90,59 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
         startActivityForResult(intent, OPEN_ROM)
     }
+
+    // ── Menu + saves ─────────────────────────────────────────────────────────
+
+    /**
+     * Menu do emulador (botão ☰). Hoje: ROM e save state de slot único; é o ponto
+     * de extensão pras próximas opções (mais slots, configurações, etc.).
+     */
+    private fun showMenu() {
+        val items = arrayOf("Carregar ROM", "Salvar estado", "Carregar estado")
+        AlertDialog.Builder(this)
+            .setTitle("Menu")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> openRomPicker()
+                    1 -> saveStateFromMenu()
+                    2 -> loadStateFromMenu()
+                }
+            }
+            .show()
+    }
+
+    /** Arquivo `.sav` (backup do cartucho) do jogo, em `filesDir`. */
+    private fun savFile(code: String) = File(filesDir, "$code.sav")
+
+    /** Arquivo do save state (slot único `.ss1`) do jogo, em `filesDir`. */
+    private fun stateFile(code: String) = File(filesDir, "$code.ss1")
+
+    /** Pede pra thread de emulação salvar o estado no slot único. */
+    private fun saveStateFromMenu() {
+        if (!romLoaded || currentGameCode == null) {
+            toast("Carregue uma ROM antes de salvar estado")
+            return
+        }
+        pendingSaveState.set(true)
+    }
+
+    /** Lê o save state do disco (na UI) e entrega pra thread de emulação aplicar. */
+    private fun loadStateFromMenu() {
+        val code = currentGameCode
+        if (!romLoaded || code == null) {
+            toast("Carregue uma ROM antes de carregar estado")
+            return
+        }
+        val f = stateFile(code)
+        if (!f.exists()) {
+            toast("Nenhum estado salvo")
+            return
+        }
+        pendingLoadState.set(f.readBytes())
+    }
+
+    private fun toast(msg: String) =
+        runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
 
     @Deprecated("API clássica; suficiente para este app de tela única")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -125,21 +194,30 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         // estiver disponível, caímos pro pacing por relógio (frameNanos).
         val audio = createAudioTrack()
         val audioBuf = ShortArray(8192)
+        var frames = 0
 
         try {
             while (running) {
                 val start = System.nanoTime()
 
                 pendingRom.getAndSet(null)?.let {
+                    // Grava o save do jogo anterior antes de trocar de cartucho.
+                    flushBackup()
                     NativeBridge.loadRom(handle, it)
                     romLoaded = true
+                    onRomLoaded()
                 }
+                // Comandos do menu (save states), na thread do ponteiro.
+                if (romLoaded && pendingSaveState.getAndSet(false)) doSaveState()
+                pendingLoadState.getAndSet(null)?.let { if (romLoaded) doLoadState(it) }
+
                 if (romLoaded) {
                     NativeBridge.setButtons(handle, buttonMask.get())
                     buf.clear()
                     NativeBridge.renderFrame(handle, buf)
                     buf.rewind()
                     bitmap.copyPixelsFromBuffer(buf)
+                    if (++frames % FLUSH_EVERY_FRAMES == 0) flushBackup()
                 }
 
                 val canvas = surface.holder.lockCanvas()
@@ -167,12 +245,59 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 }
             }
         } finally {
+            // Garante a gravação do .sav ao sair (background/fechar app).
+            flushBackup()
             audio?.run {
                 pause()
                 flush()
                 release()
             }
         }
+    }
+
+    // ── Persistência de saves (chamadas na thread de emulação) ───────────────
+
+    /** Após carregar a ROM: guarda o game code e carrega o `.sav` existente. */
+    private fun onRomLoaded() {
+        val code = NativeBridge.gameCode(handle)
+        currentGameCode = code
+        if (!NativeBridge.hasSave(handle)) return
+        val f = savFile(code)
+        if (f.exists()) {
+            val ok = NativeBridge.loadBackup(handle, f.readBytes())
+            Log.i(TAG, "save .sav carregado=$ok (${f.name})")
+        } else {
+            Log.i(TAG, "sem .sav prévio para $code")
+        }
+    }
+
+    /** Grava o `.sav` em disco se houve alteração desde a última gravação. */
+    private fun flushBackup() {
+        val code = currentGameCode ?: return
+        if (!NativeBridge.backupDirty(handle)) return
+        try {
+            savFile(code).writeBytes(NativeBridge.saveBackup(handle))
+            NativeBridge.clearBackupDirty(handle)
+            Log.i(TAG, "save .sav gravado ($code)")
+        } catch (e: Exception) {
+            Log.e(TAG, "falha ao gravar .sav: $e")
+        }
+    }
+
+    private fun doSaveState() {
+        val code = currentGameCode ?: return
+        try {
+            stateFile(code).writeBytes(NativeBridge.saveState(handle))
+            toast("Estado salvo")
+        } catch (e: Exception) {
+            Log.e(TAG, "falha ao salvar estado: $e")
+            toast("Falha ao salvar estado")
+        }
+    }
+
+    private fun doLoadState(bytes: ByteArray) {
+        if (NativeBridge.loadState(handle, bytes)) toast("Estado carregado")
+        else toast("Falha ao carregar estado")
     }
 
     /** Cria o AudioTrack 32768 Hz estéreo PCM16 em streaming, ou null se falhar. */

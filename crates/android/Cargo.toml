@@ -11,7 +11,7 @@ description = "Android JNI bindings for AuroraGBA"
 crate-type = ["cdylib"]
 
 [dependencies]
-auroragba-core = { path = "../core" }
+auroragba-core = { path = "../core", features = ["save-states"] }
 auroragba-shiny = { path = "../shiny" }
 log.workspace = true
 

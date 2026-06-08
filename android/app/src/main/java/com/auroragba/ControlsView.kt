@@ -29,7 +29,7 @@ object Btn {
  */
 class ControlsView(context: Context) : View(context) {
     var onMask: (Int) -> Unit = {}
-    var onOpenRom: () -> Unit = {}
+    var onMenu: () -> Unit = {}
 
     private val d = resources.displayMetrics.density
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(70, 255, 255, 255) }
@@ -60,8 +60,8 @@ class ControlsView(context: Context) : View(context) {
     private val lrW get() = 120 * d
     private val lrH get() = 48 * d
 
-    // Botão de abrir ROM (topo, centro).
-    private fun openRect() = RectF(width / 2f - 60 * d, pad, width / 2f + 60 * d, pad + lrH)
+    // Botão de menu (topo, centro): ROM, save states e opções futuras.
+    private fun menuRect() = RectF(width / 2f - 60 * d, pad, width / 2f + 60 * d, pad + lrH)
 
     /** Botões pressionados por um ponteiro na posição (x, y). */
     private fun hit(x: Float, y: Float): Int {
@@ -93,13 +93,13 @@ class ControlsView(context: Context) : View(context) {
         x >= cx - 44 * d && x <= cx + 44 * d && y >= cy - seSize && y <= cy + seSize
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        // Toque novo no botão de ROM (topo/centro) abre o seletor e não vira input.
+        // Toque novo no botão de menu (topo/centro) abre o menu e não vira input.
         if (event.actionMasked == MotionEvent.ACTION_DOWN ||
             event.actionMasked == MotionEvent.ACTION_POINTER_DOWN
         ) {
             val i = event.actionIndex
-            if (openRect().contains(event.getX(i), event.getY(i))) {
-                onOpenRom()
+            if (menuRect().contains(event.getX(i), event.getY(i))) {
+                onMenu()
                 return true
             }
         }
@@ -144,8 +144,8 @@ class ControlsView(context: Context) : View(context) {
         pill(canvas, selCx, seCy, "SEL", mask and Btn.SELECT != 0)
         rect(canvas, pad, pad, pad + lrW, pad + lrH, "L", mask and Btn.L != 0)
         rect(canvas, width - pad - lrW, pad, width - pad, pad + lrH, "R", mask and Btn.R != 0)
-        val o = openRect()
-        rect(canvas, o.left, o.top, o.right, o.bottom, "⏏ ROM", false)
+        val o = menuRect()
+        rect(canvas, o.left, o.top, o.right, o.bottom, "☰ MENU", false)
     }
 
     /** Realça a(s) direção(ões) ativa(s) do D-pad. */

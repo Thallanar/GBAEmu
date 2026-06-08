@@ -38,4 +38,30 @@ object NativeBridge {
      * estéreo.
      */
     external fun drainAudio(handle: Long, out: ShortArray): Int
+
+    // ── saves (.sav + estados) ───────────────────────────────────────────────
+
+    /** Game code (4 chars do cabeçalho), chave dos arquivos de save. */
+    external fun gameCode(handle: Long): String
+
+    /** O jogo carregado tem memória de save (.sav)? */
+    external fun hasSave(handle: Long): Boolean
+
+    /** O backup mudou desde a última gravação? */
+    external fun backupDirty(handle: Long): Boolean
+
+    /** Marca o backup como gravado (chamar após escrever o `.sav`). */
+    external fun clearBackupDirty(handle: Long)
+
+    /** Cópia dos bytes do backup (.sav) pra gravar em disco. */
+    external fun saveBackup(handle: Long): ByteArray
+
+    /** Carrega um `.sav` do disco; `true` se o tamanho bateu. */
+    external fun loadBackup(handle: Long, data: ByteArray): Boolean
+
+    /** Serializa o estado completo (save state) pra gravar em disco. */
+    external fun saveState(handle: Long): ByteArray
+
+    /** Restaura um save state por cima do jogo atual; `true` se válido. */
+    external fun loadState(handle: Long, data: ByteArray): Boolean
 }

@@ -13,7 +13,7 @@ mod android_impl {
     use auroragba_core::joypad::Button;
     use auroragba_core::{apu, Gba};
     use jni::objects::{JByteArray, JByteBuffer, JClass, JShortArray};
-    use jni::sys::{jint, jlong};
+    use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring, JNI_FALSE, JNI_TRUE};
     use jni::JNIEnv;
 
     /// Inicializa o logger do Android uma única vez (chamado por `create`).
@@ -198,6 +198,168 @@ mod android_impl {
         }
         buf.drain(..n);
         n as jint
+    }
+
+    // ───────────────────────── saves (.sav + estados) ───────────────────────
+    //
+    // O Kotlin chaveia os arquivos pelo *game code* e persiste em `filesDir`
+    // (armazenamento privado do app, sem permissão). Espelha o desktop:
+    // `.sav` (backup da pilha/EEPROM do cartucho) é automático; os save states
+    // são acionados pelo menu. Tudo roda na thread de emulação (acesso ao
+    // ponteiro), igual às demais funções desta ponte.
+
+    /// Game code (4 chars do cabeçalho da ROM). Vazio se não houver ROM/handle.
+    /// É a chave dos arquivos de save no lado Kotlin.
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_gameCode(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jstring {
+        let code = gba(handle)
+            .map(|g| g.bus.cartridge.game_code())
+            .unwrap_or_default();
+        env.new_string(code)
+            .map(|s| s.into_raw())
+            .unwrap_or(std::ptr::null_mut())
+    }
+
+    /// O jogo carregado tem memória de save (.sav)?
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_hasSave(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jboolean {
+        match gba(handle) {
+            Some(g) if g.bus.cartridge.has_save() => JNI_TRUE,
+            _ => JNI_FALSE,
+        }
+    }
+
+    /// O backup foi alterado desde a última gravação? (Decide se vale gravar.)
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_backupDirty(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jboolean {
+        match gba(handle) {
+            Some(g) if g.bus.cartridge.dirty => JNI_TRUE,
+            _ => JNI_FALSE,
+        }
+    }
+
+    /// Marca o backup como gravado (chamar após escrever o `.sav` em disco).
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_clearBackupDirty(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) {
+        if let Some(g) = gba(handle) {
+            g.bus.cartridge.dirty = false;
+        }
+    }
+
+    /// Devolve uma cópia dos bytes do backup (.sav) pra gravar em disco. Array
+    /// vazio se não houver save/handle.
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_saveBackup(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jbyteArray {
+        let bytes = gba(handle)
+            .map(|g| g.bus.cartridge.backup_bytes().to_vec())
+            .unwrap_or_default();
+        env.byte_array_from_slice(&bytes)
+            .map(|a| a.into_raw())
+            .unwrap_or(std::ptr::null_mut())
+    }
+
+    /// Carrega um `.sav` lido do disco. Devolve `true` se o tamanho bateu com o
+    /// esperado pelo tipo de save detectado.
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_loadBackup(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        data: JByteArray,
+    ) -> jboolean {
+        let Some(gba) = gba(handle) else {
+            return JNI_FALSE;
+        };
+        let Ok(bytes) = env.convert_byte_array(&data) else {
+            return JNI_FALSE;
+        };
+        if gba.bus.cartridge.load_backup(&bytes) {
+            JNI_TRUE
+        } else {
+            JNI_FALSE
+        }
+    }
+
+    /// Serializa o estado completo do emulador (save state) pra gravar em disco.
+    /// Array vazio se não houver handle.
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_saveState(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jbyteArray {
+        let blob = gba(handle).map(|g| g.save_state()).unwrap_or_default();
+        env.byte_array_from_slice(&blob)
+            .map(|a| a.into_raw())
+            .unwrap_or(std::ptr::null_mut())
+    }
+
+    /// Restaura um save state lido do disco por cima do jogo atual. Devolve
+    /// `true` se o blob é válido e bate com a ROM carregada.
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_loadState(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        data: JByteArray,
+    ) -> jboolean {
+        let Some(gba) = gba(handle) else {
+            return JNI_FALSE;
+        };
+        let Ok(bytes) = env.convert_byte_array(&data) else {
+            return JNI_FALSE;
+        };
+        match gba.load_state(&bytes) {
+            Ok(()) => JNI_TRUE,
+            Err(e) => {
+                log::warn!("loadState rejeitado: {e:?}");
+                JNI_FALSE
+            }
+        }
     }
 }
 
