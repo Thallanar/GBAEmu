@@ -13,9 +13,10 @@ mod android_impl {
     use auroragba_core::joypad::Button;
     use auroragba_core::{apu, Gba};
     use auroragba_shiny::games::{self, GameProfile};
+    use auroragba_shiny::gfx::RomGfx;
     use auroragba_shiny::{CheckResult, Hunter};
     use jni::objects::{JByteArray, JByteBuffer, JClass, JShortArray};
-    use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring, JNI_FALSE, JNI_TRUE};
+    use jni::sys::{jboolean, jbyteArray, jint, jintArray, jlong, jstring, JNI_FALSE, JNI_TRUE};
     use jni::JNIEnv;
 
     /// Estado que vive atrás do handle: o emulador mais o driver do Shiny Hunter.
@@ -28,6 +29,8 @@ mod android_impl {
         hunting: bool,
         profile: Option<&'static GameProfile>,
         target: usize,
+        /// Tabelas de gráficos da ROM (sprites do alvo); localizadas no loadRom.
+        rom_gfx: Option<RomGfx>,
     }
 
     impl Emu {
@@ -38,6 +41,7 @@ mod android_impl {
                 hunting: false,
                 profile: None,
                 target: 0,
+                rom_gfx: None,
             }
         }
     }
@@ -127,6 +131,8 @@ mod android_impl {
         emu.gba.reset();
         // Identifica o jogo pelo game code → perfil do Shiny Hunter (se houver).
         emu.profile = games::detect(&emu.gba.bus.cartridge.game_code());
+        // Localiza as tabelas de sprites na ROM (pro painel do hunter).
+        emu.rom_gfx = RomGfx::locate(&emu.gba.bus.cartridge.rom);
         emu.hunter = Hunter::new();
         emu.hunting = false;
         emu.target = 0;
@@ -646,6 +652,51 @@ mod android_impl {
         handle: jlong,
     ) -> jint {
         emu(handle).map_or(0xFFFF, |e| e.hunter.best_shiny_value as jint)
+    }
+
+    /// Decodifica o sprite de frente do alvo `target` (64×64) direto da ROM e
+    /// devolve os pixels em ARGB8888 (`0xAARRGGBB`, índice 0 = transparente),
+    /// prontos pra um `Bitmap` do Kotlin. Array vazio se não der (sem perfil/gfx,
+    /// espécie fora da tabela). `shiny` escolhe a paleta normal ou a shiny.
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntTargetSprite(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        target: jint,
+        shiny: jboolean,
+    ) -> jintArray {
+        let empty = || env.new_int_array(0).map(|a| a.into_raw()).unwrap_or(std::ptr::null_mut());
+        let Some(emu) = emu(handle) else {
+            return empty();
+        };
+        let Some(profile) = emu.profile else {
+            return empty();
+        };
+        let Some(t) = profile.targets.get(target as usize) else {
+            return empty();
+        };
+        let Some(gfx) = emu.rom_gfx else {
+            return empty();
+        };
+        let Some(sprite) = gfx.decode_front(&emu.gba.bus.cartridge.rom, t.species, shiny != 0) else {
+            return empty();
+        };
+        // RGBA (bytes) → ARGB (i32 por pixel) pro Bitmap.ARGB_8888 do Android.
+        let px: Vec<jint> = sprite
+            .rgba
+            .chunks_exact(4)
+            .map(|c| {
+                ((c[3] as i32) << 24) | ((c[0] as i32) << 16) | ((c[1] as i32) << 8) | c[2] as i32
+            })
+            .collect();
+        match env.new_int_array(px.len() as jint) {
+            Ok(arr) if env.set_int_array_region(&arr, 0, &px).is_ok() => arr.into_raw(),
+            _ => empty(),
+        }
     }
 }
 
