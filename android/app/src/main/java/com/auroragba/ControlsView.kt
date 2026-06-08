@@ -28,6 +28,13 @@ object Btn {
  * [onMask]. Desenha D-pad, A/B, Start/Select e L/R.
  */
 class ControlsView(context: Context) : View(context) {
+    private companion object {
+        // Razão mínima entre a componente menor e a maior do toque pra contar
+        // como diagonal deliberada (≈ tan 26,5° → cardeais cobrem ±26,5°, bem
+        // mais largos que as diagonais). Abaixo disso, só o eixo dominante vale.
+        const val DIAG_RATIO = 0.5f
+    }
+
     var onMask: (Int) -> Unit = {}
     var onMenu: () -> Unit = {}
 
@@ -66,16 +73,22 @@ class ControlsView(context: Context) : View(context) {
     /** Botões pressionados por um ponteiro na posição (x, y). */
     private fun hit(x: Float, y: Float): Int {
         var m = 0
-        // D-pad: dentro da caixa do "+", direção pelo deslocamento do centro.
+        // D-pad: dentro da caixa do "+", a direção sai do eixo DOMINANTE. A
+        // direção secundária só entra numa diagonal de verdade (componente menor
+        // ≥ DIAG_RATIO da maior) — assim encostar perto da ponta de um braço não
+        // dispara a direção adjacente sem querer. Deadzone central maior pra não
+        // registrar toques no miolo.
         val dx = x - dpadCx
         val dy = y - dpadCy
         val reach = arm + thick / 2f
-        if (kotlin.math.abs(dx) <= reach && kotlin.math.abs(dy) <= reach) {
-            val dz = 16 * d
-            if (dx < -dz) m = m or Btn.LEFT
-            if (dx > dz) m = m or Btn.RIGHT
-            if (dy < -dz) m = m or Btn.UP
-            if (dy > dz) m = m or Btn.DOWN
+        val dz = 24 * d
+        if (kotlin.math.abs(dx) <= reach && kotlin.math.abs(dy) <= reach &&
+            kotlin.math.hypot(dx.toDouble(), dy.toDouble()) >= dz
+        ) {
+            val ax = kotlin.math.abs(dx)
+            val ay = kotlin.math.abs(dy)
+            if (ax >= ay * DIAG_RATIO) m = m or if (dx < 0) Btn.LEFT else Btn.RIGHT
+            if (ay >= ax * DIAG_RATIO) m = m or if (dy < 0) Btn.UP else Btn.DOWN
         }
         if (dist(x, y, aCx, aCy) <= abR) m = m or Btn.A
         if (dist(x, y, bCx, bCy) <= abR) m = m or Btn.B
