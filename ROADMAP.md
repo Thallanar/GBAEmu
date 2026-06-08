@@ -154,10 +154,13 @@ auroragba/
 
 ### Fase 7 — Port Android (4–6 semanas)
 
-- [ ] Wrapper JNI sobre o core Rust
-- [ ] Overlay de controles touch
-- [ ] Suporte a controle Bluetooth
-- [ ] Empacotamento APK / distribuição
+- [X] Wrapper JNI sobre o core Rust (create/destroy/loadRom/renderFrame/setButtons)
+- [X] App Kotlin (Gradle): SurfaceView com o framebuffer + overlay de controles touch
+- [X] Build via cargo-ndk + Gradle; **validado rodando Pokémon Emerald no emulador**
+- [ ] Áudio (AudioTrack) — próximo PR
+- [ ] Saves (.sav + estados) no armazenamento do app — PR seguinte
+- [ ] Suporte a controle Bluetooth / gamepad físico
+- [ ] Empacotamento APK assinado / distribuição
 
 ### Fase 8 — Polimento (contínuo)
 
@@ -234,7 +237,9 @@ auroragba/
   (Torchic/Treecko/Mudkip) caçam via controle do cursor do menu em **malha
   fechada** (endereços achados com o detector de RAM do desktop). Faltam outros
   jogos e o método de random encounters.
-- [ ] Fase 7 — Android
+- [~] Fase 7 — Android: ponte JNI + app Kotlin (SurfaceView + controles touch),
+  build via cargo-ndk + Gradle, **vídeo + input validados no emulador rodando
+  Pokémon Emerald**. Faltam áudio, saves e gamepad físico.
 
 ### Validação (jsmolka gba-tests)
 
@@ -250,7 +255,7 @@ auroragba/
 - **Timing de ciclos**: hoje cada instrução conta como 1 ciclo (placeholder);
   falta wait states por região de memória (afeta precisão fina e pitch de áudio).
 - **Faltam**: Fase 6 (mais jogos/métodos no Shiny Hunter), mosaic afim (só BG
-  texto + OBJ implementados), e o port Android (Fase 7).
+  texto + OBJ implementados), e o resto do Android (áudio, saves, gamepad).
 - Suíte: **108 testes** no core (com a feature `save-states`) + 10 no desktop
   (encoder PNG, round-trip da config de input, cache de capa, lookup de box art),
   clippy estrito limpo.
