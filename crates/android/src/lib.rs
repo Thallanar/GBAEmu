@@ -12,9 +12,35 @@
 mod android_impl {
     use auroragba_core::joypad::Button;
     use auroragba_core::{apu, Gba};
+    use auroragba_shiny::games::{self, GameProfile};
+    use auroragba_shiny::{CheckResult, Hunter};
     use jni::objects::{JByteArray, JByteBuffer, JClass, JShortArray};
     use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring, JNI_FALSE, JNI_TRUE};
     use jni::JNIEnv;
+
+    /// Estado que vive atrás do handle: o emulador mais o driver do Shiny Hunter.
+    /// O `hunter` precisa persistir entre tentativas (mantém contadores e o PRNG
+    /// do host), por isso fica junto do `gba` num único bloco. `profile` é
+    /// detectado pelo game code ao carregar a ROM.
+    struct Emu {
+        gba: Gba,
+        hunter: Hunter,
+        hunting: bool,
+        profile: Option<&'static GameProfile>,
+        target: usize,
+    }
+
+    impl Emu {
+        fn new() -> Self {
+            Emu {
+                gba: Gba::new(),
+                hunter: Hunter::new(),
+                hunting: false,
+                profile: None,
+                target: 0,
+            }
+        }
+    }
 
     /// Inicializa o logger do Android uma única vez (chamado por `create`).
     fn init_logger() {
@@ -30,13 +56,22 @@ mod android_impl {
         });
     }
 
-    /// Recupera `&mut Gba` de um handle vindo de `create`.
+    /// Recupera `&mut Emu` de um handle vindo de `create`.
     ///
     /// # Safety
     /// O ponteiro precisa ser válido e usado por uma única thread (o Kotlin
     /// serializa todas as chamadas na thread de emulação).
+    unsafe fn emu<'a>(handle: jlong) -> Option<&'a mut Emu> {
+        (handle as *mut Emu).as_mut()
+    }
+
+    /// Recupera `&mut Gba` de um handle (atalho pras funções que só mexem no
+    /// emulador). Mesma garantia de thread única.
+    ///
+    /// # Safety
+    /// Ver [`emu`].
     unsafe fn gba<'a>(handle: jlong) -> Option<&'a mut Gba> {
-        (handle as *mut Gba).as_mut()
+        emu(handle).map(|e| &mut e.gba)
     }
 
     /// Cria uma nova instância do emulador e devolve um ponteiro opaco.
@@ -46,7 +81,7 @@ mod android_impl {
         _class: JClass,
     ) -> jlong {
         init_logger();
-        Box::into_raw(Box::new(Gba::new())) as jlong
+        Box::into_raw(Box::new(Emu::new())) as jlong
     }
 
     /// Libera a instância do emulador.
@@ -60,7 +95,7 @@ mod android_impl {
         handle: jlong,
     ) {
         if handle != 0 {
-            drop(Box::from_raw(handle as *mut Gba));
+            drop(Box::from_raw(handle as *mut Emu));
         }
     }
 
@@ -75,7 +110,7 @@ mod android_impl {
         handle: jlong,
         rom: JByteArray,
     ) {
-        let Some(gba) = gba(handle) else {
+        let Some(emu) = emu(handle) else {
             return;
         };
         let bytes = match env.convert_byte_array(&rom) {
@@ -86,10 +121,42 @@ mod android_impl {
             }
         };
         log::info!("loadRom: {} bytes", bytes.len());
-        *gba = Gba::new();
-        gba.load_rom(bytes);
+        emu.gba = Gba::new();
+        emu.gba.load_rom(bytes);
         // `reset` faz o direct boot (modo System, SPs, PC em 0x08000000).
-        gba.reset();
+        emu.gba.reset();
+        // Identifica o jogo pelo game code → perfil do Shiny Hunter (se houver).
+        emu.profile = games::detect(&emu.gba.bus.cartridge.game_code());
+        emu.hunter = Hunter::new();
+        emu.hunting = false;
+        emu.target = 0;
+        log::info!(
+            "loadRom: shiny hunter {}",
+            emu.profile.map_or("não suportado", |p| p.name),
+        );
+    }
+
+    /// Copia o framebuffer (RGBA8, 240×160 = 153600 bytes) pro `ByteBuffer`
+    /// direto. Não avança a emulação — usado pelo render normal (após `run_frame`)
+    /// e pelo Shiny Hunter (que roda os frames por dentro de `huntStep`).
+    ///
+    /// # Safety
+    /// `buffer` precisa ser um ByteBuffer direto com capacidade ≥ ao framebuffer.
+    unsafe fn write_framebuffer(env: &JNIEnv, gba: &Gba, buffer: &JByteBuffer) {
+        let fb = &gba.bus.ppu.framebuffer[..];
+        let dst = match env.get_direct_buffer_address(buffer) {
+            Ok(p) if !p.is_null() => p,
+            _ => {
+                log::error!("write_framebuffer: ByteBuffer não é direto");
+                return;
+            }
+        };
+        let cap = env.get_direct_buffer_capacity(buffer).unwrap_or(0);
+        if cap < fb.len() {
+            log::error!("write_framebuffer: buffer pequeno ({cap} < {})", fb.len());
+            return;
+        }
+        std::ptr::copy_nonoverlapping(fb.as_ptr(), dst, fb.len());
     }
 
     /// Roda um frame e copia o framebuffer (RGBA8, 240×160 = 153600 bytes) pro
@@ -118,20 +185,25 @@ mod android_impl {
             buf.drain(..buf.len() - cap);
         }
 
-        let fb = &gba.bus.ppu.framebuffer[..];
-        let dst = match env.get_direct_buffer_address(&buffer) {
-            Ok(p) if !p.is_null() => p,
-            _ => {
-                log::error!("renderFrame: ByteBuffer não é direto");
-                return;
-            }
-        };
-        let cap = env.get_direct_buffer_capacity(&buffer).unwrap_or(0);
-        if cap < fb.len() {
-            log::error!("renderFrame: buffer pequeno ({cap} < {})", fb.len());
-            return;
+        write_framebuffer(&env, gba, &buffer);
+    }
+
+    /// Copia o framebuffer atual pro `ByteBuffer` sem avançar a emulação. O Shiny
+    /// Hunter usa isso pra mostrar o frame depois de `huntStep` (que já rodou os
+    /// frames por dentro).
+    ///
+    /// # Safety
+    /// `handle` válido; `buffer` direto com capacidade suficiente.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_copyFramebuffer(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        buffer: JByteBuffer,
+    ) {
+        if let Some(gba) = gba(handle) {
+            write_framebuffer(&env, gba, &buffer);
         }
-        std::ptr::copy_nonoverlapping(fb.as_ptr(), dst, fb.len());
     }
 
     /// Atualiza o estado dos botões. `mask` usa a ordem de bits do KEYINPUT do
@@ -360,6 +432,220 @@ mod android_impl {
                 JNI_FALSE
             }
         }
+    }
+
+    // ───────────────────────────── Shiny Hunter ─────────────────────────────
+    //
+    // O jogo precisa estar parado na frente do alvo com o save carregado. A
+    // caça roda na thread GL via `huntStep` (lote de frames por chamada): o
+    // Hunter amassa A, injeta a seed do RNG e, a cada encontro, checa se é shiny
+    // e dá soft-reset se não for. A UI lê os contadores pelos getters.
+
+    /// O jogo carregado é suportado pelo Shiny Hunter (perfil detectado)?
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntSupported(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jboolean {
+        match emu(handle) {
+            Some(e) if e.profile.is_some() => JNI_TRUE,
+            _ => JNI_FALSE,
+        }
+    }
+
+    /// Nome do jogo no perfil do Shiny Hunter (vazio se não suportado).
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntGameName(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jstring {
+        let name = emu(handle).and_then(|e| e.profile).map_or("", |p| p.name);
+        env.new_string(name)
+            .map(|s| s.into_raw())
+            .unwrap_or(std::ptr::null_mut())
+    }
+
+    /// Quantos alvos o perfil do jogo oferece.
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntTargetCount(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jint {
+        emu(handle)
+            .and_then(|e| e.profile)
+            .map_or(0, |p| p.targets.len() as jint)
+    }
+
+    /// Nome do alvo `i` (vazio se fora do intervalo).
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntTargetName(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        i: jint,
+    ) -> jstring {
+        let name = emu(handle)
+            .and_then(|e| e.profile)
+            .and_then(|p| p.targets.get(i as usize))
+            .map_or("", |t| t.name);
+        env.new_string(name)
+            .map(|s| s.into_raw())
+            .unwrap_or(std::ptr::null_mut())
+    }
+
+    /// Inicia a caça no alvo `target`. Reinicia o Hunter (zera contadores e
+    /// re-semeia o PRNG do host). Devolve `false` se o jogo não é suportado ou o
+    /// alvo é inválido.
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntStart(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        target: jint,
+    ) -> jboolean {
+        let Some(emu) = emu(handle) else {
+            return JNI_FALSE;
+        };
+        let Some(profile) = emu.profile else {
+            return JNI_FALSE;
+        };
+        if target < 0 || target as usize >= profile.targets.len() {
+            return JNI_FALSE;
+        }
+        emu.target = target as usize;
+        emu.hunter = Hunter::new();
+        emu.hunting = true;
+        JNI_TRUE
+    }
+
+    /// Para a caça (sem resetar contadores).
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntStop(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) {
+        if let Some(e) = emu(handle) {
+            e.hunting = false;
+        }
+    }
+
+    /// Roda um lote de `batch` frames da caça. Devolve `true` quando achou o
+    /// shiny (a caça para sozinha e o controle volta pro jogador ver a batalha).
+    /// O áudio gerado é descartado (caça acelerada, sem som).
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntStep(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        batch: jint,
+    ) -> jboolean {
+        let Some(emu) = emu(handle) else {
+            return JNI_FALSE;
+        };
+        if !emu.hunting {
+            return JNI_FALSE;
+        }
+        let Some(profile) = emu.profile else {
+            emu.hunting = false;
+            return JNI_FALSE;
+        };
+        let Some(target) = profile.targets.get(emu.target) else {
+            emu.hunting = false;
+            return JNI_FALSE;
+        };
+        // `hunter` e `gba` são campos disjuntos: dá pra emprestar os dois.
+        let result = emu
+            .hunter
+            .tick(&mut emu.gba, profile, target, batch.max(1) as u32, 60 * 60);
+        // Não tocamos o áudio da caça; limpa pra não crescer o buffer.
+        emu.gba.bus.apu.buffer.clear();
+        if result == CheckResult::Shiny {
+            emu.hunting = false;
+            JNI_TRUE
+        } else {
+            JNI_FALSE
+        }
+    }
+
+    /// Número de tentativas (resets) da caça atual.
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntAttempts(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jlong {
+        emu(handle).map_or(0, |e| e.hunter.attempts as jlong)
+    }
+
+    /// A caça está ativa?
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntIsHunting(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jboolean {
+        match emu(handle) {
+            Some(e) if e.hunting => JNI_TRUE,
+            _ => JNI_FALSE,
+        }
+    }
+
+    /// Espécie (índice interno) lida no último encontro — confirma que a caça
+    /// parou no Pokémon certo.
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntLastSpecies(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jint {
+        emu(handle).map_or(0, |e| e.hunter.last_species as jint)
+    }
+
+    /// Menor `shiny_value` já visto nesta caça (`0xFFFF` = nada ainda).
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntBestShinyValue(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jint {
+        emu(handle).map_or(0xFFFF, |e| e.hunter.best_shiny_value as jint)
     }
 }
 
