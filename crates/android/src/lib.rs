@@ -11,8 +11,8 @@
 #[cfg(target_os = "android")]
 mod android_impl {
     use auroragba_core::joypad::Button;
-    use auroragba_core::Gba;
-    use jni::objects::{JByteArray, JByteBuffer, JClass};
+    use auroragba_core::{apu, Gba};
+    use jni::objects::{JByteArray, JByteBuffer, JClass, JShortArray};
     use jni::sys::{jint, jlong};
     use jni::JNIEnv;
 
@@ -109,8 +109,14 @@ mod android_impl {
             return;
         };
         gba.run_frame();
-        // Áudio descartado neste marco (sem saída de som ainda).
-        gba.bus.apu.buffer.clear();
+        // O áudio fica no buffer do APU e é consumido por `drainAudio`. Limite de
+        // segurança: se ninguém estiver drenando, não deixa o buffer crescer sem
+        // fim (mantém ~1 s de áudio estéreo).
+        let buf = &mut gba.bus.apu.buffer;
+        let cap = apu::OUTPUT_RATE as usize * 2;
+        if buf.len() > cap {
+            buf.drain(..buf.len() - cap);
+        }
 
         let fb = &gba.bus.ppu.framebuffer[..];
         let dst = match env.get_direct_buffer_address(&buffer) {
@@ -163,6 +169,35 @@ mod android_impl {
                 .joypad
                 .set_button(*button, mask & (1 << bit) != 0);
         }
+    }
+
+    /// Copia até `out.len()` amostras (i16 intercaladas L,R a 32768 Hz) do buffer
+    /// do APU pro array do Kotlin, removendo-as do buffer. Devolve quantas copiou.
+    /// O Kotlin escreve isso num `AudioTrack` a 32768 Hz estéreo.
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_drainAudio(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        out: JShortArray,
+    ) -> jint {
+        let Some(gba) = gba(handle) else {
+            return 0;
+        };
+        let buf = &mut gba.bus.apu.buffer;
+        if buf.is_empty() {
+            return 0;
+        }
+        let cap = env.get_array_length(&out).unwrap_or(0) as usize;
+        let n = buf.len().min(cap);
+        if n == 0 || env.set_short_array_region(&out, 0, &buf[..n]).is_err() {
+            return 0;
+        }
+        buf.drain(..n);
+        n as jint
     }
 }
 

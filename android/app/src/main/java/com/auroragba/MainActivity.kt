@@ -7,7 +7,11 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.os.Bundle
+import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.WindowManager
@@ -115,38 +119,90 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         val src = Rect(0, 0, W, H)
         val frameNanos = (1_000_000_000.0 / 59.7275).toLong()
 
-        while (running) {
-            val start = System.nanoTime()
+        // Áudio: 32768 Hz estéreo (taxa nativa do APU, sem reamostragem). O
+        // `write` bloqueante do AudioTrack ancora a emulação ao tempo real —
+        // mesmo modelo do desktop (pacing pelo consumo de áudio). Se o áudio não
+        // estiver disponível, caímos pro pacing por relógio (frameNanos).
+        val audio = createAudioTrack()
+        val audioBuf = ShortArray(8192)
 
-            pendingRom.getAndSet(null)?.let {
-                NativeBridge.loadRom(handle, it)
-                romLoaded = true
-            }
-            if (romLoaded) {
-                NativeBridge.setButtons(handle, buttonMask.get())
-                buf.clear()
-                NativeBridge.renderFrame(handle, buf)
-                buf.rewind()
-                bitmap.copyPixelsFromBuffer(buf)
-            }
+        try {
+            while (running) {
+                val start = System.nanoTime()
 
-            val canvas = surface.holder.lockCanvas()
-            if (canvas == null) {
-                Thread.sleep(8)
-                continue
-            }
-            try {
-                canvas.drawColor(Color.BLACK)
-                if (romLoaded) {
-                    canvas.drawBitmap(bitmap, src, fitRect(canvas.width, canvas.height), paint)
+                pendingRom.getAndSet(null)?.let {
+                    NativeBridge.loadRom(handle, it)
+                    romLoaded = true
                 }
-            } finally {
-                surface.holder.unlockCanvasAndPost(canvas)
-            }
+                if (romLoaded) {
+                    NativeBridge.setButtons(handle, buttonMask.get())
+                    buf.clear()
+                    NativeBridge.renderFrame(handle, buf)
+                    buf.rewind()
+                    bitmap.copyPixelsFromBuffer(buf)
+                }
 
-            val sleep = frameNanos - (System.nanoTime() - start)
-            if (sleep > 0) Thread.sleep(sleep / 1_000_000, (sleep % 1_000_000).toInt())
+                val canvas = surface.holder.lockCanvas()
+                if (canvas == null) {
+                    Thread.sleep(8)
+                    continue
+                }
+                try {
+                    canvas.drawColor(Color.BLACK)
+                    if (romLoaded) {
+                        canvas.drawBitmap(bitmap, src, fitRect(canvas.width, canvas.height), paint)
+                    }
+                } finally {
+                    surface.holder.unlockCanvasAndPost(canvas)
+                }
+
+                // Pacing: pelo áudio (write bloqueia até abrir espaço) ou, sem
+                // áudio/ROM, pelo relógio.
+                if (romLoaded && audio != null) {
+                    val n = NativeBridge.drainAudio(handle, audioBuf)
+                    if (n > 0) audio.write(audioBuf, 0, n) else Thread.sleep(2)
+                } else {
+                    val sleep = frameNanos - (System.nanoTime() - start)
+                    if (sleep > 0) Thread.sleep(sleep / 1_000_000, (sleep % 1_000_000).toInt())
+                }
+            }
+        } finally {
+            audio?.run {
+                pause()
+                flush()
+                release()
+            }
         }
+    }
+
+    /** Cria o AudioTrack 32768 Hz estéreo PCM16 em streaming, ou null se falhar. */
+    private fun createAudioTrack(): AudioTrack? = try {
+        val rate = 32768
+        val channel = AudioFormat.CHANNEL_OUT_STEREO
+        val encoding = AudioFormat.ENCODING_PCM_16BIT
+        val minBuf = AudioTrack.getMinBufferSize(rate, channel, encoding)
+        val bufSize = maxOf(minBuf, 8192)
+        AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_GAME)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build(),
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setSampleRate(rate)
+                    .setChannelMask(channel)
+                    .setEncoding(encoding)
+                    .build(),
+            )
+            .setBufferSizeInBytes(bufSize)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+            .also { it.play() }
+    } catch (e: Exception) {
+        Log.e("AuroraGBA", "AudioTrack indisponível: $e")
+        null
     }
 
     /** Retângulo de destino preservando o aspecto 240:160, centralizado. */
