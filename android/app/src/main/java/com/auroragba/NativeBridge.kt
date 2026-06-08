@@ -64,4 +64,42 @@ object NativeBridge {
 
     /** Restaura um save state por cima do jogo atual; `true` se válido. */
     external fun loadState(handle: Long, data: ByteArray): Boolean
+
+    // ── Shiny Hunter ─────────────────────────────────────────────────────────
+
+    /** Copia o framebuffer atual pro [buffer] direto SEM avançar a emulação. */
+    external fun copyFramebuffer(handle: Long, buffer: ByteBuffer)
+
+    /** O jogo carregado é suportado pelo Shiny Hunter? */
+    external fun huntSupported(handle: Long): Boolean
+
+    /** Nome do jogo no perfil do Shiny Hunter (vazio se não suportado). */
+    external fun huntGameName(handle: Long): String
+
+    /** Quantos alvos o perfil oferece. */
+    external fun huntTargetCount(handle: Long): Int
+
+    /** Nome do alvo `i`. */
+    external fun huntTargetName(handle: Long, i: Int): String
+
+    /** Inicia a caça no alvo; `true` se o jogo/alvo é válido. */
+    external fun huntStart(handle: Long, target: Int): Boolean
+
+    /** Para a caça. */
+    external fun huntStop(handle: Long)
+
+    /** Roda um lote de `batch` frames da caça; `true` quando achou o shiny. */
+    external fun huntStep(handle: Long, batch: Int): Boolean
+
+    /** Tentativas (resets) da caça atual. */
+    external fun huntAttempts(handle: Long): Long
+
+    /** A caça está ativa? */
+    external fun huntIsHunting(handle: Long): Boolean
+
+    /** Espécie (índice interno) lida no último encontro. */
+    external fun huntLastSpecies(handle: Long): Int
+
+    /** Menor shiny_value visto nesta caça (0xFFFF = nada ainda). */
+    external fun huntBestShinyValue(handle: Long): Int
 }

@@ -3,15 +3,21 @@ package com.auroragba
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.graphics.Color
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.TextView
 import android.widget.Toast
 import java.io.File
 import java.nio.ByteBuffer
@@ -44,6 +50,8 @@ class MainActivity : Activity() {
         const val TAG = "AuroraGBA"
         // Grava o .sav periodicamente quando há alteração (~5 s a 60 fps).
         const val FLUSH_EVERY_FRAMES = 300
+        // Frames de emulação por draw durante a caça (acelera o hunt; ~8× a 60Hz).
+        const val HUNT_BATCH = 8
         val MATCH = FrameLayout.LayoutParams.MATCH_PARENT
     }
 
@@ -71,6 +79,27 @@ class MainActivity : Activity() {
     // lifecycle, liberado no fim.
     @Volatile private var audio: AudioTrack? = null
 
+    // ── Shiny Hunter ──────────────────────────────────────────────────────────
+    // Comandos do menu (thread GL processa): iniciar caça num alvo (-1 = nenhum)
+    // e parar.
+    private val pendingHuntStart = AtomicInteger(-1)
+    private val pendingHuntStop = AtomicBoolean(false)
+    @Volatile private var hunting = false
+
+    // Info do perfil publicada pela thread GL ao carregar a ROM; lida na UI.
+    @Volatile private var huntSupported = false
+    @Volatile private var huntGameName = ""
+    @Volatile private var huntTargets: Array<String> = emptyArray()
+
+    // Stats da caça publicadas pela thread GL a cada step; lidas pelo updater da UI.
+    @Volatile private var statAttempts = 0L
+    @Volatile private var statSpecies = 0
+    @Volatile private var statBestSV = 0xFFFF
+    @Volatile private var currentTargetName = ""
+
+    private lateinit var huntStatus: TextView
+    private val uiHandler = Handler(Looper.getMainLooper())
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -88,6 +117,26 @@ class MainActivity : Activity() {
         controls.onMask = { buttonMask.set(it) }
         controls.onMenu = { showMenu() }
         root.addView(controls, FrameLayout.LayoutParams(MATCH, MATCH))
+
+        // Overlay de status da caça (escondido fora do hunt). Acima dos controles,
+        // logo abaixo do botão ☰; toques nele passam (não é clicável).
+        huntStatus = TextView(this).apply {
+            setBackgroundColor(Color.argb(170, 0, 0, 0))
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setPadding(28, 18, 28, 18)
+            visibility = View.GONE
+        }
+        root.addView(
+            huntStatus,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                topMargin = 220
+            },
+        )
 
         setContentView(root)
 
@@ -130,21 +179,87 @@ class MainActivity : Activity() {
     // ── Menu + saves ─────────────────────────────────────────────────────────
 
     /**
-     * Menu do emulador (botão ☰). Hoje: ROM e save state de slot único; é o ponto
-     * de extensão pras próximas opções (mais slots, configurações, etc.).
+     * Menu do emulador (botão ☰). Durante a caça vira só "Parar caça"; fora dela,
+     * ROM/estados e — se o jogo é suportado — o Shiny Hunter. É o ponto de
+     * extensão pras próximas opções (mais slots, configurações, etc.).
      */
     private fun showMenu() {
-        val items = arrayOf("Carregar ROM", "Salvar estado", "Carregar estado")
+        if (hunting) {
+            AlertDialog.Builder(this)
+                .setTitle("Shiny Hunter")
+                .setItems(arrayOf("Parar caça")) { _, _ -> pendingHuntStop.set(true) }
+                .show()
+            return
+        }
+        val items = mutableListOf("Carregar ROM", "Salvar estado", "Carregar estado")
+        if (huntSupported) items.add("✨ Shiny Hunter")
         AlertDialog.Builder(this)
             .setTitle("Menu")
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> openRomPicker()
-                    1 -> saveStateFromMenu()
-                    2 -> loadStateFromMenu()
+            .setItems(items.toTypedArray()) { _, which ->
+                when (items[which]) {
+                    "Carregar ROM" -> openRomPicker()
+                    "Salvar estado" -> saveStateFromMenu()
+                    "Carregar estado" -> loadStateFromMenu()
+                    "✨ Shiny Hunter" -> startShinyHunter()
                 }
             }
             .show()
+    }
+
+    /**
+     * Abre a escolha de alvo e dispara a caça. O jogo precisa estar **parado na
+     * frente do alvo com o save carregado** (igual ao desktop). A caça em si roda
+     * na thread GL via [pendingHuntStart].
+     */
+    private fun startShinyHunter() {
+        if (!romLoaded || !huntSupported) {
+            toast("Jogo não suportado pelo Shiny Hunter")
+            return
+        }
+        val targets = huntTargets
+        if (targets.isEmpty()) {
+            toast("Sem alvos para este jogo")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Alvo — $huntGameName")
+            .setItems(targets) { _, i ->
+                currentTargetName = targets[i]
+                statAttempts = 0
+                statSpecies = 0
+                statBestSV = 0xFFFF
+                pendingHuntStart.set(i)
+            }
+            .show()
+    }
+
+    /** Texto do overlay de status da caça (lido das stats publicadas). */
+    private fun huntStatusText(): String {
+        val best = if (statBestSV == 0xFFFF) "—" else statBestSV.toString()
+        return "✨ Caçando $currentTargetName\n" +
+            "Tentativas: $statAttempts    melhor SV: $best\n" +
+            "Espécie lida: $statSpecies    (☰ para parar)"
+    }
+
+    /** Atualiza o overlay a cada 200 ms enquanto a caça roda. */
+    private val huntStatsUpdater = object : Runnable {
+        override fun run() {
+            if (!hunting) return
+            huntStatus.text = huntStatusText()
+            uiHandler.postDelayed(this, 200)
+        }
+    }
+
+    private fun startHuntUI() {
+        huntStatus.text = huntStatusText()
+        huntStatus.visibility = View.VISIBLE
+        uiHandler.removeCallbacks(huntStatsUpdater)
+        uiHandler.post(huntStatsUpdater)
+    }
+
+    private fun stopHuntUI() {
+        uiHandler.removeCallbacks(huntStatsUpdater)
+        huntStatus.visibility = View.GONE
     }
 
     /** Arquivo `.sav` (backup do cartucho) do jogo, em `filesDir`. */
@@ -192,10 +307,25 @@ class MainActivity : Activity() {
 
     // ── Persistência de saves (chamadas na thread GL) ────────────────────────
 
-    /** Após carregar a ROM: guarda o game code e carrega o `.sav` existente. */
+    /** Após carregar a ROM: game code, `.sav` existente e info do Shiny Hunter. */
     private fun onRomLoaded() {
         val code = NativeBridge.gameCode(handle)
         currentGameCode = code
+
+        // Publica o suporte do Shiny Hunter pra UI (perfil detectado no loadRom).
+        hunting = false
+        huntSupported = NativeBridge.huntSupported(handle)
+        if (huntSupported) {
+            huntGameName = NativeBridge.huntGameName(handle)
+            val n = NativeBridge.huntTargetCount(handle)
+            huntTargets = Array(n) { NativeBridge.huntTargetName(handle, it) }
+            Log.i(TAG, "shiny hunter: $huntGameName, ${n} alvos")
+        } else {
+            huntGameName = ""
+            huntTargets = emptyArray()
+        }
+        runOnUiThread { stopHuntUI() }
+
         if (!NativeBridge.hasSave(handle)) return
         val f = savFile(code)
         if (f.exists()) {
@@ -203,6 +333,27 @@ class MainActivity : Activity() {
             Log.i(TAG, "save .sav carregado=$ok (${f.name})")
         } else {
             Log.i(TAG, "sem .sav prévio para $code")
+        }
+    }
+
+    /** Copia as stats da caça (Hunter) pros campos voláteis lidos pela UI. */
+    private fun publishHuntStats() {
+        statAttempts = NativeBridge.huntAttempts(handle)
+        statSpecies = NativeBridge.huntLastSpecies(handle)
+        statBestSV = NativeBridge.huntBestShinyValue(handle)
+    }
+
+    /** Chamado na thread GL quando a caça acha o shiny: para e avisa a UI. */
+    private fun onHuntFinished() {
+        hunting = false
+        val n = statAttempts
+        runOnUiThread {
+            stopHuntUI()
+            Toast.makeText(
+                this,
+                "✨ Shiny encontrado em $n tentativas! Controle devolvido.",
+                Toast.LENGTH_LONG,
+            ).show()
         }
     }
 
@@ -326,20 +477,47 @@ class MainActivity : Activity() {
                 romLoaded = true
                 onRomLoaded()
             }
-            if (romLoaded && pendingSaveState.getAndSet(false)) doSaveState()
-            pendingLoadState.getAndSet(null)?.let { if (romLoaded) doLoadState(it) }
+
+            // Comandos da caça (menu).
+            val startTarget = pendingHuntStart.getAndSet(-1)
+            if (startTarget >= 0 && romLoaded && NativeBridge.huntStart(handle, startTarget)) {
+                hunting = true
+                runOnUiThread { startHuntUI() }
+            }
+            if (pendingHuntStop.getAndSet(false)) {
+                NativeBridge.huntStop(handle)
+                hunting = false
+                runOnUiThread { stopHuntUI() }
+            }
+
+            // Save states só fora da caça (o menu durante o hunt nem os oferece).
+            if (!hunting) {
+                if (romLoaded && pendingSaveState.getAndSet(false)) doSaveState()
+                pendingLoadState.getAndSet(null)?.let { if (romLoaded) doLoadState(it) }
+            }
 
             if (romLoaded) {
-                NativeBridge.setButtons(handle, buttonMask.get())
-                buf.clear()
-                NativeBridge.renderFrame(handle, buf)
-                buf.rewind()
+                if (hunting) {
+                    // O Hunter dirige os inputs e roda os frames por dentro; só
+                    // copiamos o framebuffer resultante (sem avançar de novo).
+                    val found = NativeBridge.huntStep(handle, HUNT_BATCH)
+                    buf.clear()
+                    NativeBridge.copyFramebuffer(handle, buf)
+                    buf.rewind()
+                    publishHuntStats()
+                    if (found) onHuntFinished()
+                } else {
+                    NativeBridge.setButtons(handle, buttonMask.get())
+                    buf.clear()
+                    NativeBridge.renderFrame(handle, buf)
+                    buf.rewind()
+                    if (++frames % FLUSH_EVERY_FRAMES == 0) flushBackup()
+                }
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
                 GLES20.glTexSubImage2D(
                     GLES20.GL_TEXTURE_2D, 0, 0, 0, W, H,
                     GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf,
                 )
-                if (++frames % FLUSH_EVERY_FRAMES == 0) flushBackup()
             }
 
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -356,10 +534,14 @@ class MainActivity : Activity() {
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             }
 
-            // Pacing: pelo áudio (write bloqueia até abrir espaço) ou, sem
-            // áudio/ROM, pelo relógio.
+            // Pacing: durante a caça, sem áudio e sem sleep — o vsync do
+            // eglSwapBuffers paceia os draws e cada draw roda HUNT_BATCH frames
+            // (~8×). No jogo normal, o `write` bloqueante do áudio ancora ao tempo
+            // real; sem áudio/ROM, cai pro relógio.
             val a = audio
-            if (romLoaded && a != null) {
+            if (hunting) {
+                // sem pacing extra
+            } else if (romLoaded && a != null) {
                 val n = NativeBridge.drainAudio(handle, audioBuf)
                 if (n > 0) a.write(audioBuf, 0, n) else Thread.sleep(2)
             } else {
