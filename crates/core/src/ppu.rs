@@ -203,6 +203,21 @@ impl Ppu {
         result
     }
 
+    /// Quantos ciclos faltam até a PPU mudar de fase (entrar em HBlank ou virar
+    /// a scanline). Entre dois eventos a PPU não muda nada observável (VCOUNT e
+    /// a flag de HBlank ficam constantes), então o `Gba` pode adiar a chamada a
+    /// [`Ppu::tick`] até aqui sem alterar o comportamento — é ciclo-exato.
+    /// Nunca retorna 0 (o próximo evento está sempre estritamente à frente).
+    #[inline]
+    pub fn cycles_until_event(&self) -> u32 {
+        let target = if self.in_hblank {
+            CYCLES_PER_SCANLINE
+        } else {
+            HDRAW_CYCLES
+        };
+        target.saturating_sub(self.cycles).max(1)
+    }
+
     fn reload_affine_refs(&mut self) {
         for k in 0..2 {
             self.bg_cur_x[k] = self.bg_ref_x[k];

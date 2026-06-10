@@ -8,6 +8,15 @@ use crate::cpu::Cpu;
 pub struct Gba {
     pub cpu: Cpu,
     pub bus: Bus,
+    /// Ciclos já decorridos mas ainda não entregues à PPU (batch por evento).
+    /// Reconstruído na carga de save state (`skip`): zero força um tick imediato
+    /// no próximo `step`, que recalcula a contagem — sempre seguro.
+    #[cfg_attr(feature = "save-states", serde(skip))]
+    ppu_pending: u32,
+    /// Ciclos que faltam até o próximo evento de fase da PPU. Quando chega a ≤0,
+    /// chamamos [`Ppu::tick`] com `ppu_pending` acumulado de uma vez.
+    #[cfg_attr(feature = "save-states", serde(skip))]
+    ppu_countdown: i64,
 }
 
 impl Gba {
@@ -15,6 +24,8 @@ impl Gba {
         Self {
             cpu: Cpu::new(),
             bus: Bus::new(),
+            ppu_pending: 0,
+            ppu_countdown: 0,
         }
     }
 
@@ -35,6 +46,8 @@ impl Gba {
         self.cpu = Cpu::new();
         self.cpu.setup_direct_boot();
         self.cpu.regs.set_pc(0x0800_0000);
+        self.ppu_pending = 0;
+        self.ppu_countdown = 0;
     }
 
     /// Executa uma única instrução. Retorna ciclos consumidos.
@@ -54,19 +67,33 @@ impl Gba {
             }
         }
         self.refill_sound_fifos();
-        // Borrows disjuntos: ppu, vram e palette são campos distintos do bus.
-        let ppu_result = {
-            let bus = &mut self.bus;
-            bus.ppu.tick(cycles, &*bus.vram, &*bus.palette, &*bus.oam)
-        };
 
-        // DMA disparado por VBlank/HBlank (a transferência precisa do bus inteiro,
-        // então roda fora do borrow da PPU acima).
-        if ppu_result.entered_vblank {
-            self.bus.run_dma_timing(crate::dma::Timing::VBlank);
-        }
-        if ppu_result.entered_hblank {
-            self.bus.run_dma_timing(crate::dma::Timing::HBlank);
+        // PPU em batch: entre dois eventos de fase a PPU não muda nada
+        // observável, então só a chamamos quando a contagem regressiva
+        // (`ppu_countdown`) zera, acumulando os ciclos em `ppu_pending`. É
+        // ciclo-exato (ver `Ppu::cycles_until_event`) e tira ~280k chamadas/frame.
+        self.ppu_pending += cycles;
+        self.ppu_countdown -= cycles as i64;
+        let mut ppu_irqs = 0;
+        if self.ppu_countdown <= 0 {
+            let pending = self.ppu_pending;
+            self.ppu_pending = 0;
+            // Borrows disjuntos: ppu, vram e palette são campos distintos do bus.
+            let ppu_result = {
+                let bus = &mut self.bus;
+                bus.ppu.tick(pending, &*bus.vram, &*bus.palette, &*bus.oam)
+            };
+            self.ppu_countdown = self.bus.ppu.cycles_until_event() as i64;
+            ppu_irqs = ppu_result.irqs;
+
+            // DMA disparado por VBlank/HBlank (a transferência precisa do bus
+            // inteiro, então roda fora do borrow da PPU acima).
+            if ppu_result.entered_vblank {
+                self.bus.run_dma_timing(crate::dma::Timing::VBlank);
+            }
+            if ppu_result.entered_hblank {
+                self.bus.run_dma_timing(crate::dma::Timing::HBlank);
+            }
         }
 
         let key_irq = if self.bus.io.joypad.irq_pending() {
@@ -75,7 +102,7 @@ impl Gba {
             0
         };
 
-        let all = timer_irqs | ppu_result.irqs | key_irq;
+        let all = timer_irqs | ppu_irqs | key_irq;
         if all != 0 {
             self.bus.io.raise(all);
         }

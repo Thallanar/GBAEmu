@@ -166,6 +166,7 @@ impl Apu {
     // ───────────────────────────── Avanço ───────────────────────────────────
 
     /// Avança o APU por `cpu_cycles` ciclos de CPU, gerando amostras no buffer.
+    #[inline]
     pub fn tick(&mut self, cpu_cycles: u32) {
         // A CPU roda a 4× o clock do APU.
         let total = cpu_cycles + self.cpu_frac;

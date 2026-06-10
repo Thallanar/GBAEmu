@@ -63,6 +63,7 @@ impl Timers {
 
     /// Avança `cycles` ciclos em todos os timers, retornando um bitmap de
     /// IRQs disparadas (combinável com [`Io::raise`]).
+    #[inline]
     pub fn tick(&mut self, cycles: u32) -> TimerTick {
         let mut irq_pending: u16 = 0;
         let mut snd_overflows = [0u32; 2];

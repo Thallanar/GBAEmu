@@ -103,24 +103,100 @@ impl Bus {
         }
     }
 
+    // As regiões de memória "puras" (RAM/VRAM/OAM/ROM) leem os bytes contíguos
+    // do slice numa só passada — uma checagem de região em vez de 2-4 idas ao
+    // `read_u8`. As regiões com roteamento/efeito (BIOS, I/O, SRAM, EEPROM,
+    // GPIO) caem no caminho por bytes, que preserva o comportamento exato.
     pub fn read_u16(&mut self, addr: u32) -> u16 {
-        // EEPROM (região 0x0D) responde 1 bit por halfword lido, via DMA.
-        if (addr >> 24) & 0xF == 0xD && self.cartridge.is_eeprom() {
-            return self.cartridge.eeprom_read_bit() as u16;
-        }
         let a = addr & !1; // alinhamento half-word
-        let lo = self.read_u8(a) as u16;
-        let hi = self.read_u8(a + 1) as u16;
-        lo | (hi << 8)
+        match (a >> 24) & 0xF {
+            0x2 => {
+                let o = (a as usize) & 0x3FFFF;
+                u16::from_le_bytes([self.ewram[o], self.ewram[o + 1]])
+            }
+            0x3 => {
+                let o = (a as usize) & 0x7FFF;
+                u16::from_le_bytes([self.iwram[o], self.iwram[o + 1]])
+            }
+            0x5 => {
+                let o = (a as usize) & 0x3FF;
+                u16::from_le_bytes([self.palette[o], self.palette[o + 1]])
+            }
+            0x6 => {
+                let o = vram_offset(a);
+                u16::from_le_bytes([self.vram[o], self.vram[o + 1]])
+            }
+            0x7 => {
+                let o = (a as usize) & 0x3FF;
+                u16::from_le_bytes([self.oam[o], self.oam[o + 1]])
+            }
+            0x8..=0xD => self.read_rom_u16(a),
+            _ => {
+                let lo = self.read_u8(a) as u16;
+                let hi = self.read_u8(a + 1) as u16;
+                lo | (hi << 8)
+            }
+        }
     }
 
     pub fn read_u32(&mut self, addr: u32) -> u32 {
         let a = addr & !3; // alinhamento word
-        let b0 = self.read_u8(a) as u32;
-        let b1 = self.read_u8(a + 1) as u32;
-        let b2 = self.read_u8(a + 2) as u32;
-        let b3 = self.read_u8(a + 3) as u32;
-        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+        match (a >> 24) & 0xF {
+            0x2 => {
+                let o = (a as usize) & 0x3FFFF;
+                u32::from_le_bytes(self.ewram[o..o + 4].try_into().unwrap())
+            }
+            0x3 => {
+                let o = (a as usize) & 0x7FFF;
+                u32::from_le_bytes(self.iwram[o..o + 4].try_into().unwrap())
+            }
+            0x5 => {
+                let o = (a as usize) & 0x3FF;
+                u32::from_le_bytes(self.palette[o..o + 4].try_into().unwrap())
+            }
+            0x6 => {
+                let o = vram_offset(a);
+                u32::from_le_bytes(self.vram[o..o + 4].try_into().unwrap())
+            }
+            0x7 => {
+                let o = (a as usize) & 0x3FF;
+                u32::from_le_bytes(self.oam[o..o + 4].try_into().unwrap())
+            }
+            0x8..=0xD => {
+                let lo = self.read_rom_u16(a) as u32;
+                let hi = self.read_rom_u16(a + 2) as u32;
+                lo | (hi << 16)
+            }
+            _ => {
+                let b0 = self.read_u8(a) as u32;
+                let b1 = self.read_u8(a + 1) as u32;
+                let b2 = self.read_u8(a + 2) as u32;
+                let b3 = self.read_u8(a + 3) as u32;
+                b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+            }
+        }
+    }
+
+    /// Lê um halfword da região de cartucho (ROM 0x8..0xD). Mantém o roteamento
+    /// de GPIO/RTC (0x0C4..0x0C9, raro) e o caso da EEPROM; o corpo comum lê dois
+    /// bytes contíguos da ROM (open bus = 0 fora dela).
+    #[inline]
+    fn read_rom_u16(&mut self, a: u32) -> u16 {
+        // EEPROM (região 0x0D) responde 1 bit por halfword lido, via DMA.
+        if (a >> 24) & 0xF == 0xD && self.cartridge.is_eeprom() {
+            return self.cartridge.eeprom_read_bit() as u16;
+        }
+        let off = (a & 0x01FF_FFFF) as usize;
+        // GPIO/RTC: caminho por bytes (roteamento especial).
+        if (crate::rtc::GPIO_DATA..=crate::rtc::GPIO_END).contains(&(off as u32)) {
+            let lo = self.read_u8(a) as u16;
+            let hi = self.read_u8(a + 1) as u16;
+            return lo | (hi << 8);
+        }
+        let rom = &self.cartridge.rom;
+        let lo = rom.get(off).copied().unwrap_or(0) as u16;
+        let hi = rom.get(off + 1).copied().unwrap_or(0) as u16;
+        lo | (hi << 8)
     }
 
     // ───────────────────── writes ─────────────────────
