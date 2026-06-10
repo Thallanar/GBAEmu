@@ -56,6 +56,16 @@ um `GameProfile` de `crates/shiny/src/games.rs` (1 entrada por jogo).
 
 ## Próximos passos (em ordem sugerida)
 
+### 0. ⚡ Performance & fluidez — PRÓXIMO TRABALHO (decidido 9/jun/2026)
+
+Medido: core a 108 fps no Emerald em release (×1,81 do tempo real, 100% de um
+núcleo) → explica o FF travado em ~×1,7, o calor no Android e os soluços em
+cenas pesadas. Judder em scroll tem 2ª causa: pacing por áudio em rajadas
+(0–4 frames/update) + 60 Hz × 59,73 Hz. Plano completo na **Fase 9 do
+ROADMAP.md**: (1) profiling do core + otimizações (meta ×3–5 sem JIT) →
+(2) pacing uniforme no desktop (dynamic rate control) → (3) FF personalizável
+(multiplicador na UI, persistido). Começar pelo flamegraph.
+
 ### 1. 🌟 Shiny Hunter — expandir (o diferencial)
 - [X] **Ruby/Sapphire (AXVE/AXPE)**: perfis completos (mascote da versão +
       Rayquaza + Regis + iniciais). `gRngValue=0x03004818` confirmado nas ROMs
