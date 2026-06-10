@@ -38,6 +38,18 @@ class ControlsView(context: Context) : View(context) {
     var onMask: (Int) -> Unit = {}
     var onMenu: () -> Unit = {}
 
+    /**
+     * Layout dos controles. Paisagem: L/R/☰ no topo, D-pad/A-B nos cantos de
+     * baixo (tela cheia atrás). Retrato: tudo agrupado num cluster no rodapé
+     * (estilo My Boy) — L/R/☰ no topo do cluster, D-pad embaixo-esquerda, B/A
+     * lado a lado embaixo-direita, Select/Start no centro acima do B/A.
+     */
+    var portrait = false
+        set(value) {
+            field = value
+            invalidate()
+        }
+
     private val d = resources.displayMetrics.density
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(70, 255, 255, 255) }
     private val active = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(140, 120, 200, 255) }
@@ -49,26 +61,34 @@ class ControlsView(context: Context) : View(context) {
 
     private var mask = 0
 
-    // ── Geometria (recalculada conforme o tamanho da view) ───────────────────
+    // ── Geometria (recalculada conforme o tamanho/orientação) ────────────────
+    // Tamanhos são iguais nas duas orientações; só as POSIÇÕES mudam (no retrato
+    // tudo desce pro cluster do rodapé).
     private val pad get() = 24 * d
-    private val dpadCx get() = pad + 96 * d
-    private val dpadCy get() = height - pad - 96 * d
-    private val arm get() = 64 * d // meio-comprimento do braço do D-pad
-    private val thick get() = 46 * d // largura do braço
-    private val abR get() = 44 * d
-    private val aCx get() = width - pad - 64 * d
-    private val aCy get() = height - pad - 120 * d
-    private val bCx get() = width - pad - 152 * d
-    private val bCy get() = height - pad - 64 * d
+    private val arm get() = (if (portrait) 56 else 64) * d // meio-comprimento do braço do D-pad
+    private val thick get() = (if (portrait) 42 else 46) * d // largura do braço
+    private val abR get() = (if (portrait) 42 else 44) * d
     private val seSize get() = 30 * d
-    private val startCx get() = width / 2f + 60 * d
-    private val selCx get() = width / 2f - 60 * d
-    private val seCy get() = height - pad - 24 * d
-    private val lrW get() = 120 * d
+    private val lrW get() = (if (portrait) 110 else 120) * d
     private val lrH get() = 48 * d
 
-    // Botão de menu (topo, centro): ROM, save states e opções futuras.
-    private fun menuRect() = RectF(width / 2f - 60 * d, pad, width / 2f + 60 * d, pad + lrH)
+    private val dpadCx get() = pad + (if (portrait) 62 else 96) * d
+    private val dpadCy get() = height - (if (portrait) 120 * d else pad + 96 * d)
+    private val aCx get() = width - pad - (if (portrait) 62 else 64) * d
+    private val aCy get() = height - (if (portrait) 105 * d else pad + 120 * d)
+    private val bCx get() = width - pad - (if (portrait) 168 else 152) * d
+    private val bCy get() = height - (if (portrait) 105 * d else pad + 64 * d)
+    private val startCx get() = width / 2f + (if (portrait) 70 else 60) * d
+    private val selCx get() = width / 2f - (if (portrait) 70 else 60) * d
+    // Retrato: Select/Start ficam no respiro ENTRE a linha L/R/☰ e a fileira do
+    // D-pad/A-B (centro), bem acima do D-pad pra não encavalar.
+    private val seCy get() = height - (if (portrait) 250 * d else pad + 24 * d)
+
+    // Linha L/R/☰: no topo da view (paisagem) ou no topo do cluster (retrato).
+    private val rowTop get() = if (portrait) height - 345 * d else pad
+    private fun lRect() = RectF(pad, rowTop, pad + lrW, rowTop + lrH)
+    private fun rRect() = RectF(width - pad - lrW, rowTop, width - pad, rowTop + lrH)
+    private fun menuRect() = RectF(width / 2f - 60 * d, rowTop, width / 2f + 60 * d, rowTop + lrH)
 
     /** Botões pressionados por um ponteiro na posição (x, y). */
     private fun hit(x: Float, y: Float): Int {
@@ -94,8 +114,8 @@ class ControlsView(context: Context) : View(context) {
         if (dist(x, y, bCx, bCy) <= abR) m = m or Btn.B
         if (inPill(x, y, startCx, seCy)) m = m or Btn.START
         if (inPill(x, y, selCx, seCy)) m = m or Btn.SELECT
-        if (x <= pad + lrW && y <= pad + lrH) m = m or Btn.L
-        if (x >= width - pad - lrW && y <= pad + lrH) m = m or Btn.R
+        if (lRect().contains(x, y)) m = m or Btn.L
+        if (rRect().contains(x, y)) m = m or Btn.R
         return m
     }
 
@@ -155,8 +175,10 @@ class ControlsView(context: Context) : View(context) {
         circle(canvas, bCx, bCy, abR, "B", mask and Btn.B != 0)
         pill(canvas, startCx, seCy, "START", mask and Btn.START != 0)
         pill(canvas, selCx, seCy, "SEL", mask and Btn.SELECT != 0)
-        rect(canvas, pad, pad, pad + lrW, pad + lrH, "L", mask and Btn.L != 0)
-        rect(canvas, width - pad - lrW, pad, width - pad, pad + lrH, "R", mask and Btn.R != 0)
+        val l = lRect()
+        rect(canvas, l.left, l.top, l.right, l.bottom, "L", mask and Btn.L != 0)
+        val r = rRect()
+        rect(canvas, r.left, r.top, r.right, r.bottom, "R", mask and Btn.R != 0)
         val o = menuRect()
         rect(canvas, o.left, o.top, o.right, o.bottom, "☰ MENU", false)
     }
