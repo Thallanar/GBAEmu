@@ -147,8 +147,15 @@ auroragba/
 - [X] Detector de RAM (debug) no desktop — acha endereços por versão (estilo
       Cheat Engine: o byte que passou por 0/1/2 e nunca excedeu 2). Oculto atrás
       da flag `SHOW_RAM_FINDER`; reutilizável pra mapear jogos novos.
-- [ ] Outros jogos: Ruby/Sapphire, FireRed/LeafGreen (RAM + gRngValue + endereços
-      do menu do inicial por versão)
+- [X] Ruby/Sapphire (AXVE/AXPE): perfis completos — endereços dos símbolos do
+      decomp pokeruby (iguais nas revs 0/1/2; só o func do menu do inicial muda,
+      coberto por `input_funcs` em lista). `gRngValue=0x03004818` **confirmado
+      empiricamente** nas duas ROMs com a ferramenta nova `rng_scan` (scan da
+      IWRAM pela assinatura do LCG, tolerante a re-seed); espécies confirmadas
+      pelo oráculo de sprite (`rng_scan --sprites`). Alvos: mascote da versão +
+      Rayquaza + Regis + 3 iniciais.
+- [ ] FireRed/LeafGreen (BPRE/BPGE): RAM + gRngValue + endereços do menu do
+      inicial por versão (mapear com `rng_scan`/símbolos do decomp pokefirered)
 - [ ] Método: random encounters (detecção de tela de batalha de selvagem)
 - [ ] (Opcional avançado) RNG manipulation
 
