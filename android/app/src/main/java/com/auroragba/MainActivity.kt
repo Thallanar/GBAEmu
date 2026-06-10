@@ -2,6 +2,7 @@ package com.auroragba
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ContentValues
 import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Bitmap
@@ -11,9 +12,12 @@ import android.media.AudioFormat
 import android.media.AudioTrack
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.util.Log
 import android.view.Gravity
 import android.view.View
@@ -75,6 +79,10 @@ class MainActivity : Activity() {
     // arquivo na UI; o slot já foi resolvido lá).
     private val pendingSaveState = AtomicInteger(-1)
     private val pendingLoadState = AtomicReference<ByteArray?>(null)
+
+    // Captura de tela: a thread GL copia o framebuffer atual quando setado; o
+    // encode PNG + gravação na galeria roda numa thread à parte (não trava o draw).
+    private val pendingScreenshot = AtomicBoolean(false)
 
     // Game code do jogo atual (chave dos arquivos de save). Escrito na thread GL
     // ao carregar a ROM, lido na UI pra montar os caminhos.
@@ -330,7 +338,7 @@ class MainActivity : Activity() {
                 .show()
             return
         }
-        val items = mutableListOf("Carregar ROM", "Salvar estado", "Carregar estado")
+        val items = mutableListOf("Carregar ROM", "Salvar estado", "Carregar estado", "📸 Captura de tela")
         if (huntSupported) items.add("✨ Shiny Hunter")
         AlertDialog.Builder(this)
             .setTitle("Menu")
@@ -339,6 +347,7 @@ class MainActivity : Activity() {
                     "Carregar ROM" -> openRomPicker()
                     "Salvar estado" -> saveStateFromMenu()
                     "Carregar estado" -> loadStateFromMenu()
+                    "📸 Captura de tela" -> takeScreenshot()
                     "✨ Shiny Hunter" -> startShinyHunter()
                 }
             }
@@ -479,6 +488,55 @@ class MainActivity : Activity() {
                 }
             }
             .show()
+    }
+
+    /** Pede pra thread GL capturar o frame atual (o encode/gravação vêm depois). */
+    private fun takeScreenshot() {
+        if (!romLoaded || currentGameCode == null) {
+            toast("Carregue uma ROM antes de capturar a tela")
+            return
+        }
+        pendingScreenshot.set(true)
+    }
+
+    /**
+     * Codifica o framebuffer RGBA [px] (240×160) em PNG e grava na galeria:
+     * Pictures/AuroraGBA via MediaStore (API 29+, sem permissão) ou, em APIs
+     * antigas, na pasta externa do app. Roda numa thread à parte — encode + I/O
+     * não podem travar o render.
+     */
+    private fun saveScreenshot(px: ByteArray) {
+        val code = currentGameCode ?: "rom"
+        Thread {
+            try {
+                val bmp = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888)
+                bmp.copyPixelsFromBuffer(ByteBuffer.wrap(px))
+                val name = "auroragba_${code}_${System.currentTimeMillis() / 1000}.png"
+                val where = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                        put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                        put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/AuroraGBA")
+                    }
+                    val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                        ?: throw IllegalStateException("MediaStore recusou a inserção")
+                    contentResolver.openOutputStream(uri)!!.use {
+                        bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+                    }
+                    "galeria (Pictures/AuroraGBA)"
+                } else {
+                    val dir = getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+                    val f = File(dir, name)
+                    f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    f.absolutePath
+                }
+                bmp.recycle()
+                toast("Screenshot salva em $where")
+            } catch (e: Exception) {
+                Log.e(TAG, "falha ao salvar screenshot: $e")
+                toast("Falha ao salvar screenshot")
+            }
+        }.start()
     }
 
     private fun toast(msg: String) =
@@ -713,6 +771,13 @@ class MainActivity : Activity() {
                     GLES20.GL_TEXTURE_2D, 0, 0, 0, W, H,
                     GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf,
                 )
+                // Captura: copia o framebuffer atual (rápido) e delega o encode.
+                if (pendingScreenshot.getAndSet(false)) {
+                    val px = ByteArray(W * H * 4)
+                    buf.rewind()
+                    buf.get(px)
+                    saveScreenshot(px)
+                }
             }
 
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
