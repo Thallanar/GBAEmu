@@ -176,6 +176,31 @@ auroragba/
 - [ ] Localização PT-BR
 - [ ] Netplay (futuro)
 
+### Fase 9 — ⚡ Performance & fluidez (planejada em 9/jun/2026)
+
+Medição na máquina de referência (desktop, release, headless): core roda
+Emerald a **108 fps (×1,81 do tempo real)** e Ruby a 131 fps, pinando 100% de
+um núcleo. Consequências confirmadas: teto do fast-forward ≈ ×1,8 (bate com o
+×1,7 medido na GUI), calor no Android, e margem apertada no jogo normal
+(~9 ms de emulação num orçamento de 16,7 ms/frame → picos estouram e soluçam).
+As engasgadas em scroll/movimento têm uma 2ª causa independente: o **pacing por
+áudio entrega vídeo em rajadas** (0–4 frames por update) + desencontro monitor
+60 Hz × GBA 59,73 Hz → judder mesmo com CPU sobrando.
+
+Plano em 3 etapas (ordem decidida):
+
+- [ ] **1. Otimizar o core guiado por profiling** (flamegraph rodando Emerald):
+      suspeitos usuais — fast path do bus (match por região + bounds check em
+      todo acesso), dispatch do decode, PPU por scanline, ticking de
+      timers/DMA a cada instrução. Meta realista sem JIT: ×3–5. JIT (semanas)
+      só se o profiling provar necessidade. Resolve FF fraco + calor Android.
+- [ ] **2. Pacing uniforme no desktop**: trocar as rajadas por cadência de
+      ~1 frame/update com controle fino do buffer de áudio (dynamic rate
+      control clássico) — conserta o judder independente da velocidade do core.
+- [ ] **3. Fast-forward personalizável**: multiplicador configurável na UI
+      (slider/atalho, persistido no storage do eframe), em vez do orçamento
+      fixo de 12 ms. Por último de propósito: só rende com o teto novo do core.
+
 ---
 
 ## 5. Design / UX
