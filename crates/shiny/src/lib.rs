@@ -37,8 +37,12 @@ fn force_starter_cursor(gba: &mut Gba, profile: &GameProfile, target: &TargetDef
     let Some(menu) = profile.starter_menu else {
         return;
     };
-    // `func` (offset 0 da struct Task) fica 8 bytes antes de `data[0]`.
-    if gba.bus.read_u32(menu.cursor_addr - 8) != menu.input_func {
+    // `func` (offset 0 da struct Task) fica 8 bytes antes de `data[0]`. A lista
+    // tem um func por revisão da ROM (mesmo game code, endereços diferentes).
+    if !menu
+        .input_funcs
+        .contains(&gba.bus.read_u32(menu.cursor_addr - 8))
+    {
         return; // menu não está aberto/aceitando direção
     }
     gba.bus.write_u8(menu.cursor_addr, target.cursor.value());
@@ -463,7 +467,7 @@ mod tests {
             rng_addr: None,
             starter_menu: Some(StarterMenu {
                 cursor_addr,
-                input_func,
+                input_funcs: &[0x0813_425D],
             }),
             targets: &[],
         };

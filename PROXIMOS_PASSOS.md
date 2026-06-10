@@ -57,12 +57,16 @@ um `GameProfile` de `crates/shiny/src/games.rs` (1 entrada por jogo).
 ## Próximos passos (em ordem sugerida)
 
 ### 1. 🌟 Shiny Hunter — expandir (o diferencial)
-- [ ] **Outros jogos**: Ruby/Sapphire (AXVE/AXPE), FireRed/LeafGreen (BPRE/BPGE).
-      Cada um precisa dos endereços de `gPlayerParty`/`gEnemyParty` **e do
-      `gRngValue`** daquele jogo (achar via scan da IWRAM pela assinatura do LCG
-      `seed*0x41C64E6D+0x6073`, ou pelos símbolos do decomp).
-- [ ] **Starter Treecko/Mudkip**: precisam de **input direcional** no menu do lab
-      (hoje o roteiro só amassa A → pega o do meio, Torchic).
+- [X] **Ruby/Sapphire (AXVE/AXPE)**: perfis completos (mascote da versão +
+      Rayquaza + Regis + iniciais). `gRngValue=0x03004818` confirmado nas ROMs
+      reais com o `rng_scan` (scan da IWRAM pela assinatura do LCG, tolerante a
+      re-seed); espécies confirmadas por sprite. Falta validação de campo (caça
+      real com save posicionado).
+- [ ] **FireRed/LeafGreen (BPRE/BPGE)**: mapear `gPlayerParty`/`gEnemyParty`/
+      `gRngValue`/menu do inicial com `rng_scan` + símbolos do decomp pokefirered.
+- [X] **Starter Treecko/Mudkip**: seleção em malha fechada via RAM (escreve o
+      cursor `gTasks[0].data[0]` com a task de input ativa). Validado — 1º shiny
+      do projeto foi um Mudkip assim.
 - [ ] **Método random encounters**: detectar a tela de batalha de selvagem (andar
       na grama / repel) e ler o slot inimigo.
 
