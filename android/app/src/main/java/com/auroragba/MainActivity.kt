@@ -29,6 +29,9 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -58,6 +61,8 @@ class MainActivity : Activity() {
         const val FLUSH_EVERY_FRAMES = 300
         // Frames de emulação por draw durante a caça (acelera o hunt; ~8× a 60Hz).
         const val HUNT_BATCH = 8
+        // Slots de save state em disco (`<code>.ss1`..`.ss8`), igual ao desktop.
+        const val SAVE_SLOTS = 8
         val MATCH = FrameLayout.LayoutParams.MATCH_PARENT
     }
 
@@ -66,8 +71,9 @@ class MainActivity : Activity() {
     private val pendingRom = AtomicReference<ByteArray?>(null)
 
     // Comandos do menu, executados na thread GL (acesso ao ponteiro): salvar
-    // estado (flag) e carregar estado (bytes lidos do arquivo na UI).
-    private val pendingSaveState = AtomicBoolean(false)
+    // estado no slot pedido (-1 = nenhum) e carregar estado (bytes lidos do
+    // arquivo na UI; o slot já foi resolvido lá).
+    private val pendingSaveState = AtomicInteger(-1)
     private val pendingLoadState = AtomicReference<ByteArray?>(null)
 
     // Game code do jogo atual (chave dos arquivos de save). Escrito na thread GL
@@ -422,31 +428,57 @@ class MainActivity : Activity() {
     /** Arquivo `.sav` (backup do cartucho) do jogo, em `filesDir`. */
     private fun savFile(code: String) = File(filesDir, "$code.sav")
 
-    /** Arquivo do save state (slot único `.ss1`) do jogo, em `filesDir`. */
-    private fun stateFile(code: String) = File(filesDir, "$code.ss1")
+    /** Arquivo do save state do `slot` (0-indexado: `.ss1`..`.ss8`), em `filesDir`. */
+    private fun stateFile(code: String, slot: Int) = File(filesDir, "$code.ss${slot + 1}")
 
-    /** Pede pra thread GL salvar o estado no slot único. */
+    /** Rótulo de um slot pro seletor: "Slot N — vazio" ou "Slot N — dd/MM HH:mm". */
+    private fun slotLabel(code: String, slot: Int): String {
+        val f = stateFile(code, slot)
+        val when_ = if (f.exists()) {
+            SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()).format(Date(f.lastModified()))
+        } else {
+            "vazio"
+        }
+        return "Slot ${slot + 1} — $when_"
+    }
+
+    /** Seletor de slot pra salvar: todos os 8 (sobrescreve), com data dos ocupados. */
     private fun saveStateFromMenu() {
-        if (!romLoaded || currentGameCode == null) {
+        val code = currentGameCode
+        if (!romLoaded || code == null) {
             toast("Carregue uma ROM antes de salvar estado")
             return
         }
-        pendingSaveState.set(true)
+        val labels = Array(SAVE_SLOTS) { slotLabel(code, it) }
+        AlertDialog.Builder(this)
+            .setTitle("Salvar no slot")
+            .setItems(labels) { _, slot -> pendingSaveState.set(slot) }
+            .show()
     }
 
-    /** Lê o save state do disco (na UI) e entrega pra thread GL aplicar. */
+    /** Seletor de slot pra carregar: vazios ficam desabilitados. */
     private fun loadStateFromMenu() {
         val code = currentGameCode
         if (!romLoaded || code == null) {
             toast("Carregue uma ROM antes de carregar estado")
             return
         }
-        val f = stateFile(code)
-        if (!f.exists()) {
+        val exists = BooleanArray(SAVE_SLOTS) { stateFile(code, it).exists() }
+        if (exists.none { it }) {
             toast("Nenhum estado salvo")
             return
         }
-        pendingLoadState.set(f.readBytes())
+        val labels = Array(SAVE_SLOTS) { slotLabel(code, it) }
+        AlertDialog.Builder(this)
+            .setTitle("Carregar do slot")
+            .setItems(labels) { _, slot ->
+                if (exists[slot]) {
+                    pendingLoadState.set(stateFile(code, slot).readBytes())
+                } else {
+                    toast("Slot ${slot + 1} está vazio")
+                }
+            }
+            .show()
     }
 
     private fun toast(msg: String) =
@@ -527,11 +559,11 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun doSaveState() {
+    private fun doSaveState(slot: Int) {
         val code = currentGameCode ?: return
         try {
-            stateFile(code).writeBytes(NativeBridge.saveState(handle))
-            toast("Estado salvo")
+            stateFile(code, slot).writeBytes(NativeBridge.saveState(handle))
+            toast("Estado salvo no slot ${slot + 1}")
         } catch (e: Exception) {
             Log.e(TAG, "falha ao salvar estado: $e")
             toast("Falha ao salvar estado")
@@ -654,7 +686,8 @@ class MainActivity : Activity() {
 
             // Save states só fora da caça (o menu durante o hunt nem os oferece).
             if (!hunting) {
-                if (romLoaded && pendingSaveState.getAndSet(false)) doSaveState()
+                val saveSlot = pendingSaveState.getAndSet(-1)
+                if (romLoaded && saveSlot >= 0) doSaveState(saveSlot)
                 pendingLoadState.getAndSet(null)?.let { if (romLoaded) doLoadState(it) }
             }
 
