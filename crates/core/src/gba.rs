@@ -55,17 +55,11 @@ impl Gba {
     pub fn step(&mut self) -> u32 {
         let cycles = self.cpu.step(&mut self.bus);
 
-        let timer = self.bus.io.timers.tick(cycles);
-        let timer_irqs = timer.irqs;
         self.bus.apu.tick(cycles);
-
-        // Direct Sound: cada overflow dos timers 0/1 avança 1 amostra das FIFOs
-        // que usam aquele timer. Depois, reabastece as FIFOs via DMA special.
-        for (t, &count) in timer.snd_overflows.iter().enumerate() {
-            for _ in 0..count {
-                self.bus.apu.on_timer_overflow(t as u8);
-            }
-        }
+        // Timers em batch: só ticam de fato no próximo overflow (e fazem
+        // catch-up nos acessos a registrador). O Direct Sound e as IRQs de timer
+        // são tratados dentro do flush, então não há mais `timer_irqs` aqui.
+        self.bus.step_timers(cycles);
         self.refill_sound_fifos();
 
         // PPU em batch: entre dois eventos de fase a PPU não muda nada
@@ -102,7 +96,7 @@ impl Gba {
             0
         };
 
-        let all = timer_irqs | ppu_irqs | key_irq;
+        let all = ppu_irqs | key_irq;
         if all != 0 {
             self.bus.io.raise(all);
         }

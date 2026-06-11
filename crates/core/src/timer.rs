@@ -125,6 +125,36 @@ impl Timers {
         }
     }
 
+    /// Ciclos até o próximo overflow de algum timer habilitado e **não**
+    /// cascateado — o análogo de [`Ppu::cycles_until_event`] para o batch dos
+    /// timers. Entre dois overflows nada observável muda (o counter só importa
+    /// quando lido, e aí fazemos catch-up). Timers cascateados só avançam no
+    /// overflow do anterior (já paramos nesse ponto); timers parados não geram
+    /// evento. Sem nenhum evento, devolve um teto de um frame (mantém o
+    /// `timer_pending` limitado mesmo ocioso).
+    ///
+    /// [`Ppu::cycles_until_event`]: crate::ppu::Ppu::cycles_until_event
+    pub fn cycles_until_event(&self) -> u32 {
+        let mut min = 280_896; // teto = 1 frame
+        for (i, t) in self.units.iter().enumerate() {
+            // Timer 0 ignora o bit de cascade (igual ao `tick`: `cascade() && i > 0`).
+            if !t.enabled() || (t.cascade() && i > 0) {
+                continue;
+            }
+            let step = t.prescaler();
+            // Incrementos até overflow: de `counter` até 0xFFFF e mais um (reload).
+            let incs = 0x1_0000u32 - t.counter as u32;
+            // O 1º incremento só precisa completar o resto do prescaler atual
+            // (`step - cycles` ciclos); os demais custam `step` ciclos cada.
+            // `saturating_sub`: se o prescaler encolheu com o timer ligado,
+            // `cycles` pode passar de `incs*step` → contagem 0 = flush imediato,
+            // que o `tick` resolve no próprio laço (seguro).
+            let until = (incs * step).saturating_sub(t.cycles);
+            min = min.min(until);
+        }
+        min
+    }
+
     pub fn read_u8(&self, addr: u32) -> u8 {
         let offset = (addr - 0x0400_0100) as usize;
         let idx = offset / 4;
@@ -193,6 +223,35 @@ mod tests {
         );
         // 3 ticks: 0xFFFE→0xFFFF→reload(0xFFFE)→0xFFFF.
         assert_eq!(t.units[0].counter, 0xFFFF);
+    }
+
+    #[test]
+    fn cycles_until_event_matches_real_overflow() {
+        // Timer 0: reload=0xFFF0, prescaler=1, enable → overflowa em 16 ticks.
+        let mut t = Timers::new();
+        t.write_u16(0x0400_0100, 0xFFF0);
+        t.write_u16(0x0400_0102, 0x0080);
+        let until = t.cycles_until_event();
+        assert_eq!(until, 16, "0x10000-0xFFF0 = 16 incrementos a 1 ciclo cada");
+        // Ticar (until-1) NÃO deve overflowar; o último ciclo, sim.
+        assert_eq!(t.tick(until - 1).snd_overflows[0], 0);
+        assert_eq!(t.tick(1).snd_overflows[0], 1, "overflow exatamente em `until`");
+    }
+
+    #[test]
+    fn cycles_until_event_respects_prescaler() {
+        // Timer 2: reload=0xFFFF, prescaler=256, enable → 1 incremento × 256 ciclos.
+        let mut t = Timers::new();
+        t.write_u16(0x0400_0108, 0xFFFF);
+        t.write_u16(0x0400_010A, 0x0082); // prescaler=256 (bits=2), enable
+        assert_eq!(t.cycles_until_event(), 256);
+    }
+
+    #[test]
+    fn cycles_until_event_idle_returns_frame_cap() {
+        // Nenhum timer habilitado → teto de um frame (não força flushes à toa).
+        let t = Timers::new();
+        assert_eq!(t.cycles_until_event(), 280_896);
     }
 
     #[test]
