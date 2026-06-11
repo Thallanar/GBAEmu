@@ -20,6 +20,9 @@ import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
 import android.view.Gravity
+import android.view.InputDevice
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -71,7 +74,15 @@ class MainActivity : Activity() {
     }
 
     private lateinit var glView: GLSurfaceView
+
+    // Máscara final lida pela thread GL = união das três fontes de input. Touch e
+    // controle físico convivem (OR): `touchMask` vem do ControlsView; `padButtons`
+    // dos botões/D-pad do controle (key events); `padAxis` das direções vindas dos
+    // eixos analógicos/hat (motion events). Ver dispatchKeyEvent/onGenericMotionEvent.
     private val buttonMask = AtomicInteger(0)
+    @Volatile private var touchMask = 0
+    @Volatile private var padButtons = 0
+    @Volatile private var padAxis = 0
     private val pendingRom = AtomicReference<ByteArray?>(null)
 
     // Comandos do menu, executados na thread GL (acesso ao ponteiro): salvar
@@ -145,7 +156,7 @@ class MainActivity : Activity() {
         }
 
         controls = ControlsView(this).apply {
-            onMask = { buttonMask.set(it) }
+            onMask = { touchMask = it; syncButtons() }
             onMenu = { showMenu() }
         }
 
@@ -164,6 +175,77 @@ class MainActivity : Activity() {
         applyLayout()
 
         if (savedInstanceState == null) openRomPicker()
+    }
+
+    // ── Controle físico (gamepad) ────────────────────────────────────────────
+    // Botões e D-pad digital chegam como key events; sticks analógicos e hat como
+    // motion events. Convertemos pra `padButtons`/`padAxis` e combinamos com o
+    // touch (OR) — os dois convivem. Quando há um diálogo aberto (menu/slots), o
+    // foco vai pra ele e estes overrides nem recebem o evento, então a navegação
+    // do menu pelo D-pad do controle segue funcionando.
+
+    /** Recompõe a máscara final a partir das fontes de input (touch + controle). */
+    private fun syncButtons() {
+        buttonMask.set(touchMask or padButtons or padAxis)
+    }
+
+    /** Bit do botão GBA pra um keycode de gamepad/D-pad (0 se não for nosso). */
+    private fun gamepadBit(keyCode: Int): Int = when (keyCode) {
+        KeyEvent.KEYCODE_BUTTON_A -> Btn.A
+        KeyEvent.KEYCODE_BUTTON_B -> Btn.B
+        KeyEvent.KEYCODE_BUTTON_START -> Btn.START
+        KeyEvent.KEYCODE_BUTTON_SELECT -> Btn.SELECT
+        KeyEvent.KEYCODE_BUTTON_L1 -> Btn.L
+        KeyEvent.KEYCODE_BUTTON_R1 -> Btn.R
+        KeyEvent.KEYCODE_DPAD_UP -> Btn.UP
+        KeyEvent.KEYCODE_DPAD_DOWN -> Btn.DOWN
+        KeyEvent.KEYCODE_DPAD_LEFT -> Btn.LEFT
+        KeyEvent.KEYCODE_DPAD_RIGHT -> Btn.RIGHT
+        else -> 0
+    }
+
+    private fun isDpadKey(keyCode: Int) = keyCode == KeyEvent.KEYCODE_DPAD_UP ||
+        keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
+        keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
+        keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val bit = gamepadBit(event.keyCode)
+        val fromPad = (event.source and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
+            (event.source and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+        // Só consumimos botões nossos vindos de um controle (ou teclas de D-pad). O
+        // resto (volume, back, etc.) segue o fluxo normal.
+        if (bit != 0 && (fromPad || isDpadKey(event.keyCode))) {
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> padButtons = padButtons or bit
+                KeyEvent.ACTION_UP -> padButtons = padButtons and bit.inv()
+            }
+            syncButtons()
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if ((event.source and InputDevice.SOURCE_JOYSTICK) != InputDevice.SOURCE_JOYSTICK ||
+            event.action != MotionEvent.ACTION_MOVE
+        ) {
+            return super.onGenericMotionEvent(event)
+        }
+        // Direções: hat (D-pad digital de muitos controles) ou stick esquerdo (deadzone).
+        val hx = event.getAxisValue(MotionEvent.AXIS_HAT_X)
+        val hy = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        val sx = event.getAxisValue(MotionEvent.AXIS_X)
+        val sy = event.getAxisValue(MotionEvent.AXIS_Y)
+        val dz = 0.5f
+        var m = 0
+        if (hx < -0.5f || sx < -dz) m = m or Btn.LEFT
+        if (hx > 0.5f || sx > dz) m = m or Btn.RIGHT
+        if (hy < -0.5f || sy < -dz) m = m or Btn.UP
+        if (hy > 0.5f || sy > dz) m = m or Btn.DOWN
+        padAxis = m
+        syncButtons()
+        return true
     }
 
     /** Cria o painel completo do hunter (usado no retrato): sprites + stats + parar. */
