@@ -10,6 +10,7 @@ import android.graphics.Color
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.net.Uri
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Build
@@ -17,6 +18,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.util.Log
 import android.view.Gravity
@@ -64,6 +66,10 @@ class MainActivity : Activity() {
         const val W = 240
         const val H = 160
         const val OPEN_ROM = 1
+        // Escolha da pasta de ROMs (SAF tree, persistida).
+        const val OPEN_TREE = 2
+        const val PREFS = "auroragba"
+        const val KEY_ROM_FOLDER = "rom_folder_uri"
         const val TAG = "AuroraGBA"
         // Taxa de quadros real do GBA (≈ 16,78 MHz / 280896 ciclos). Anunciada ao
         // compositor pra ele casar a cadência num painel de refresh alto.
@@ -88,6 +94,11 @@ class MainActivity : Activity() {
     @Volatile private var padButtons = 0
     @Volatile private var padAxis = 0
     private val pendingRom = AtomicReference<ByteArray?>(null)
+
+    // Pasta de ROMs (SAF tree). Escolhida uma vez e persistida nas prefs; o app
+    // lista as ROMs dela (biblioteca) e não precisa mais re-escolher o arquivo
+    // a cada abertura. `null` = ainda não configurada.
+    private var romFolderUri: Uri? = null
 
     // Comandos do menu, executados na thread GL (acesso ao ponteiro): salvar
     // estado no slot pedido (-1 = nenhum) e carregar estado (bytes lidos do
@@ -187,7 +198,10 @@ class MainActivity : Activity() {
         // Monta o layout conforme a orientação atual (rebuild em rotação).
         applyLayout()
 
-        if (savedInstanceState == null) openRomPicker()
+        // Recupera a pasta de ROMs persistida (se a permissão ainda valer).
+        romFolderUri = loadRomFolder()
+
+        if (savedInstanceState == null) chooseRom()
     }
 
     // ── Controle físico (gamepad) ────────────────────────────────────────────
@@ -410,12 +424,91 @@ class MainActivity : Activity() {
         audio = null
     }
 
-    private fun openRomPicker() {
+    /**
+     * Ponto de entrada do "Carregar ROM". Se há uma pasta de ROMs configurada,
+     * lista as `.gba` dela num diálogo (a biblioteca) + opções de trocar a pasta
+     * ou abrir um arquivo avulso. Sem pasta ainda, abre direto o seletor de pasta.
+     */
+    private fun chooseRom() {
+        val folder = romFolderUri
+        if (folder == null) {
+            pickRomFolder()
+            return
+        }
+        val roms = listRoms(folder)
+        val labels = roms.map { it.first }.toMutableList()
+        labels.add("📁 Trocar pasta de ROMs…")
+        labels.add("📄 Abrir arquivo avulso…")
+        val title = if (roms.isEmpty()) "Pasta vazia (sem .gba)" else "ROMs (${roms.size})"
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setItems(labels.toTypedArray()) { _, which ->
+                when {
+                    which < roms.size -> loadRomFromUri(roms[which].second)
+                    which == roms.size -> pickRomFolder()
+                    else -> openSingleFilePicker()
+                }
+            }
+            .show()
+    }
+
+    /** Abre o seletor de PASTA (SAF tree). A permissão é persistida no resultado. */
+    private fun pickRomFolder() {
+        startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), OPEN_TREE)
+    }
+
+    /** Seletor de UM arquivo (fallback, pra ROMs fora da pasta). */
+    private fun openSingleFilePicker() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
         }
         startActivityForResult(intent, OPEN_ROM)
+    }
+
+    /** Lista as ROMs `.gba` da pasta (SAF tree), ordenadas por nome. */
+    private fun listRoms(folder: Uri): List<Pair<String, Uri>> {
+        val out = mutableListOf<Pair<String, Uri>>()
+        val treeId = DocumentsContract.getTreeDocumentId(folder)
+        val children = DocumentsContract.buildChildDocumentsUriUsingTree(folder, treeId)
+        val proj = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+        )
+        try {
+            contentResolver.query(children, proj, null, null, null)?.use { c ->
+                while (c.moveToNext()) {
+                    val name = c.getString(1) ?: continue
+                    if (!name.lowercase(Locale.ROOT).endsWith(".gba")) continue
+                    out.add(name to DocumentsContract.buildDocumentUriUsingTree(folder, c.getString(0)))
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "falha ao listar ROMs da pasta: $e")
+        }
+        out.sortBy { it.first.lowercase(Locale.ROOT) }
+        return out
+    }
+
+    /** Lê os bytes de uma ROM (URI do SAF) e entrega pra thread GL carregar. */
+    private fun loadRomFromUri(uri: Uri) {
+        val bytes = try {
+            contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        } catch (e: Exception) {
+            Log.w(TAG, "falha ao ler ROM: $e"); null
+        }
+        if (bytes != null) pendingRom.set(bytes) else toast("Não consegui ler a ROM")
+    }
+
+    private fun saveRomFolder(uri: Uri) =
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_ROM_FOLDER, uri.toString()).apply()
+
+    /** Recupera a pasta persistida, só se a permissão de leitura ainda for válida. */
+    private fun loadRomFolder(): Uri? {
+        val s = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_ROM_FOLDER, null) ?: return null
+        val uri = Uri.parse(s)
+        val ok = contentResolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }
+        return if (ok) uri else null
     }
 
     // ── Menu + saves ─────────────────────────────────────────────────────────
@@ -439,7 +532,7 @@ class MainActivity : Activity() {
             .setTitle("Menu")
             .setItems(items.toTypedArray()) { _, which ->
                 when (items[which]) {
-                    "Carregar ROM" -> openRomPicker()
+                    "Carregar ROM" -> chooseRom()
                     "Salvar estado" -> saveStateFromMenu()
                     "Carregar estado" -> loadStateFromMenu()
                     "📸 Captura de tela" -> takeScreenshot()
@@ -648,10 +741,23 @@ class MainActivity : Activity() {
     @Deprecated("API clássica; suficiente para este app de tela única")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == OPEN_ROM && resultCode == RESULT_OK) {
-            val uri = data?.data ?: return
-            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return
-            pendingRom.set(bytes)
+        if (resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        when (requestCode) {
+            OPEN_ROM -> loadRomFromUri(uri)
+            OPEN_TREE -> {
+                // Persiste o acesso à pasta (sobrevive a reboot/reabertura).
+                val flags = data.flags and
+                    (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                try {
+                    contentResolver.takePersistableUriPermission(uri, flags)
+                } catch (e: Exception) {
+                    Log.w(TAG, "não consegui persistir a permissão da pasta: $e")
+                }
+                romFolderUri = uri
+                saveRomFolder(uri)
+                chooseRom() // já abre a lista da pasta recém-escolhida
+            }
         }
     }
 
