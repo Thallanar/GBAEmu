@@ -518,11 +518,11 @@ class MainActivity : Activity() {
     }
 
     /**
-     * Acha (ou cria) um documento filho chamado [name] dentro de [parent] (URI de
-     * documento no tree). Retorna a URI do filho, ou `null` em falha. Usado pra
-     * resolver a subpasta `saves/` e o arquivo `<code>.sav` do espelho.
+     * Acha um documento filho chamado [name] dentro de [parent] (URI de documento
+     * no tree), **sem criar**. Retorna a URI do filho, ou `null` se não existe (ou
+     * em falha). Usado tanto pelo espelho quanto pela importação.
      */
-    private fun findOrCreateChild(parent: Uri, name: String, mime: String): Uri? {
+    private fun findChild(parent: Uri, name: String): Uri? {
         val tree = romFolderUri ?: return null
         val parentId = DocumentsContract.getDocumentId(parent)
         val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parentId)
@@ -541,10 +541,24 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            return DocumentsContract.createDocument(contentResolver, parent, mime, name)
         } catch (e: Exception) {
-            Log.w(TAG, "espelho: falha em findOrCreateChild($name): $e")
-            return null
+            Log.w(TAG, "espelho: falha em findChild($name): $e")
+        }
+        return null
+    }
+
+    /**
+     * Acha (ou cria) um documento filho chamado [name] dentro de [parent]. Retorna
+     * a URI do filho, ou `null` em falha. Usado pra resolver/criar a subpasta
+     * `saves/` e o arquivo `<code>.sav` do espelho.
+     */
+    private fun findOrCreateChild(parent: Uri, name: String, mime: String): Uri? {
+        findChild(parent, name)?.let { return it }
+        return try {
+            DocumentsContract.createDocument(contentResolver, parent, mime, name)
+        } catch (e: Exception) {
+            Log.w(TAG, "espelho: falha ao criar $name: $e")
+            null
         }
     }
 
@@ -577,6 +591,25 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             Log.w(TAG, "espelho: falha ao gravar saves/$code.sav: $e")
             savMirrorUri = null // força re-resolver na próxima (URI pode ter expirado)
+        }
+    }
+
+    /**
+     * Lê o `.sav` do espelho visível (`saves/<code>.sav`) **sem criar nada**, pra
+     * importar um save trazido do PC/outro aparelho. `null` se não há pasta de
+     * ROMs, se o arquivo não existe, ou em falha de leitura. Não mexe no cache do
+     * espelho (é só leitura pontual no load).
+     */
+    private fun importMirrorSav(code: String): ByteArray? {
+        val tree = romFolderUri ?: return null
+        val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+        val savesDir = findChild(root, "saves") ?: return null
+        val file = findChild(savesDir, "$code.sav") ?: return null
+        return try {
+            contentResolver.openInputStream(file)?.use { it.readBytes() }
+        } catch (e: Exception) {
+            Log.w(TAG, "import: falha ao ler saves/$code.sav: $e")
+            null
         }
     }
 
@@ -855,6 +888,21 @@ class MainActivity : Activity() {
 
         if (!NativeBridge.hasSave(handle)) return
         val f = savFile(code)
+        // Sem save de trabalho no filesDir: tenta semear do espelho visível — é o
+        // caminho de importação (save trazido do PC/outro aparelho, largado na pasta
+        // saves/ com o nome <code>.sav). Só semeia quando NÃO há save local, pra
+        // nunca atropelar uma partida em andamento.
+        if (!f.exists()) {
+            importMirrorSav(code)?.let { imported ->
+                try {
+                    f.writeBytes(imported)
+                    Log.i(TAG, "save importado do espelho (saves/$code.sav, ${imported.size} bytes)")
+                    toast("Save importado da pasta")
+                } catch (e: Exception) {
+                    Log.w(TAG, "falha ao semear .sav do espelho: $e")
+                }
+            }
+        }
         if (f.exists()) {
             val ok = NativeBridge.loadBackup(handle, f.readBytes())
             Log.i(TAG, "save .sav carregado=$ok (${f.name})")
