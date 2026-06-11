@@ -596,21 +596,32 @@ class MainActivity : Activity() {
 
     /**
      * Lê o `.sav` do espelho visível (`saves/<code>.sav`) **sem criar nada**, pra
-     * importar um save trazido do PC/outro aparelho. `null` se não há pasta de
-     * ROMs, se o arquivo não existe, ou em falha de leitura. Não mexe no cache do
-     * espelho (é só leitura pontual no load).
+     * importar um save trazido do PC/outro aparelho. Devolve os bytes + o
+     * `lastModified` do arquivo (pra decidir quem é mais novo); `null` se não há
+     * pasta de ROMs, se o arquivo não existe, ou em falha de leitura. Não mexe no
+     * cache do espelho (é só leitura pontual no load).
      */
-    private fun importMirrorSav(code: String): ByteArray? {
+    private fun importMirrorSav(code: String): Pair<ByteArray, Long>? {
         val tree = romFolderUri ?: return null
         val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
         val savesDir = findChild(root, "saves") ?: return null
         val file = findChild(savesDir, "$code.sav") ?: return null
-        return try {
+        val bytes = try {
             contentResolver.openInputStream(file)?.use { it.readBytes() }
         } catch (e: Exception) {
             Log.w(TAG, "import: falha ao ler saves/$code.sav: $e")
             null
-        }
+        } ?: return null
+        return bytes to lastModifiedOf(file)
+    }
+
+    /** `lastModified` (epoch ms) de um documento SAF; 0 se indisponível. */
+    private fun lastModifiedOf(doc: Uri): Long = try {
+        contentResolver.query(
+            doc, arrayOf(DocumentsContract.Document.COLUMN_LAST_MODIFIED), null, null, null,
+        )?.use { if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else 0L } ?: 0L
+    } catch (e: Exception) {
+        0L
     }
 
     // ── Menu + saves ─────────────────────────────────────────────────────────
@@ -888,19 +899,32 @@ class MainActivity : Activity() {
 
         if (!NativeBridge.hasSave(handle)) return
         val f = savFile(code)
-        // Sem save de trabalho no filesDir: tenta semear do espelho visível — é o
-        // caminho de importação (save trazido do PC/outro aparelho, largado na pasta
-        // saves/ com o nome <code>.sav). Só semeia quando NÃO há save local, pra
-        // nunca atropelar uma partida em andamento.
-        if (!f.exists()) {
-            importMirrorSav(code)?.let { imported ->
-                try {
-                    f.writeBytes(imported)
-                    Log.i(TAG, "save importado do espelho (saves/$code.sav, ${imported.size} bytes)")
-                    toast("Save importado da pasta")
+        // Reconcilia o save de trabalho (filesDir) com o espelho visível (saves/),
+        // pra importar um save trazido do PC/outro aparelho. Regra:
+        //   - sem save local → importa o espelho (semeia);
+        //   - bytes diferentes E espelho mais novo → importa (o save de fora venceu);
+        //   - bytes iguais, ou espelho mais antigo/igual → mantém o local.
+        // O teste de bytes é o que protege contra falso positivo: o próprio app
+        // grava o espelho logo após o filesDir (uns ms mais novo), mas com conteúdo
+        // idêntico — então nunca reimportamos o nosso próprio espelho.
+        importMirrorSav(code)?.let { (mBytes, mTime) ->
+            val local = if (f.exists()) f.readBytes() else null
+            val differ = local == null || !mBytes.contentEquals(local)
+            val mirrorWins = local == null || mTime > f.lastModified()
+            when {
+                differ && mirrorWins -> try {
+                    f.writeBytes(mBytes)
+                    val msg = if (local == null) "Save importado da pasta" else "Save mais novo importado da pasta"
+                    Log.i(TAG, "$msg (saves/$code.sav, ${mBytes.size} bytes, mtime=$mTime)")
+                    toast(msg)
                 } catch (e: Exception) {
-                    Log.w(TAG, "falha ao semear .sav do espelho: $e")
+                    Log.w(TAG, "falha ao importar .sav do espelho: $e")
                 }
+                differ -> Log.i(
+                    TAG,
+                    "espelho difere mas é mais antigo/igual (mtime=$mTime ≤ ${f.lastModified()}); mantido o save local",
+                )
+                else -> Unit // iguais: nada a fazer
             }
         }
         if (f.exists()) {
