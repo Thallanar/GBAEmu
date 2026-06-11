@@ -114,6 +114,12 @@ class MainActivity : Activity() {
     // ao carregar a ROM, lido na UI pra montar os caminhos.
     @Volatile private var currentGameCode: String? = null
 
+    // Cache da URI do espelho do `.sav` (em `<pastaDeROMs>/saves/<code>.sav`, SAF).
+    // Resolver/criar a subpasta + documento custa I/O via ContentResolver; fazemos
+    // uma vez por jogo. Invalidado ao trocar a pasta de ROMs. Acessado na thread GL.
+    private var savMirrorUri: Uri? = null
+    private var savMirrorCode: String? = null
+
     // Ponteiro nativo: criado pela thread GL, liberado em onDestroy (vive entre
     // recriações do contexto — pause/resume não reseta o jogo).
     @Volatile private var handle = 0L
@@ -511,6 +517,69 @@ class MainActivity : Activity() {
         return if (ok) uri else null
     }
 
+    /**
+     * Acha (ou cria) um documento filho chamado [name] dentro de [parent] (URI de
+     * documento no tree). Retorna a URI do filho, ou `null` em falha. Usado pra
+     * resolver a subpasta `saves/` e o arquivo `<code>.sav` do espelho.
+     */
+    private fun findOrCreateChild(parent: Uri, name: String, mime: String): Uri? {
+        val tree = romFolderUri ?: return null
+        val parentId = DocumentsContract.getDocumentId(parent)
+        val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parentId)
+        try {
+            contentResolver.query(
+                children,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                ),
+                null, null, null,
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    if (c.getString(1) == name) {
+                        return DocumentsContract.buildDocumentUriUsingTree(tree, c.getString(0))
+                    }
+                }
+            }
+            return DocumentsContract.createDocument(contentResolver, parent, mime, name)
+        } catch (e: Exception) {
+            Log.w(TAG, "espelho: falha em findOrCreateChild($name): $e")
+            return null
+        }
+    }
+
+    /**
+     * URI do `.sav` espelhado em `<pastaDeROMs>/saves/<code>.sav` (cacheada por
+     * jogo). Resolve/cria a subpasta `saves/` e o arquivo na primeira vez; depois
+     * só devolve o cache. `null` se não há pasta de ROMs ou se algo falhou.
+     */
+    private fun mirrorSavUri(code: String): Uri? {
+        val tree = romFolderUri ?: return null
+        if (savMirrorCode == code && savMirrorUri != null) return savMirrorUri
+        val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+        val savesDir = findOrCreateChild(root, "saves", DocumentsContract.Document.MIME_TYPE_DIR) ?: return null
+        savMirrorUri = findOrCreateChild(savesDir, "$code.sav", "application/octet-stream")
+        savMirrorCode = code
+        return savMirrorUri
+    }
+
+    /**
+     * Espelha o `.sav` na pasta visível `saves/` (SAF), pra backup/portabilidade.
+     * **Best-effort**: o save de trabalho fica no `filesDir` (já gravado antes
+     * desta chamada); qualquer falha aqui só loga e nunca afeta o jogo. Chamado
+     * na thread GL — o I/O caro (criar pasta/arquivo) acontece só na 1ª vez.
+     */
+    private fun mirrorSav(code: String, bytes: ByteArray) {
+        val uri = mirrorSavUri(code) ?: return
+        try {
+            contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
+            Log.i(TAG, "save .sav espelhado (saves/$code.sav)")
+        } catch (e: Exception) {
+            Log.w(TAG, "espelho: falha ao gravar saves/$code.sav: $e")
+            savMirrorUri = null // força re-resolver na próxima (URI pode ter expirado)
+        }
+    }
+
     // ── Menu + saves ─────────────────────────────────────────────────────────
 
     /**
@@ -756,6 +825,8 @@ class MainActivity : Activity() {
                 }
                 romFolderUri = uri
                 saveRomFolder(uri)
+                savMirrorUri = null // a subpasta saves/ vive na pasta antiga; re-resolve
+                savMirrorCode = null
                 chooseRom() // já abre a lista da pasta recém-escolhida
             }
         }
@@ -817,13 +888,17 @@ class MainActivity : Activity() {
     private fun flushBackup() {
         val code = currentGameCode ?: return
         if (handle == 0L || !NativeBridge.backupDirty(handle)) return
+        val bytes = NativeBridge.saveBackup(handle)
         try {
-            savFile(code).writeBytes(NativeBridge.saveBackup(handle))
+            savFile(code).writeBytes(bytes)
             NativeBridge.clearBackupDirty(handle)
             Log.i(TAG, "save .sav gravado ($code)")
         } catch (e: Exception) {
             Log.e(TAG, "falha ao gravar .sav: $e")
+            return // sem o save de trabalho, não adianta espelhar
         }
+        // Cópia visível pra backup/portabilidade (best-effort).
+        mirrorSav(code, bytes)
     }
 
     private fun doSaveState(slot: Int) {
