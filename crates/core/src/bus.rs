@@ -44,6 +44,17 @@ pub struct Bus {
     #[cfg_attr(feature = "save-states", serde(with = "crate::boxed_bytes"))]
     pub oam: Box<[u8; 0x400]>, // 1 KB
     pub cartridge: Cartridge,
+
+    /// Ciclos decorridos mas ainda não entregues aos timers (batch por evento,
+    /// espelha `Gba::ppu_pending`). Reconstruído na carga de save state (`skip`):
+    /// zero força um flush imediato no próximo `step`, que recalcula a contagem.
+    #[cfg_attr(feature = "save-states", serde(skip))]
+    timer_pending: u32,
+    /// Ciclos até o próximo overflow de timer. Quando ≤0, fazemos o flush
+    /// (`flush_timers`) com `timer_pending` de uma vez. Ver
+    /// [`Timers::cycles_until_event`](crate::timer::Timers::cycles_until_event).
+    #[cfg_attr(feature = "save-states", serde(skip))]
+    timer_countdown: i64,
 }
 
 impl Bus {
@@ -61,7 +72,51 @@ impl Bus {
             vram: Box::new([0; 0x18000]),
             oam: Box::new([0; 0x400]),
             cartridge: Cartridge::default(),
+            timer_pending: 0,
+            timer_countdown: 0,
         }
+    }
+
+    // ───────────────────────── Timers (batch) ─────────────────────────
+
+    /// Endereços dos registradores de timer (TM0..TM3, counter + control).
+    const TIMER_REGS: std::ops::RangeInclusive<u32> = 0x0400_0100..=0x0400_010F;
+
+    /// Avança o relógio dos timers por `cycles`, em batch: só toca de fato nos
+    /// timers quando a contagem até o próximo overflow zera. Na imensa maioria
+    /// das instruções isto é só dois inteiros — é daí que vem o ganho (antes
+    /// `Timers::tick` rodava o laço de 4 unidades ~280k×/frame).
+    #[inline]
+    pub fn step_timers(&mut self, cycles: u32) {
+        self.timer_pending += cycles;
+        self.timer_countdown -= cycles as i64;
+        if self.timer_countdown <= 0 {
+            self.flush_timers();
+        }
+    }
+
+    /// Processa os ciclos pendentes dos timers **agora** (catch-up): tica o
+    /// acumulado, alimenta o Direct Sound nos overflows, levanta as IRQs de
+    /// timer e recalcula a contagem. Chamado quando a contagem zera e antes de
+    /// qualquer leitura/escrita de registrador de timer (pra dar o counter
+    /// exato). Como a contagem para no 1º overflow, um flush processa no máximo
+    /// um overflow por timer — sem agrupar amostras do Direct Sound, então o
+    /// stream de áudio é o mesmo do tick por-instrução.
+    fn flush_timers(&mut self) {
+        let pending = std::mem::take(&mut self.timer_pending);
+        if pending > 0 {
+            let t = self.io.timers.tick(pending);
+            // Direct Sound: cada overflow dos timers 0/1 avança 1 amostra da FIFO.
+            for (i, &count) in t.snd_overflows.iter().enumerate() {
+                for _ in 0..count {
+                    self.apu.on_timer_overflow(i as u8);
+                }
+            }
+            if t.irqs != 0 {
+                self.io.raise(t.irqs);
+            }
+        }
+        self.timer_countdown = self.io.timers.cycles_until_event() as i64;
     }
 
     // ───────────────────── reads ─────────────────────
@@ -81,6 +136,12 @@ impl Bus {
                 } else if addr < 0x0400_00B0 {
                     self.apu.read_u8(addr) // registradores de som (0x60-0xAF)
                 } else {
+                    // Ler um counter de timer exige o valor atual: faz catch-up
+                    // dos ciclos pendentes antes (avança o counter sem overflow,
+                    // pois ainda não chegamos ao próximo evento).
+                    if Self::TIMER_REGS.contains(&addr) {
+                        self.flush_timers();
+                    }
                     self.io.read_u8(addr)
                 }
             }
@@ -219,6 +280,12 @@ impl Bus {
                     self.ppu.write_u8(addr, val);
                 } else if addr < 0x0400_00B0 {
                     self.apu.write_u8(addr, val); // registradores de som (0x60-0xAF)
+                } else if Self::TIMER_REGS.contains(&addr) {
+                    // Catch-up sob a config ANTIGA, aplica a escrita, e ressincroniza
+                    // a contagem (mudou reload/prescaler/enable → muda o evento).
+                    self.flush_timers();
+                    self.io.write_u8(addr, val);
+                    self.timer_countdown = self.io.timers.cycles_until_event() as i64;
                 } else {
                     self.io.write_u8(addr, val);
                 }
