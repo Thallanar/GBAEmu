@@ -23,6 +23,7 @@ import android.view.Gravity
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -64,6 +65,9 @@ class MainActivity : Activity() {
         const val H = 160
         const val OPEN_ROM = 1
         const val TAG = "AuroraGBA"
+        // Taxa de quadros real do GBA (≈ 16,78 MHz / 280896 ciclos). Anunciada ao
+        // compositor pra ele casar a cadência num painel de refresh alto.
+        const val GBA_FPS = 59.7275f
         // Grava o .sav periodicamente quando há alteração (~5 s a 60 fps).
         const val FLUSH_EVERY_FRAMES = 300
         // Frames de emulação por draw durante a caça (acelera o hunt; ~8× a 60Hz).
@@ -147,6 +151,15 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        // Pacing (Etapa 2, raso — zero toque no áudio/loop): avisa o sistema que
+        // produzimos ~59,73 fps de cadência fixa. Num painel de 120 Hz o compositor
+        // passa a casar isso (cai pra 60 Hz seamless ou paceia uniforme), matando
+        // o batimento não-inteiro (120/59,73 = 2,009) que vira a travadinha cíclica
+        // no scroll. `preferredRefreshRate` na janela é o fallback amplo (API 21+);
+        // o sinal preciso é o `Surface.setFrameRate` no onSurfaceChanged (API 30+).
+        window.attributes = window.attributes.apply { preferredRefreshRate = GBA_FPS }
+        logRefresh("onCreate")
 
         glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(2)
@@ -624,6 +637,14 @@ class MainActivity : Activity() {
     private fun toast(msg: String) =
         runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
 
+    /// Loga o refresh real do display (logcat -s AuroraGBA) — pra confirmarmos
+    /// o que o aparelho fez com o pedido de cadência. Só observabilidade.
+    private fun logRefresh(phase: String) {
+        val display = if (Build.VERSION.SDK_INT >= 30) display else windowManager.defaultDisplay
+        val hz = display?.refreshRate ?: 0f
+        Log.i(TAG, "pacing[$phase]: refresh do display = %.3f Hz (alvo %.4f fps)".format(hz, GBA_FPS))
+    }
+
     @Deprecated("API clássica; suficiente para este app de tela única")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
@@ -794,6 +815,16 @@ class MainActivity : Activity() {
             val vw = (W * scale).toInt()
             val vh = (H * scale).toInt()
             GLES20.glViewport((width - vw) / 2, (height - vh) / 2, vw, vh)
+
+            // Sinal preciso de cadência: avisa o compositor que esta surface
+            // produz ~59,73 fps fixos. FIXED_SOURCE = "não dá pra reamostrar, casa
+            // o display com isso". Surface válida aqui (estamos no callback do GL).
+            if (Build.VERSION.SDK_INT >= 30) {
+                glView.holder.surface?.setFrameRate(
+                    GBA_FPS, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE
+                )
+                logRefresh("onSurfaceChanged")
+            }
         }
 
         override fun onDrawFrame(gl: GL10?) {
