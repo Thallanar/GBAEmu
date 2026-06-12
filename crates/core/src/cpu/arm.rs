@@ -38,7 +38,7 @@ pub(crate) fn decode(instr: u32) -> Handler {
     match (instr >> 25) & 0b111 {
         0b101 => h_branch,
         0b000 | 0b001 => decode_group_000(instr),
-        0b010 | 0b011 => exec_single_data_transfer,
+        0b010 | 0b011 => decode_sdt(instr),
         0b100 => exec_block_data_transfer,
         0b111 => {
             // SWI: bits 27..24 = 1111. Coprocessor (não usado no GBA) também cai aqui.
@@ -68,9 +68,6 @@ fn h_multiply_long(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
 }
 fn h_psr_transfer(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
     exec_psr_transfer(cpu, instr)
-}
-fn h_data_processing(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
-    exec_data_processing(cpu, instr)
 }
 fn h_coprocessor(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
     let pc = cpu.regs.pc().wrapping_sub(8);
@@ -155,30 +152,85 @@ fn decode_group_000(instr: u32) -> Handler {
     if (0x8..=0xB).contains(&opcode) && !set_flags {
         h_psr_transfer
     } else {
-        h_data_processing
+        decode_dp(instr)
+    }
+}
+
+/// Monomorfiza o data processing (Fase 10, etapa 2): opcode, modo do operand2
+/// (imediato vs. registrador) e S viram const — o `match` de 16 vias, o branch
+/// do shifter e os writes condicionais de flags saem do caminho de execução.
+fn decode_dp(instr: u32) -> Handler {
+    let imm = (instr & (1 << 25)) != 0;
+    let s = (instr & (1 << 20)) != 0;
+    match (imm, s) {
+        (false, false) => decode_dp_op::<false, false>(instr),
+        (false, true) => decode_dp_op::<false, true>(instr),
+        (true, false) => decode_dp_op::<true, false>(instr),
+        (true, true) => decode_dp_op::<true, true>(instr),
+    }
+}
+
+fn decode_dp_op<const IMM: bool, const S: bool>(instr: u32) -> Handler {
+    match (instr >> 21) & 0xF {
+        0x0 => exec_data_processing::<0x0, IMM, S>,
+        0x1 => exec_data_processing::<0x1, IMM, S>,
+        0x2 => exec_data_processing::<0x2, IMM, S>,
+        0x3 => exec_data_processing::<0x3, IMM, S>,
+        0x4 => exec_data_processing::<0x4, IMM, S>,
+        0x5 => exec_data_processing::<0x5, IMM, S>,
+        0x6 => exec_data_processing::<0x6, IMM, S>,
+        0x7 => exec_data_processing::<0x7, IMM, S>,
+        0x8 => exec_data_processing::<0x8, IMM, S>,
+        0x9 => exec_data_processing::<0x9, IMM, S>,
+        0xA => exec_data_processing::<0xA, IMM, S>,
+        0xB => exec_data_processing::<0xB, IMM, S>,
+        0xC => exec_data_processing::<0xC, IMM, S>,
+        0xD => exec_data_processing::<0xD, IMM, S>,
+        0xE => exec_data_processing::<0xE, IMM, S>,
+        _ => exec_data_processing::<0xF, IMM, S>,
+    }
+}
+
+/// Monomorfiza o single data transfer por (L, B, modo do offset).
+fn decode_sdt(instr: u32) -> Handler {
+    // bit 25: 0=imediato, 1=registrador (invertido vs. data-processing).
+    let imm = (instr & (1 << 25)) == 0;
+    let byte = (instr & (1 << 22)) != 0;
+    let load = (instr & (1 << 20)) != 0;
+    match (load, byte, imm) {
+        (false, false, false) => exec_single_data_transfer::<false, false, false>,
+        (false, false, true) => exec_single_data_transfer::<false, false, true>,
+        (false, true, false) => exec_single_data_transfer::<false, true, false>,
+        (false, true, true) => exec_single_data_transfer::<false, true, true>,
+        (true, false, false) => exec_single_data_transfer::<true, false, false>,
+        (true, false, true) => exec_single_data_transfer::<true, false, true>,
+        (true, true, false) => exec_single_data_transfer::<true, true, false>,
+        (true, true, true) => exec_single_data_transfer::<true, true, true>,
     }
 }
 
 // ────────────────────── Data Processing ──────────────────────
 
-fn exec_data_processing(cpu: &mut Cpu, instr: u32) {
-    let imm_operand = (instr & (1 << 25)) != 0;
-    let opcode = (instr >> 21) & 0xF;
-    let set_flags = (instr & (1 << 20)) != 0;
+fn exec_data_processing<const OPCODE: u32, const IMM: bool, const S: bool>(
+    cpu: &mut Cpu,
+    _bus: &mut Bus,
+    instr: u32,
+) {
+    let set_flags = S;
     let rn = ((instr >> 16) & 0xF) as usize;
     let rd = ((instr >> 12) & 0xF) as usize;
 
     let carry_in = cpu.cpsr.c();
-    let (op2, shifter_carry) = compute_operand2(cpu, instr, imm_operand, carry_in);
+    let (op2, shifter_carry) = compute_operand2::<IMM>(cpu, instr, carry_in);
 
     let mut a = cpu.regs.get(rn);
     // Rn=R15 com shift por registrador → lê PC+12 (+4 a mais do +8 normal).
-    if rn == 15 && !imm_operand && (instr & (1 << 4)) != 0 {
+    if rn == 15 && !IMM && (instr & (1 << 4)) != 0 {
         a = a.wrapping_add(4);
     }
 
     use OpResult::*;
-    let result = match opcode {
+    let result = match OPCODE {
         0x0 => Logical(a & op2),                          // AND
         0x1 => Logical(a ^ op2),                          // EOR
         0x2 => Arith(sub_with_flags(a, op2)),             // SUB
@@ -267,8 +319,8 @@ fn write_rd(cpu: &mut Cpu, rd: usize, value: u32) {
     }
 }
 
-fn compute_operand2(cpu: &Cpu, instr: u32, imm: bool, carry_in: bool) -> (u32, bool) {
-    if imm {
+fn compute_operand2<const IMM: bool>(cpu: &Cpu, instr: u32, carry_in: bool) -> (u32, bool) {
+    if IMM {
         let rotate = ((instr >> 8) & 0xF) * 2;
         let value = (instr & 0xFF).rotate_right(rotate);
         let carry = if rotate == 0 {
@@ -419,17 +471,18 @@ fn exec_multiply_long(cpu: &mut Cpu, instr: u32) {
 ///   B: 0=word, 1=byte
 ///   W: writeback (em pre-index) ou "T" (user-mode em post-index)
 ///   L: 0=store, 1=load
-fn exec_single_data_transfer(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
-    let imm = (instr & (1 << 25)) == 0; // bit 25: 0=imediato, 1=registrador (invertido vs. data-proc)
+fn exec_single_data_transfer<const LOAD: bool, const BYTE: bool, const IMM: bool>(
+    cpu: &mut Cpu,
+    bus: &mut Bus,
+    instr: u32,
+) {
     let pre = (instr & (1 << 24)) != 0;
     let up = (instr & (1 << 23)) != 0;
-    let byte = (instr & (1 << 22)) != 0;
     let writeback = (instr & (1 << 21)) != 0;
-    let load = (instr & (1 << 20)) != 0;
     let rn = ((instr >> 16) & 0xF) as usize;
     let rd = ((instr >> 12) & 0xF) as usize;
 
-    let offset = if imm {
+    let offset = if IMM {
         instr & 0xFFF
     } else {
         // Offset = Rm com shift por imediato (sem shift-by-register aqui).
@@ -448,8 +501,8 @@ fn exec_single_data_transfer(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
         base
     };
 
-    if load {
-        let value = if byte {
+    if LOAD {
+        let value = if BYTE {
             bus.read_u8(addr) as u32
         } else {
             // LDR com endereço desalinhado faz ROR para alinhar (quirk do ARMv4).
@@ -465,7 +518,7 @@ fn exec_single_data_transfer(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
         if rd == 15 {
             value = value.wrapping_add(4);
         }
-        if byte {
+        if BYTE {
             bus.write_u8(addr, value as u8);
         } else {
             bus.write_u32(addr & !0x3, value);
@@ -475,7 +528,7 @@ fn exec_single_data_transfer(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
     // Writeback / post-index.
     let final_addr = base.wrapping_add(signed_offset);
     let do_writeback = !pre || writeback;
-    if do_writeback && !(load && rd == rn) {
+    if do_writeback && !(LOAD && rd == rn) {
         if rn == 15 {
             cpu.set_pc_arm(final_addr);
         } else {

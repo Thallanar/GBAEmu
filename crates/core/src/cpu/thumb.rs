@@ -16,107 +16,180 @@ pub fn execute(cpu: &mut Cpu, bus: &mut Bus, instr: u16) {
     decode(instr)(cpu, bus, instr as u32)
 }
 
-/// Resolve a instrução até o handler-folha. Decode hierárquico por prefixo
-/// (bits altos), função **apenas dos bits** — cacheável por endereço de ROM
-/// (ver `DecodeCache` no `cpu/mod.rs`).
+/// Resolve a instrução até o handler-folha **monomorfizado** (Fase 10, etapa
+/// 2): o sub-opcode/flags que antes eram re-extraídos e re-decididos a cada
+/// execução viram parâmetros const — cada slot do cache aponta pra uma versão
+/// especializada, sem `match` interno nem branch por sub-op. Função **apenas
+/// dos bits** — cacheável por endereço de ROM (ver `DecodeCache`).
 pub(crate) fn decode(instr: u16) -> Handler {
     match instr >> 13 {
-        0b000 => {
-            if (instr >> 11) & 0b11 == 0b11 {
-                h_fmt2
-            } else {
-                h_fmt1
-            }
-        }
-        0b001 => h_fmt3,
+        0b000 => match (instr >> 11) & 0b11 {
+            0b00 => fmt1_move_shifted::<0>,
+            0b01 => fmt1_move_shifted::<1>,
+            0b10 => fmt1_move_shifted::<2>,
+            _ => match (instr >> 9) & 0b11 {
+                0b00 => fmt2_add_sub::<false, false>,
+                0b01 => fmt2_add_sub::<false, true>,
+                0b10 => fmt2_add_sub::<true, false>,
+                _ => fmt2_add_sub::<true, true>,
+            },
+        },
+        0b001 => match (instr >> 11) & 0b11 {
+            0b00 => fmt3_mcas_imm::<0>,
+            0b01 => fmt3_mcas_imm::<1>,
+            0b10 => fmt3_mcas_imm::<2>,
+            _ => fmt3_mcas_imm::<3>,
+        },
         0b010 => {
             if (instr >> 10) & 0b111111 == 0b010000 {
-                h_fmt4
+                decode_fmt4(instr)
             } else if (instr >> 10) & 0b111111 == 0b010001 {
-                fmt5_hi_reg
+                match (instr >> 8) & 0b11 {
+                    0b00 => fmt5_hi_reg::<0>,
+                    0b01 => fmt5_hi_reg::<1>,
+                    0b10 => fmt5_hi_reg::<2>,
+                    _ => fmt5_hi_reg::<3>,
+                }
             } else if (instr >> 11) & 0b11111 == 0b01001 {
                 fmt6_pc_relative_load
             } else if (instr >> 9) & 0b1111001 == 0b0101001 {
-                fmt8_load_store_sign_ext
+                // bits: 11 = H, 10 = S
+                match (instr >> 10) & 0b11 {
+                    0b00 => fmt8_load_store_sign_ext::<false, false>,
+                    0b01 => fmt8_load_store_sign_ext::<false, true>,
+                    0b10 => fmt8_load_store_sign_ext::<true, false>,
+                    _ => fmt8_load_store_sign_ext::<true, true>,
+                }
             } else {
-                fmt7_load_store_reg_offset
+                // bits: 11 = L, 10 = B
+                match (instr >> 10) & 0b11 {
+                    0b00 => fmt7_load_store_reg_offset::<false, false>,
+                    0b01 => fmt7_load_store_reg_offset::<false, true>,
+                    0b10 => fmt7_load_store_reg_offset::<true, false>,
+                    _ => fmt7_load_store_reg_offset::<true, true>,
+                }
             }
         }
-        0b011 => fmt9_load_store_imm_offset,
+        // bits: 12 = B, 11 = L
+        0b011 => match (instr >> 11) & 0b11 {
+            0b00 => fmt9_load_store_imm_offset::<false, false>,
+            0b01 => fmt9_load_store_imm_offset::<false, true>,
+            0b10 => fmt9_load_store_imm_offset::<true, false>,
+            _ => fmt9_load_store_imm_offset::<true, true>,
+        },
         0b100 => {
+            let load = (instr >> 11) & 1 != 0;
             if (instr >> 12) & 1 == 0 {
-                fmt10_load_store_halfword
+                if load {
+                    fmt10_load_store_halfword::<true>
+                } else {
+                    fmt10_load_store_halfword::<false>
+                }
+            } else if load {
+                fmt11_sp_relative::<true>
             } else {
-                fmt11_sp_relative
+                fmt11_sp_relative::<false>
             }
         }
         0b101 => {
             if (instr >> 12) & 1 == 0 {
-                h_fmt12
+                if (instr >> 11) & 1 != 0 {
+                    fmt12_load_address::<true>
+                } else {
+                    fmt12_load_address::<false>
+                }
             } else if (instr >> 8) & 0b1111 == 0b0000 {
-                h_fmt13
+                if (instr >> 7) & 1 != 0 {
+                    fmt13_add_to_sp::<true>
+                } else {
+                    fmt13_add_to_sp::<false>
+                }
+            } else if (instr >> 11) & 1 != 0 {
+                fmt14_push_pop::<true>
             } else {
-                fmt14_push_pop
+                fmt14_push_pop::<false>
             }
         }
         0b110 => {
             if (instr >> 12) & 1 == 0 {
-                fmt15_multi_load_store
+                if (instr >> 11) & 1 != 0 {
+                    fmt15_multi_load_store::<true>
+                } else {
+                    fmt15_multi_load_store::<false>
+                }
             } else if (instr >> 8) & 0b1111 == 0b1111 {
                 fmt17_swi
             } else {
-                h_fmt16
+                decode_fmt16(instr)
             }
         }
         0b111 => {
             if (instr >> 12) & 1 == 0 {
-                h_fmt18
+                fmt18_unconditional_branch
+            } else if (instr >> 11) & 1 == 0 {
+                fmt19_long_branch_link::<false>
             } else {
-                h_fmt19
+                fmt19_long_branch_link::<true>
             }
         }
         _ => unreachable!(),
     }
 }
 
-// Shims: assinatura uniforme de [Handler] pros formatos que não usam o bus.
-fn h_fmt1(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
-    fmt1_move_shifted(cpu, i)
+/// Monomorfiza o fmt4 (ALU) pelos 4 bits de opcode.
+fn decode_fmt4(instr: u16) -> Handler {
+    match (instr >> 6) & 0xF {
+        0x0 => fmt4_alu::<0x0>,
+        0x1 => fmt4_alu::<0x1>,
+        0x2 => fmt4_alu::<0x2>,
+        0x3 => fmt4_alu::<0x3>,
+        0x4 => fmt4_alu::<0x4>,
+        0x5 => fmt4_alu::<0x5>,
+        0x6 => fmt4_alu::<0x6>,
+        0x7 => fmt4_alu::<0x7>,
+        0x8 => fmt4_alu::<0x8>,
+        0x9 => fmt4_alu::<0x9>,
+        0xA => fmt4_alu::<0xA>,
+        0xB => fmt4_alu::<0xB>,
+        0xC => fmt4_alu::<0xC>,
+        0xD => fmt4_alu::<0xD>,
+        0xE => fmt4_alu::<0xE>,
+        _ => fmt4_alu::<0xF>,
+    }
 }
-fn h_fmt2(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
-    fmt2_add_sub(cpu, i)
-}
-fn h_fmt3(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
-    fmt3_mcas_imm(cpu, i)
-}
-fn h_fmt4(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
-    fmt4_alu(cpu, i)
-}
-fn h_fmt12(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
-    fmt12_load_address(cpu, i)
-}
-fn h_fmt13(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
-    fmt13_add_to_sp(cpu, i)
-}
-fn h_fmt16(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
-    fmt16_conditional_branch(cpu, i)
-}
-fn h_fmt18(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
-    fmt18_unconditional_branch(cpu, i)
-}
-fn h_fmt19(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
-    fmt19_long_branch_link(cpu, i)
+
+/// Monomorfiza o fmt16 (branch condicional) pela condição — o teste de flags
+/// vira um acesso direto inlinado em vez de `match` sobre o enum.
+fn decode_fmt16(instr: u16) -> Handler {
+    match (instr >> 8) & 0xF {
+        0x0 => fmt16_conditional_branch::<0x0>,
+        0x1 => fmt16_conditional_branch::<0x1>,
+        0x2 => fmt16_conditional_branch::<0x2>,
+        0x3 => fmt16_conditional_branch::<0x3>,
+        0x4 => fmt16_conditional_branch::<0x4>,
+        0x5 => fmt16_conditional_branch::<0x5>,
+        0x6 => fmt16_conditional_branch::<0x6>,
+        0x7 => fmt16_conditional_branch::<0x7>,
+        0x8 => fmt16_conditional_branch::<0x8>,
+        0x9 => fmt16_conditional_branch::<0x9>,
+        0xA => fmt16_conditional_branch::<0xA>,
+        0xB => fmt16_conditional_branch::<0xB>,
+        0xC => fmt16_conditional_branch::<0xC>,
+        0xD => fmt16_conditional_branch::<0xD>,
+        // 0xF = SWI (capturado antes no decode); 0xE é indefinido no ARMv4T —
+        // mantém a semântica antiga (avalia como a condição 0xE = AL).
+        _ => fmt16_conditional_branch::<0xE>,
+    }
 }
 
 // ──────────────── Format 1: Move shifted register ────────────────
 // 000 op(2) imm5(5) Rs(3) Rd(3)
-fn fmt1_move_shifted(cpu: &mut Cpu, i: u32) {
-    let op = (i >> 11) & 0b11;
+fn fmt1_move_shifted<const KIND: u32>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
     let imm5 = (i >> 6) & 0x1F;
     let rs = ((i >> 3) & 7) as usize;
     let rd = (i & 7) as usize;
 
-    let kind = match op {
+    let kind = match KIND {
         0 => ShiftKind::Lsl,
         1 => ShiftKind::Lsr,
         2 => ShiftKind::Asr,
@@ -131,15 +204,13 @@ fn fmt1_move_shifted(cpu: &mut Cpu, i: u32) {
 
 // ──────────────── Format 2: Add/subtract ────────────────
 // 00011 I op Rn/imm3(3) Rs(3) Rd(3)
-fn fmt2_add_sub(cpu: &mut Cpu, i: u32) {
-    let imm = (i & (1 << 10)) != 0;
-    let op = (i & (1 << 9)) != 0; // 0=ADD, 1=SUB
-    let operand2 = if imm { (i >> 6) & 7 } else { cpu.regs.get(((i >> 6) & 7) as usize) };
+fn fmt2_add_sub<const IMM: bool, const SUB: bool>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
+    let operand2 = if IMM { (i >> 6) & 7 } else { cpu.regs.get(((i >> 6) & 7) as usize) };
     let rs = ((i >> 3) & 7) as usize;
     let rd = (i & 7) as usize;
     let a = cpu.regs.get(rs);
 
-    let out = if op { sub_with_flags(a, operand2) } else { add_with_flags(a, operand2) };
+    let out = if SUB { sub_with_flags(a, operand2) } else { add_with_flags(a, operand2) };
     cpu.regs.set(rd, out.value);
     cpu.cpsr.set_nz(out.value);
     cpu.cpsr.set_flag(PsrFlags::C, out.carry);
@@ -148,13 +219,12 @@ fn fmt2_add_sub(cpu: &mut Cpu, i: u32) {
 
 // ──────────────── Format 3: MOV/CMP/ADD/SUB imm ────────────────
 // 001 op(2) Rd(3) imm8(8)
-fn fmt3_mcas_imm(cpu: &mut Cpu, i: u32) {
-    let op = (i >> 11) & 0b11;
+fn fmt3_mcas_imm<const OP: u32>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
     let rd = ((i >> 8) & 7) as usize;
     let imm = i & 0xFF;
     let a = cpu.regs.get(rd);
 
-    match op {
+    match OP {
         0 => { // MOV
             cpu.regs.set(rd, imm);
             cpu.cpsr.set_nz(imm);
@@ -184,15 +254,14 @@ fn fmt3_mcas_imm(cpu: &mut Cpu, i: u32) {
 
 // ──────────────── Format 4: ALU operations ────────────────
 // 010000 op(4) Rs(3) Rd(3)
-fn fmt4_alu(cpu: &mut Cpu, i: u32) {
-    let op = (i >> 6) & 0xF;
+fn fmt4_alu<const OP: u32>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
     let rs = ((i >> 3) & 7) as usize;
     let rd = (i & 7) as usize;
     let a = cpu.regs.get(rd);
     let b = cpu.regs.get(rs);
     let c_in = cpu.cpsr.c();
 
-    let (write, value, set_cv) = match op {
+    let (write, value, set_cv) = match OP {
         0x0 => (true,  a & b, None),                                       // AND
         0x1 => (true,  a ^ b, None),                                       // EOR
         0x2 => (true, shift_op(ShiftKind::Lsl, a, b & 0xFF, c_in, cpu), None), // LSL by reg
@@ -230,8 +299,7 @@ fn shift_op(kind: ShiftKind, v: u32, amount: u32, c_in: bool, cpu: &mut Cpu) -> 
 
 // ──────────────── Format 5: Hi register / BX ────────────────
 // 010001 op(2) H1 H2 Rs(3) Rd(3)
-fn fmt5_hi_reg(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
-    let op = (i >> 8) & 0b11;
+fn fmt5_hi_reg<const OP: u32>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
     let h1 = (i & (1 << 7)) != 0;
     let h2 = (i & (1 << 6)) != 0;
     let rs = (((i >> 3) & 7) as usize) | if h2 { 8 } else { 0 };
@@ -240,7 +308,7 @@ fn fmt5_hi_reg(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
     let b = cpu.regs.get(rs);
     let a = cpu.regs.get(rd);
 
-    match op {
+    match OP {
         0 => { // ADD (não atualiza flags)
             let v = a.wrapping_add(b);
             if rd == 15 { cpu.set_pc_thumb(v); } else { cpu.regs.set(rd, v); }
@@ -278,16 +346,18 @@ fn fmt6_pc_relative_load(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
 
 // ──────────────── Format 7: Load/store with register offset ────────────────
 // 0101 L B 0 Ro(3) Rb(3) Rd(3)
-fn fmt7_load_store_reg_offset(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
-    let load = (i & (1 << 11)) != 0;
-    let byte = (i & (1 << 10)) != 0;
+fn fmt7_load_store_reg_offset<const LOAD: bool, const BYTE: bool>(
+    cpu: &mut Cpu,
+    bus: &mut Bus,
+    i: u32,
+) {
     let ro = ((i >> 6) & 7) as usize;
     let rb = ((i >> 3) & 7) as usize;
     let rd = (i & 7) as usize;
     let addr = cpu.regs.get(rb).wrapping_add(cpu.regs.get(ro));
 
-    if load {
-        let v = if byte {
+    if LOAD {
+        let v = if BYTE {
             bus.read_u8(addr) as u32
         } else {
             let aligned = addr & !3;
@@ -297,7 +367,7 @@ fn fmt7_load_store_reg_offset(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
         cpu.regs.set(rd, v);
     } else {
         let v = cpu.regs.get(rd);
-        if byte {
+        if BYTE {
             bus.write_u8(addr, v as u8);
         } else {
             bus.write_u32(addr & !3, v);
@@ -307,15 +377,13 @@ fn fmt7_load_store_reg_offset(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
 
 // ──────────────── Format 8: Load/store sign-extended byte/halfword ────────────────
 // 0101 H S 1 Ro(3) Rb(3) Rd(3)
-fn fmt8_load_store_sign_ext(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
-    let h = (i & (1 << 11)) != 0;
-    let s = (i & (1 << 10)) != 0;
+fn fmt8_load_store_sign_ext<const H: bool, const S: bool>(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
     let ro = ((i >> 6) & 7) as usize;
     let rb = ((i >> 3) & 7) as usize;
     let rd = (i & 7) as usize;
     let addr = cpu.regs.get(rb).wrapping_add(cpu.regs.get(ro));
 
-    let v = match (s, h) {
+    let v = match (S, H) {
         (false, false) => { // STRH
             let v = cpu.regs.get(rd);
             bus.write_u16(addr & !1, v as u16);
@@ -340,19 +408,21 @@ fn fmt8_load_store_sign_ext(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
 
 // ──────────────── Format 9: Load/store with immediate offset ────────────────
 // 011 B L imm5(5) Rb(3) Rd(3)
-fn fmt9_load_store_imm_offset(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
-    let byte = (i & (1 << 12)) != 0;
-    let load = (i & (1 << 11)) != 0;
+fn fmt9_load_store_imm_offset<const BYTE: bool, const LOAD: bool>(
+    cpu: &mut Cpu,
+    bus: &mut Bus,
+    i: u32,
+) {
     let imm5 = (i >> 6) & 0x1F;
     let rb = ((i >> 3) & 7) as usize;
     let rd = (i & 7) as usize;
 
     // Para word, offset é imm5*4. Para byte, imm5.
-    let offset = if byte { imm5 } else { imm5 * 4 };
+    let offset = if BYTE { imm5 } else { imm5 * 4 };
     let addr = cpu.regs.get(rb).wrapping_add(offset);
 
-    if load {
-        let v = if byte {
+    if LOAD {
+        let v = if BYTE {
             bus.read_u8(addr) as u32
         } else {
             let aligned = addr & !3;
@@ -362,7 +432,7 @@ fn fmt9_load_store_imm_offset(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
         cpu.regs.set(rd, v);
     } else {
         let v = cpu.regs.get(rd);
-        if byte {
+        if BYTE {
             bus.write_u8(addr, v as u8);
         } else {
             bus.write_u32(addr & !3, v);
@@ -372,14 +442,13 @@ fn fmt9_load_store_imm_offset(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
 
 // ──────────────── Format 10: Load/store halfword ────────────────
 // 1000 L imm5(5) Rb(3) Rd(3)
-fn fmt10_load_store_halfword(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
-    let load = (i & (1 << 11)) != 0;
+fn fmt10_load_store_halfword<const LOAD: bool>(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
     let imm5 = (i >> 6) & 0x1F;
     let rb = ((i >> 3) & 7) as usize;
     let rd = (i & 7) as usize;
     let addr = cpu.regs.get(rb).wrapping_add(imm5 * 2);
 
-    if load {
+    if LOAD {
         let aligned = addr & !1;
         let v = bus.read_u16(aligned) as u32;
         cpu.regs.set(rd, if addr & 1 != 0 { v.rotate_right(8) } else { v });
@@ -390,13 +459,12 @@ fn fmt10_load_store_halfword(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
 
 // ──────────────── Format 11: SP-relative load/store ────────────────
 // 1001 L Rd(3) imm8(8)
-fn fmt11_sp_relative(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
-    let load = (i & (1 << 11)) != 0;
+fn fmt11_sp_relative<const LOAD: bool>(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
     let rd = ((i >> 8) & 7) as usize;
     let offset = (i & 0xFF) * 4;
     let addr = cpu.regs.sp().wrapping_add(offset);
 
-    if load {
+    if LOAD {
         let v = bus.read_u32(addr & !3);
         cpu.regs.set(rd, v.rotate_right((addr & 3) * 8));
     } else {
@@ -406,32 +474,29 @@ fn fmt11_sp_relative(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
 
 // ──────────────── Format 12: Load address ────────────────
 // 1010 SP Rd(3) imm8(8)   →   Rd = (SP|PC) + imm8*4
-fn fmt12_load_address(cpu: &mut Cpu, i: u32) {
-    let use_sp = (i & (1 << 11)) != 0;
+fn fmt12_load_address<const USE_SP: bool>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
     let rd = ((i >> 8) & 7) as usize;
     let offset = (i & 0xFF) * 4;
-    let base = if use_sp { cpu.regs.sp() } else { cpu.regs.pc() & !2 };
+    let base = if USE_SP { cpu.regs.sp() } else { cpu.regs.pc() & !2 };
     cpu.regs.set(rd, base.wrapping_add(offset));
 }
 
 // ──────────────── Format 13: Add offset to SP ────────────────
 // 10110000 S imm7(7)
-fn fmt13_add_to_sp(cpu: &mut Cpu, i: u32) {
-    let sub = (i & (1 << 7)) != 0;
+fn fmt13_add_to_sp<const SUB: bool>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
     let offset = (i & 0x7F) * 4;
     let sp = cpu.regs.sp();
-    let v = if sub { sp.wrapping_sub(offset) } else { sp.wrapping_add(offset) };
+    let v = if SUB { sp.wrapping_sub(offset) } else { sp.wrapping_add(offset) };
     cpu.regs.set(13, v);
 }
 
 // ──────────────── Format 14: Push/pop ────────────────
 // 1011 L 10 R reg_list(8)   L: 0=push, 1=pop. R: extra register (LR no push, PC no pop)
-fn fmt14_push_pop(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
-    let load = (i & (1 << 11)) != 0;
+fn fmt14_push_pop<const POP: bool>(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
     let extra = (i & (1 << 8)) != 0;
     let list = (i & 0xFF) as u8;
 
-    if load {
+    if POP {
         // POP: lê em ordem crescente de R0..R7, depois R15 se extra.
         let mut sp = cpu.regs.sp();
         for r in 0..8 {
@@ -468,15 +533,14 @@ fn fmt14_push_pop(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
 
 // ──────────────── Format 15: Multiple load/store ────────────────
 // 1100 L Rb(3) reg_list(8)
-fn fmt15_multi_load_store(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
-    let load = (i & (1 << 11)) != 0;
+fn fmt15_multi_load_store<const LOAD: bool>(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
     let rb = ((i >> 8) & 7) as usize;
     let list = (i & 0xFF) as u8;
     let mut addr = cpu.regs.get(rb);
 
     // Quirk ARMv4: lista vazia transfere R15 e adianta Rb em 0x40.
     if list == 0 {
-        if load {
+        if LOAD {
             let v = bus.read_u32(addr);
             cpu.set_pc_thumb(v);
         } else {
@@ -493,7 +557,7 @@ fn fmt15_multi_load_store(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
         if list & (1 << r) == 0 {
             continue;
         }
-        if load {
+        if LOAD {
             cpu.regs.set(r as usize, bus.read_u32(addr));
         } else {
             // Quirk STM: base na lista e não é o menor → grava o valor com writeback.
@@ -507,15 +571,15 @@ fn fmt15_multi_load_store(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
         addr = addr.wrapping_add(4);
     }
     // Writeback sempre, exceto se LDM e rb está na lista.
-    if !(load && list & (1 << rb) != 0) {
+    if !(LOAD && list & (1 << rb) != 0) {
         cpu.regs.set(rb, final_addr);
     }
 }
 
 // ──────────────── Format 16: Conditional branch ────────────────
 // 1101 cond(4) offset(8 signed)*2
-fn fmt16_conditional_branch(cpu: &mut Cpu, i: u32) {
-    let cond = Condition::from_bits((i >> 8) & 0xF);
+fn fmt16_conditional_branch<const COND: u32>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
+    let cond = Condition::from_bits(COND);
     if !cond.evaluate(cpu.cpsr) {
         return;
     }
@@ -551,7 +615,7 @@ fn fmt17_swi(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
 
 // ──────────────── Format 18: Unconditional branch ────────────────
 // 11100 offset(11 signed)*2
-fn fmt18_unconditional_branch(cpu: &mut Cpu, i: u32) {
+fn fmt18_unconditional_branch(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
     let raw = i & 0x7FF;
     let signed = ((raw << 21) as i32) >> 21;
     let offset = signed.wrapping_mul(2);
@@ -563,9 +627,8 @@ fn fmt18_unconditional_branch(cpu: &mut Cpu, i: u32) {
 // É CODIFICADO em DUAS instruções de 16 bits:
 //   1ª: 11110 offset_hi(11)   →  LR = PC + (offset_hi << 12, sign-ext)
 //   2ª: 11111 offset_lo(11)   →  PC = LR + offset_lo*2; LR = old_PC | 1
-fn fmt19_long_branch_link(cpu: &mut Cpu, i: u32) {
-    let h = (i >> 11) & 1;
-    if h == 0 {
+fn fmt19_long_branch_link<const H: bool>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
+    if !H {
         // primeira metade: ajusta LR.
         let raw = i & 0x7FF;
         let signed = ((raw << 21) as i32) >> 21;
