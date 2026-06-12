@@ -70,6 +70,17 @@ class MainActivity : Activity() {
         const val OPEN_TREE = 2
         const val PREFS = "auroragba"
         const val KEY_ROM_FOLDER = "rom_folder_uri"
+        const val KEY_PAD_MAP = "pad_map"
+
+        // Botões GBA remapeáveis do controle físico (D-pad fica fixo). Os três
+        // arrays andam juntos pelo índice; o pad_map persiste os keycodes nessa ordem.
+        val PAD_BTN_BITS = intArrayOf(Btn.A, Btn.B, Btn.START, Btn.SELECT, Btn.L, Btn.R)
+        val PAD_BTN_NAMES = arrayOf("A", "B", "Start", "Select", "L", "R")
+        val PAD_DEFAULT_KEYCODES = intArrayOf(
+            KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_B,
+            KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_BUTTON_SELECT,
+            KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_R1,
+        )
         const val TAG = "AuroraGBA"
         // Taxa de quadros real do GBA (≈ 16,78 MHz / 280896 ciclos). Anunciada ao
         // compositor pra ele casar a cadência num painel de refresh alto.
@@ -93,6 +104,11 @@ class MainActivity : Activity() {
     @Volatile private var touchMask = 0
     @Volatile private var padButtons = 0
     @Volatile private var padAxis = 0
+
+    // Keycode do controle pra cada botão GBA remapeável (índice = PAD_BTN_BITS).
+    // Carregado das prefs; editável pelo ☰ menu — controles layout Nintendo
+    // reportam A/B no lugar trocado em relação ao GBA. Só mexido na thread de UI.
+    private var padKeycodes = PAD_DEFAULT_KEYCODES.copyOf()
     private val pendingRom = AtomicReference<ByteArray?>(null)
 
     // Pasta de ROMs (SAF tree). Escolhida uma vez e persistida nas prefs; o app
@@ -177,6 +193,7 @@ class MainActivity : Activity() {
         // o sinal preciso é o `Surface.setFrameRate` no onSurfaceChanged (API 30+).
         window.attributes = window.attributes.apply { preferredRefreshRate = GBA_FPS }
         logRefresh("onCreate")
+        loadPadMap()
 
         glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(2)
@@ -222,19 +239,83 @@ class MainActivity : Activity() {
         buttonMask.set(touchMask or padButtons or padAxis)
     }
 
-    /** Bit do botão GBA pra um keycode de gamepad/D-pad (0 se não for nosso). */
+    /** Bit do botão GBA pra um keycode (0 se não mapeado). D-pad fixo; resto via remap. */
     private fun gamepadBit(keyCode: Int): Int = when (keyCode) {
-        KeyEvent.KEYCODE_BUTTON_A -> Btn.A
-        KeyEvent.KEYCODE_BUTTON_B -> Btn.B
-        KeyEvent.KEYCODE_BUTTON_START -> Btn.START
-        KeyEvent.KEYCODE_BUTTON_SELECT -> Btn.SELECT
-        KeyEvent.KEYCODE_BUTTON_L1 -> Btn.L
-        KeyEvent.KEYCODE_BUTTON_R1 -> Btn.R
         KeyEvent.KEYCODE_DPAD_UP -> Btn.UP
         KeyEvent.KEYCODE_DPAD_DOWN -> Btn.DOWN
         KeyEvent.KEYCODE_DPAD_LEFT -> Btn.LEFT
         KeyEvent.KEYCODE_DPAD_RIGHT -> Btn.RIGHT
-        else -> 0
+        else -> {
+            val i = padKeycodes.indexOf(keyCode)
+            if (i >= 0) PAD_BTN_BITS[i] else 0
+        }
+    }
+
+    /** Carrega o mapa do controle das prefs (CSV de keycodes na ordem de PAD_BTN_BITS). */
+    private fun loadPadMap() {
+        val s = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_PAD_MAP, null) ?: return
+        val parts = s.split(",").mapNotNull { it.toIntOrNull() }
+        if (parts.size == PAD_BTN_BITS.size) padKeycodes = parts.toIntArray()
+    }
+
+    private fun savePadMap() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putString(KEY_PAD_MAP, padKeycodes.joinToString(",")).apply()
+    }
+
+    /** Nome curto de um keycode pra UI: "BUTTON_X" (sem o prefixo KEYCODE_). */
+    private fun keycodeName(code: Int) = KeyEvent.keyCodeToString(code).removePrefix("KEYCODE_")
+
+    /**
+     * Lista os botões GBA com o binding atual; tocar um abre a captura. A última
+     * entrada restaura o padrão (A→A, B→B, L1, R1).
+     */
+    private fun remapMenu() {
+        val items = Array(PAD_BTN_BITS.size) { "${PAD_BTN_NAMES[it]} — ${keycodeName(padKeycodes[it])}" } +
+            "Restaurar padrão"
+        AlertDialog.Builder(this)
+            .setTitle("Remapear controle")
+            .setItems(items) { _, which ->
+                if (which < PAD_BTN_BITS.size) {
+                    captureBinding(which)
+                } else {
+                    padKeycodes = PAD_DEFAULT_KEYCODES.copyOf()
+                    savePadMap()
+                    toast("Mapeamento padrão restaurado")
+                }
+            }
+            .show()
+    }
+
+    /**
+     * Captura o próximo botão do controle pro botão GBA [idx]. O diálogo fica com
+     * o foco, então o botão capturado não vaza pro jogo (mesma garantia do
+     * `configuring` do desktop). Voltar cancela. Se o keycode já estava em outro
+     * botão GBA, os dois trocam de lugar (swap) — nunca há keycode duplicado.
+     */
+    private fun captureBinding(idx: Int) {
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Remapear ${PAD_BTN_NAMES[idx]}")
+            .setMessage("Pressione um botão no controle…\n(Voltar cancela)")
+            .create()
+        dialog.setOnKeyListener { d, keyCode, event ->
+            if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+            if (keyCode == KeyEvent.KEYCODE_BACK) {
+                d.dismiss()
+                return@setOnKeyListener true
+            }
+            // Só botões de controle servem (D-pad segue fixo; volume etc. ficam com o sistema).
+            if (!KeyEvent.isGamepadButton(keyCode)) return@setOnKeyListener false
+            val other = padKeycodes.indexOf(keyCode)
+            if (other >= 0 && other != idx) padKeycodes[other] = padKeycodes[idx]
+            padKeycodes[idx] = keyCode
+            savePadMap()
+            toast("${PAD_BTN_NAMES[idx]} → ${keycodeName(keyCode)}")
+            d.dismiss()
+            remapMenu() // volta pra lista atualizada, pra emendar o próximo botão
+            true
+        }
+        dialog.show()
     }
 
     private fun isDpadKey(keyCode: Int) = keyCode == KeyEvent.KEYCODE_DPAD_UP ||
@@ -670,7 +751,10 @@ class MainActivity : Activity() {
                 .show()
             return
         }
-        val items = mutableListOf("Carregar ROM", "Salvar estado", "Carregar estado", "📸 Captura de tela")
+        val items = mutableListOf(
+            "Carregar ROM", "Salvar estado", "Carregar estado",
+            "📸 Captura de tela", "🎮 Remapear controle",
+        )
         if (huntSupported) items.add("✨ Shiny Hunter")
         AlertDialog.Builder(this)
             .setTitle("Menu")
@@ -680,6 +764,7 @@ class MainActivity : Activity() {
                     "Salvar estado" -> saveStateFromMenu()
                     "Carregar estado" -> loadStateFromMenu()
                     "📸 Captura de tela" -> takeScreenshot()
+                    "🎮 Remapear controle" -> remapMenu()
                     "✨ Shiny Hunter" -> startShinyHunter()
                 }
             }
