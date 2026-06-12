@@ -114,6 +114,10 @@ class MainActivity : Activity() {
     // (☰ menu), lido pela thread GL a cada draw. Não persiste: o app sempre
     // abre em velocidade normal.
     @Volatile private var ffSpeed = 1
+
+    // Bytes da última ROM carregada, pro 🔄 Resetar (re-entrega pro pendingRom).
+    // Só tocado na thread de UI.
+    private var lastRom: ByteArray? = null
     private val pendingRom = AtomicReference<ByteArray?>(null)
 
     // Pasta de ROMs (SAF tree). Escolhida uma vez e persistida nas prefs; o app
@@ -589,7 +593,31 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             Log.w(TAG, "falha ao ler ROM: $e"); null
         }
-        if (bytes != null) pendingRom.set(bytes) else toast("Não consegui ler a ROM")
+        if (bytes != null) {
+            lastRom = bytes // guardado pro 🔄 Resetar (recarrega a mesma ROM)
+            pendingRom.set(bytes)
+        } else {
+            toast("Não consegui ler a ROM")
+        }
+    }
+
+    /**
+     * Reset "de console" (recarrega a mesma ROM do zero), com confirmação. O
+     * caminho do [pendingRom] já grava o `.sav` antes de trocar e o recarrega
+     * no boot — só o progresso desde o último save in-game se perde.
+     */
+    private fun resetFromMenu() {
+        val rom = lastRom
+        if (!romLoaded || rom == null) {
+            toast("Carregue uma ROM antes de resetar")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Resetar")
+            .setMessage("Reiniciar o jogo? O progresso desde o último save in-game será perdido.")
+            .setPositiveButton("Resetar") { _, _ -> pendingRom.set(rom) }
+            .setNegativeButton("Cancelar", null)
+            .show()
     }
 
     private fun saveRomFolder(uri: Uri) =
@@ -758,7 +786,7 @@ class MainActivity : Activity() {
         }
         val speedItem = "⏩ Velocidade (${ffSpeed}x)"
         val items = mutableListOf(
-            "Carregar ROM", "Salvar estado", "Carregar estado",
+            "Carregar ROM", "🔄 Resetar", "Salvar estado", "Carregar estado",
             "📸 Captura de tela", speedItem, "🎮 Remapear controle",
         )
         if (huntSupported) items.add("✨ Shiny Hunter")
@@ -767,6 +795,7 @@ class MainActivity : Activity() {
             .setItems(items.toTypedArray()) { _, which ->
                 when (items[which]) {
                     "Carregar ROM" -> chooseRom()
+                    "🔄 Resetar" -> resetFromMenu()
                     "Salvar estado" -> saveStateFromMenu()
                     "Carregar estado" -> loadStateFromMenu()
                     "📸 Captura de tela" -> takeScreenshot()
