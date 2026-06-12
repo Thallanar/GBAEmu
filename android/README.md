@@ -30,7 +30,6 @@ marco entrega **vídeo + controles na tela** (sem áudio/saves ainda).
      -o android/app/src/main/jniLibs \
      build -p auroragba-android --release
    ```
-
 2. Gerar o APK (debug):
 
    ```bash
@@ -44,7 +43,7 @@ marco entrega **vídeo + controles na tela** (sem áudio/saves ainda).
 ## Rodar no emulador
 
 ```bash
-~/Android/Sdk/emulator/emulator -avd Pixel_7_Pro_API_34 &
+~/Android/Sdk/emulator/emulator -avd Pixel_10_Pro &
 ~/Android/Sdk/platform-tools/adb wait-for-device
 ~/Android/Sdk/platform-tools/adb install -r \
   android/app/build/outputs/apk/debug/app-debug.apk
