@@ -9,6 +9,7 @@
 //! [`Io::read_u8`] e companhia.
 
 use crate::joypad::Joypad;
+use crate::sio::Sio;
 use crate::timer::Timers;
 
 pub const IE_ADDR: u32 = 0x0400_0200;
@@ -47,6 +48,7 @@ pub struct Io {
     pub ime: bool,
     pub timers: Timers,
     pub joypad: Joypad,
+    pub sio: Sio,
 }
 
 impl Io {
@@ -58,6 +60,8 @@ impl Io {
         match addr {
             // Timers
             0x0400_0100..=0x0400_010F => self.timers.read_u8(addr),
+            // Serial (SIOMULTI/SIOCNT/SIOMLT_SEND e RCNT/IR)
+            0x0400_0120..=0x0400_012F | 0x0400_0134..=0x0400_0137 => self.sio.read_u8(addr),
             // Joypad (KEYINPUT read-only, KEYCNT r/w)
             KEYINPUT_ADDR => self.joypad.keyinput() as u8,
             a if a == KEYINPUT_ADDR + 1 => (self.joypad.keyinput() >> 8) as u8,
@@ -76,6 +80,13 @@ impl Io {
     pub fn write_u8(&mut self, addr: u32, val: u8) {
         match addr {
             0x0400_0100..=0x0400_010F => self.timers.write_u8(addr, val),
+            // Serial: a escrita pode completar uma transferência "sem cabo"
+            // (clock interno) — nesse caso o módulo pede a IRQ serial.
+            0x0400_0120..=0x0400_012F | 0x0400_0134..=0x0400_0137 => {
+                if self.sio.write_u8(addr, val) {
+                    self.raise(irq_bits::SERIAL);
+                }
+            }
             // KEYINPUT é read-only; KEYCNT é gravável.
             KEYCNT_ADDR => self.joypad.keycnt = (self.joypad.keycnt & 0xFF00) | val as u16,
             a if a == KEYCNT_ADDR + 1 => {

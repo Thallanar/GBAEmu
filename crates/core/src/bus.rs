@@ -332,6 +332,16 @@ impl Bus {
             self.cartridge.eeprom_write_bit((val & 1) as u8);
             return;
         }
+        // SIO: registradores de 16 bits com escrita ATÔMICA (STRH é o jeito
+        // documentado de programá-los). Decompor em bytes dispararia a
+        // transferência no SIOCNT com o byte de modo antigo. O teste de
+        // região vem primeiro pra ficar fora do caminho quente (VRAM/RAM).
+        if (a >> 24) & 0xF == 0x4 && sio_reg(a) {
+            if self.io.sio.write_u16(a, val) {
+                self.io.raise(crate::io::irq_bits::SERIAL);
+            }
+            return;
+        }
         let [lo, hi] = val.to_le_bytes();
         // As regiões de vídeo são escritas diretamente: o quirk de duplicação
         // só vale para STRB (byte), não para STRH/STR (halfword/word).
@@ -360,6 +370,12 @@ impl Bus {
 
     pub fn write_u32(&mut self, addr: u32, val: u32) {
         let a = addr & !3;
+        // SIO (ex.: STR no SIODATA32): dois halfwords atômicos.
+        if (a >> 24) & 0xF == 0x4 && sio_reg(a) {
+            self.write_u16(a, val as u16);
+            self.write_u16(a + 2, (val >> 16) as u16);
+            return;
+        }
         match (a >> 24) & 0xF {
             // Vídeo: dois halfwords diretos (mantém o caminho sem quirk de byte).
             0x5..=0x7 => {
@@ -447,6 +463,13 @@ impl Default for Bus {
 }
 
 /// VRAM tem 96 KB mas é espelhada em janelas de 128 KB com folding 64K+32K+32K.
+/// O endereço (alinhado) é um registrador serial? (SIOMULTI/SIOCNT/SIOMLT_SEND
+/// em 0x120-0x12A e RCNT em 0x134 — os 16-bit que exigem escrita atômica.)
+fn sio_reg(a: u32) -> bool {
+    (crate::sio::SIOMULTI0_ADDR..=crate::sio::SIOMLT_SEND_ADDR).contains(&a)
+        || a == crate::sio::RCNT_ADDR
+}
+
 fn vram_offset(addr: u32) -> usize {
     let a = (addr as usize) & 0x1FFFF;
     if a < 0x10000 { a } else { 0x10000 + (a & 0x7FFF) }
