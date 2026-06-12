@@ -32,6 +32,8 @@ impl Gba {
     /// Carrega uma ROM na cartridge.
     pub fn load_rom(&mut self, rom: Vec<u8>) {
         self.bus.cartridge.load(rom);
+        // ROM nova ⇒ cache de decode novo, dimensionado pra ela.
+        self.cpu.cache = crate::cpu::DecodeCache::sized(self.bus.cartridge.rom.len());
     }
 
     /// "Power-cycle": reinicia CPU, bus e periféricos do zero, mas **preserva o
@@ -39,11 +41,15 @@ impl Gba {
     /// na memória de backup sobrevive. É o primitivo usado pelo Shiny Hunter
     /// para o soft-reset entre tentativas.
     pub fn reset(&mut self) {
-        // Tira o cartucho fora antes de recriar o bus, depois devolve.
+        // Tira o cartucho fora antes de recriar o bus, depois devolve. O cache
+        // de decode segue o mesmo princípio: deriva só da ROM, que não muda no
+        // power-cycle — preservá-lo mantém o soft-reset do hunter aquecido.
         let cartridge = std::mem::take(&mut self.bus.cartridge);
+        let cache = std::mem::take(&mut self.cpu.cache);
         self.bus = Bus::new();
         self.bus.cartridge = cartridge;
         self.cpu = Cpu::new();
+        self.cpu.cache = cache;
         self.cpu.setup_direct_boot();
         self.cpu.regs.set_pc(0x0800_0000);
         self.ppu_pending = 0;
