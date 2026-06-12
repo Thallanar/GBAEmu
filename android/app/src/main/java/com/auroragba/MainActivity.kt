@@ -109,6 +109,11 @@ class MainActivity : Activity() {
     // Carregado das prefs; editável pelo ☰ menu — controles layout Nintendo
     // reportam A/B no lugar trocado em relação ao GBA. Só mexido na thread de UI.
     private var padKeycodes = PAD_DEFAULT_KEYCODES.copyOf()
+
+    // Multiplicador do fast-forward (1 = velocidade normal). Escrito pela UI
+    // (☰ menu), lido pela thread GL a cada draw. Não persiste: o app sempre
+    // abre em velocidade normal.
+    @Volatile private var ffSpeed = 1
     private val pendingRom = AtomicReference<ByteArray?>(null)
 
     // Pasta de ROMs (SAF tree). Escolhida uma vez e persistida nas prefs; o app
@@ -751,9 +756,10 @@ class MainActivity : Activity() {
                 .show()
             return
         }
+        val speedItem = "⏩ Velocidade (${ffSpeed}x)"
         val items = mutableListOf(
             "Carregar ROM", "Salvar estado", "Carregar estado",
-            "📸 Captura de tela", "🎮 Remapear controle",
+            "📸 Captura de tela", speedItem, "🎮 Remapear controle",
         )
         if (huntSupported) items.add("✨ Shiny Hunter")
         AlertDialog.Builder(this)
@@ -764,9 +770,26 @@ class MainActivity : Activity() {
                     "Salvar estado" -> saveStateFromMenu()
                     "Carregar estado" -> loadStateFromMenu()
                     "📸 Captura de tela" -> takeScreenshot()
+                    speedItem -> speedMenu()
                     "🎮 Remapear controle" -> remapMenu()
                     "✨ Shiny Hunter" -> startShinyHunter()
                 }
+            }
+            .show()
+    }
+
+    /** Escolha do multiplicador de velocidade (1x volta ao normal). */
+    private fun speedMenu() {
+        val speeds = intArrayOf(1, 2, 4, 8)
+        val labels = Array(speeds.size) { i ->
+            val s = speeds[i]
+            (if (s == 1) "1x (normal)" else "${s}x") + if (s == ffSpeed) "  ✓" else ""
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Velocidade")
+            .setItems(labels) { _, i ->
+                ffSpeed = speeds[i]
+                toast(if (speeds[i] == 1) "Velocidade normal" else "Fast-forward ${speeds[i]}x")
             }
             .show()
     }
@@ -1283,11 +1306,24 @@ class MainActivity : Activity() {
                     publishHuntStats()
                     if (found) onHuntFinished()
                 } else {
+                    val speed = ffSpeed
                     NativeBridge.setButtons(handle, buttonMask.get())
+                    // Fast-forward: roda os frames extras ANTES do frame visível,
+                    // descartando o áudio deles. O pacing lá embaixo segue ancorado
+                    // no write bloqueante do áudio do último frame (1 frame de
+                    // áudio por draw) → velocidade = speed× exata, com o som
+                    // virando "fita acelerada" (toca 1 a cada speed frames).
+                    repeat(speed - 1) {
+                        buf.clear()
+                        NativeBridge.renderFrame(handle, buf)
+                        while (NativeBridge.drainAudio(handle, audioBuf) > 0) { /* descarta */ }
+                    }
                     buf.clear()
                     NativeBridge.renderFrame(handle, buf)
                     buf.rewind()
-                    if (++frames % FLUSH_EVERY_FRAMES == 0) flushBackup()
+                    frames += speed
+                    // "Cruzou um múltiplo": com speed > 1 o == 0 podia nunca bater.
+                    if (frames % FLUSH_EVERY_FRAMES < speed) flushBackup()
                 }
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
                 GLES20.glTexSubImage2D(
