@@ -563,15 +563,28 @@ class MainActivity : Activity() {
     }
 
     /**
+     * URI da subpasta `saves/` no tree da pasta de ROMs. Com [create], cria se
+     * não existir (caminho de escrita); sem, só procura (caminho de importação).
+     * `null` se não há pasta de ROMs ou em falha.
+     */
+    private fun savesDirUri(create: Boolean): Uri? {
+        val tree = romFolderUri ?: return null
+        val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+        return if (create) {
+            findOrCreateChild(root, "saves", DocumentsContract.Document.MIME_TYPE_DIR)
+        } else {
+            findChild(root, "saves")
+        }
+    }
+
+    /**
      * URI do `.sav` espelhado em `<pastaDeROMs>/saves/<code>.sav` (cacheada por
      * jogo). Resolve/cria a subpasta `saves/` e o arquivo na primeira vez; depois
      * só devolve o cache. `null` se não há pasta de ROMs ou se algo falhou.
      */
     private fun mirrorSavUri(code: String): Uri? {
-        val tree = romFolderUri ?: return null
         if (savMirrorCode == code && savMirrorUri != null) return savMirrorUri
-        val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
-        val savesDir = findOrCreateChild(root, "saves", DocumentsContract.Document.MIME_TYPE_DIR) ?: return null
+        val savesDir = savesDirUri(create = true) ?: return null
         savMirrorUri = findOrCreateChild(savesDir, "$code.sav", "application/octet-stream")
         savMirrorCode = code
         return savMirrorUri
@@ -595,6 +608,23 @@ class MainActivity : Activity() {
     }
 
     /**
+     * Espelha um save state na pasta visível `saves/` (SAF), como o `.sav`.
+     * **Best-effort**: o estado de trabalho já foi gravado no `filesDir`; falha
+     * aqui só loga. Sem cache de URI — salvar estado é ação manual e rara.
+     */
+    private fun mirrorState(code: String, slot: Int, bytes: ByteArray) {
+        val name = stateName(code, slot)
+        val savesDir = savesDirUri(create = true) ?: return
+        val uri = findOrCreateChild(savesDir, name, "application/octet-stream") ?: return
+        try {
+            contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
+            Log.i(TAG, "estado espelhado (saves/$name)")
+        } catch (e: Exception) {
+            Log.w(TAG, "espelho: falha ao gravar saves/$name: $e")
+        }
+    }
+
+    /**
      * Lê o `.sav` do espelho visível (`saves/<code>.sav`) **sem criar nada**, pra
      * importar um save trazido do PC/outro aparelho. Devolve os bytes + o
      * `lastModified` do arquivo (pra decidir quem é mais novo); `null` se não há
@@ -602,17 +632,18 @@ class MainActivity : Activity() {
      * cache do espelho (é só leitura pontual no load).
      */
     private fun importMirrorSav(code: String): Pair<ByteArray, Long>? {
-        val tree = romFolderUri ?: return null
-        val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
-        val savesDir = findChild(root, "saves") ?: return null
+        val savesDir = savesDirUri(create = false) ?: return null
         val file = findChild(savesDir, "$code.sav") ?: return null
-        val bytes = try {
-            contentResolver.openInputStream(file)?.use { it.readBytes() }
-        } catch (e: Exception) {
-            Log.w(TAG, "import: falha ao ler saves/$code.sav: $e")
-            null
-        } ?: return null
+        val bytes = readMirror(file, "$code.sav") ?: return null
         return bytes to lastModifiedOf(file)
+    }
+
+    /** Lê os bytes de um documento do espelho; `null` em falha (só loga). */
+    private fun readMirror(doc: Uri, name: String): ByteArray? = try {
+        contentResolver.openInputStream(doc)?.use { it.readBytes() }
+    } catch (e: Exception) {
+        Log.w(TAG, "import: falha ao ler saves/$name: $e")
+        null
     }
 
     /** `lastModified` (epoch ms) de um documento SAF; 0 se indisponível. */
@@ -738,8 +769,11 @@ class MainActivity : Activity() {
     /** Arquivo `.sav` (backup do cartucho) do jogo, em `filesDir`. */
     private fun savFile(code: String) = File(filesDir, "$code.sav")
 
+    /** Nome do arquivo do save state do `slot` (0-indexado): `<code>.ss1`..`.ss8`. */
+    private fun stateName(code: String, slot: Int) = "$code.ss${slot + 1}"
+
     /** Arquivo do save state do `slot` (0-indexado: `.ss1`..`.ss8`), em `filesDir`. */
-    private fun stateFile(code: String, slot: Int) = File(filesDir, "$code.ss${slot + 1}")
+    private fun stateFile(code: String, slot: Int) = File(filesDir, stateName(code, slot))
 
     /** Rótulo de um slot pro seletor: "Slot N — vazio" ou "Slot N — dd/MM HH:mm". */
     private fun slotLabel(code: String, slot: Int): String {
@@ -897,6 +931,9 @@ class MainActivity : Activity() {
         }
         runOnUiThread { stopHuntUI() }
 
+        // Save states valem pra qualquer jogo (não dependem de bateria no cartucho).
+        reconcileStates(code)
+
         if (!NativeBridge.hasSave(handle)) return
         val f = savFile(code)
         // Reconcilia o save de trabalho (filesDir) com o espelho visível (saves/),
@@ -933,6 +970,37 @@ class MainActivity : Activity() {
         } else {
             Log.i(TAG, "sem .sav prévio para $code")
         }
+    }
+
+    /**
+     * Reconcilia os save states (`filesDir/<code>.ssN`) com o espelho visível
+     * (`saves/`), pra trazer estados do PC/outro aparelho — mesma regra do
+     * `.sav`, por slot: sem local → importa; bytes diferentes E espelho mais
+     * novo → importa; senão mantém o local. Diferente do `.sav`, checa o mtime
+     * ANTES de ler os bytes: estados são grandes (~0,5 MB × 8 slots) e o caso
+     * comum é o espelho ser o nosso (idêntico) ou mais antigo — o teste de
+     * bytes continua sendo o que impede reimportar o próprio espelho.
+     */
+    private fun reconcileStates(code: String) {
+        val savesDir = savesDirUri(create = false) ?: return
+        var imported = 0
+        for (slot in 0 until SAVE_SLOTS) {
+            val name = stateName(code, slot)
+            val doc = findChild(savesDir, name) ?: continue
+            val local = stateFile(code, slot)
+            if (local.exists() && lastModifiedOf(doc) <= local.lastModified()) continue
+            val bytes = readMirror(doc, name) ?: continue
+            if (local.exists() && bytes.contentEquals(local.readBytes())) continue
+            try {
+                local.writeBytes(bytes)
+                imported++
+                Log.i(TAG, "estado importado da pasta (saves/$name, ${bytes.size} bytes)")
+            } catch (e: Exception) {
+                Log.w(TAG, "falha ao importar saves/$name: $e")
+            }
+        }
+        if (imported == 1) toast("Estado importado da pasta")
+        else if (imported > 1) toast("$imported estados importados da pasta")
     }
 
     /** Copia as stats da caça (Hunter) pros campos voláteis lidos pela UI. */
@@ -975,13 +1043,17 @@ class MainActivity : Activity() {
 
     private fun doSaveState(slot: Int) {
         val code = currentGameCode ?: return
+        val bytes = NativeBridge.saveState(handle)
         try {
-            stateFile(code, slot).writeBytes(NativeBridge.saveState(handle))
+            stateFile(code, slot).writeBytes(bytes)
             toast("Estado salvo no slot ${slot + 1}")
         } catch (e: Exception) {
             Log.e(TAG, "falha ao salvar estado: $e")
             toast("Falha ao salvar estado")
+            return // sem o estado de trabalho, não adianta espelhar
         }
+        // Cópia visível pra backup/portabilidade (best-effort), como o .sav.
+        mirrorState(code, slot, bytes)
     }
 
     private fun doLoadState(bytes: ByteArray) {
