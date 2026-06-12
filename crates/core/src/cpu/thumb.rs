@@ -10,68 +10,102 @@ use super::alu::{
 };
 use super::condition::Condition;
 use super::psr::PsrFlags;
-use super::Cpu;
+use super::{Cpu, Handler};
 
 pub fn execute(cpu: &mut Cpu, bus: &mut Bus, instr: u16) {
-    let i = instr as u32;
-    // Decode hierárquico por prefixo (bits altos).
+    decode(instr)(cpu, bus, instr as u32)
+}
+
+/// Resolve a instrução até o handler-folha. Decode hierárquico por prefixo
+/// (bits altos), função **apenas dos bits** — cacheável por endereço de ROM
+/// (ver `DecodeCache` no `cpu/mod.rs`).
+pub(crate) fn decode(instr: u16) -> Handler {
     match instr >> 13 {
         0b000 => {
             if (instr >> 11) & 0b11 == 0b11 {
-                fmt2_add_sub(cpu, i)
+                h_fmt2
             } else {
-                fmt1_move_shifted(cpu, i)
+                h_fmt1
             }
         }
-        0b001 => fmt3_mcas_imm(cpu, i),
+        0b001 => h_fmt3,
         0b010 => {
             if (instr >> 10) & 0b111111 == 0b010000 {
-                fmt4_alu(cpu, i)
+                h_fmt4
             } else if (instr >> 10) & 0b111111 == 0b010001 {
-                fmt5_hi_reg(cpu, bus, i)
+                fmt5_hi_reg
             } else if (instr >> 11) & 0b11111 == 0b01001 {
-                fmt6_pc_relative_load(cpu, bus, i)
+                fmt6_pc_relative_load
             } else if (instr >> 9) & 0b1111001 == 0b0101001 {
-                fmt8_load_store_sign_ext(cpu, bus, i)
+                fmt8_load_store_sign_ext
             } else {
-                fmt7_load_store_reg_offset(cpu, bus, i)
+                fmt7_load_store_reg_offset
             }
         }
-        0b011 => fmt9_load_store_imm_offset(cpu, bus, i),
+        0b011 => fmt9_load_store_imm_offset,
         0b100 => {
             if (instr >> 12) & 1 == 0 {
-                fmt10_load_store_halfword(cpu, bus, i)
+                fmt10_load_store_halfword
             } else {
-                fmt11_sp_relative(cpu, bus, i)
+                fmt11_sp_relative
             }
         }
         0b101 => {
             if (instr >> 12) & 1 == 0 {
-                fmt12_load_address(cpu, i)
+                h_fmt12
             } else if (instr >> 8) & 0b1111 == 0b0000 {
-                fmt13_add_to_sp(cpu, i)
+                h_fmt13
             } else {
-                fmt14_push_pop(cpu, bus, i)
+                fmt14_push_pop
             }
         }
         0b110 => {
             if (instr >> 12) & 1 == 0 {
-                fmt15_multi_load_store(cpu, bus, i)
+                fmt15_multi_load_store
             } else if (instr >> 8) & 0b1111 == 0b1111 {
-                fmt17_swi(cpu, bus, i)
+                fmt17_swi
             } else {
-                fmt16_conditional_branch(cpu, i)
+                h_fmt16
             }
         }
         0b111 => {
             if (instr >> 12) & 1 == 0 {
-                fmt18_unconditional_branch(cpu, i)
+                h_fmt18
             } else {
-                fmt19_long_branch_link(cpu, i)
+                h_fmt19
             }
         }
         _ => unreachable!(),
     }
+}
+
+// Shims: assinatura uniforme de [Handler] pros formatos que não usam o bus.
+fn h_fmt1(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
+    fmt1_move_shifted(cpu, i)
+}
+fn h_fmt2(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
+    fmt2_add_sub(cpu, i)
+}
+fn h_fmt3(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
+    fmt3_mcas_imm(cpu, i)
+}
+fn h_fmt4(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
+    fmt4_alu(cpu, i)
+}
+fn h_fmt12(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
+    fmt12_load_address(cpu, i)
+}
+fn h_fmt13(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
+    fmt13_add_to_sp(cpu, i)
+}
+fn h_fmt16(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
+    fmt16_conditional_branch(cpu, i)
+}
+fn h_fmt18(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
+    fmt18_unconditional_branch(cpu, i)
+}
+fn h_fmt19(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
+    fmt19_long_branch_link(cpu, i)
 }
 
 // ──────────────── Format 1: Move shifted register ────────────────

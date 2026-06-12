@@ -16,36 +16,71 @@ use super::alu::{
 };
 use super::condition::Condition;
 use super::psr::{Cpsr, CpuMode, PsrFlags};
-use super::Cpu;
+use super::{Cpu, Handler};
 
 pub fn execute(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
-    let cond = Condition::from_bits(instr >> 28);
-    if !cond.evaluate(cpu.cpsr) {
-        return;
-    }
+    execute_decoded(cpu, bus, instr, decode(instr));
+}
 
-    let group = (instr >> 25) & 0b111;
-    match group {
-        0b101 => exec_branch(cpu, instr),
-        0b000 | 0b001 => exec_group_000(cpu, bus, instr),
-        0b010 | 0b011 => exec_single_data_transfer(cpu, bus, instr),
-        0b100 => exec_block_data_transfer(cpu, bus, instr),
+/// Executa um handler já resolvido pelo [decode]. A condição (bits 28+) é a
+/// única parte que depende do estado da CPU, então fica aqui, fora do cache.
+#[inline]
+pub(crate) fn execute_decoded(cpu: &mut Cpu, bus: &mut Bus, instr: u32, handler: Handler) {
+    if Condition::from_bits(instr >> 28).evaluate(cpu.cpsr) {
+        handler(cpu, bus, instr);
+    }
+}
+
+/// Resolve a instrução até o handler-folha. É função **apenas dos bits** da
+/// instrução (nunca do estado da CPU) — por isso o resultado é cacheável por
+/// endereço de ROM (ver `DecodeCache` no `cpu/mod.rs`).
+pub(crate) fn decode(instr: u32) -> Handler {
+    match (instr >> 25) & 0b111 {
+        0b101 => h_branch,
+        0b000 | 0b001 => decode_group_000(instr),
+        0b010 | 0b011 => exec_single_data_transfer,
+        0b100 => exec_block_data_transfer,
         0b111 => {
             // SWI: bits 27..24 = 1111. Coprocessor (não usado no GBA) também cai aqui.
             if (instr >> 24) & 0xF == 0xF {
-                exec_swi(cpu, bus, instr);
+                exec_swi
             } else {
-                let pc = cpu.regs.pc().wrapping_sub(8);
-                log::warn!("ARM: coprocessor não suportado @ {:08X}", instr);
-                cpu.stats.record_unimpl(pc, instr, false);
+                h_coprocessor
             }
         }
-        _ => {
-            let pc = cpu.regs.pc().wrapping_sub(8);
-            log::warn!("ARM: opcode não implementado @ PC={:08X} instr={:08X}", pc, instr);
-            cpu.stats.record_unimpl(pc, instr, false);
-        }
+        _ => h_unimpl,
     }
+}
+
+// Shims: dão a assinatura uniforme de [Handler] aos handlers que não usam o
+// bus. O compilador os dissolve (chamada direta atrás do function pointer).
+fn h_branch(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
+    exec_branch(cpu, instr)
+}
+fn h_branch_exchange(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
+    exec_branch_exchange(cpu, instr)
+}
+fn h_multiply(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
+    exec_multiply(cpu, instr)
+}
+fn h_multiply_long(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
+    exec_multiply_long(cpu, instr)
+}
+fn h_psr_transfer(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
+    exec_psr_transfer(cpu, instr)
+}
+fn h_data_processing(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
+    exec_data_processing(cpu, instr)
+}
+fn h_coprocessor(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
+    let pc = cpu.regs.pc().wrapping_sub(8);
+    log::warn!("ARM: coprocessor não suportado @ {:08X}", instr);
+    cpu.stats.record_unimpl(pc, instr, false);
+}
+fn h_unimpl(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
+    let pc = cpu.regs.pc().wrapping_sub(8);
+    log::warn!("ARM: opcode não implementado @ PC={:08X} instr={:08X}", pc, instr);
+    cpu.stats.record_unimpl(pc, instr, false);
 }
 
 // ─────────────────────────── Branch ───────────────────────────
@@ -83,25 +118,19 @@ fn exec_branch(cpu: &mut Cpu, instr: u32) {
 // Esse grupo contém Data Processing, PSR Transfer, Multiply e
 // Halfword transfer. Resolvemos por bits[27:25]=000 e padrões em bits[7:4].
 
-fn exec_group_000(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
+fn decode_group_000(instr: u32) -> Handler {
     let imm_operand = (instr & (1 << 25)) != 0;
 
     // BX Rn: cond | 0001_0010_1111_1111_1111_0001 | Rn
     // Padrão: bits[27:4] == 0x12FFF1
     if (instr & 0x0FFF_FFF0) == 0x012F_FF10 {
-        exec_branch_exchange(cpu, instr);
-        return;
+        return h_branch_exchange;
     }
 
     // Multiply: bits[27:22]=000000, bits[7:4]=1001 (não-imediato).
     if !imm_operand && (instr & 0x0F00_00F0) == 0x0000_0090 {
         let bit23 = (instr & (1 << 23)) != 0;
-        if !bit23 {
-            exec_multiply(cpu, instr);
-        } else {
-            exec_multiply_long(cpu, instr);
-        }
-        return;
+        return if !bit23 { h_multiply } else { h_multiply_long };
     }
 
     // Single Data Swap (SWP/SWPB): bits[27:23]=00010, bits[21:20]=00,
@@ -109,8 +138,7 @@ fn exec_group_000(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
     // Precisa vir ANTES do fallback de PSR/data-processing, pois o opcode
     // efetivo (1000, S=0) colide com o padrão de MRS/MSR.
     if (instr & 0x0FB0_0FF0) == 0x0100_0090 {
-        exec_swap(cpu, bus, instr);
-        return;
+        return exec_swap;
     }
 
     // Halfword/signed-byte transfer: bit 7 e bit 4 ligados, com bits[6:5] != 00.
@@ -118,17 +146,16 @@ fn exec_group_000(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
     if !imm_operand && (instr & 0x90) == 0x90 {
         let sh = (instr >> 5) & 0b11;
         if sh != 0 {
-            exec_halfword_transfer(cpu, bus, instr);
-            return;
+            return exec_halfword_transfer;
         }
     }
 
     let opcode = (instr >> 21) & 0xF;
     let set_flags = (instr & (1 << 20)) != 0;
     if (0x8..=0xB).contains(&opcode) && !set_flags {
-        exec_psr_transfer(cpu, instr);
+        h_psr_transfer
     } else {
-        exec_data_processing(cpu, instr);
+        h_data_processing
     }
 }
 

@@ -30,6 +30,66 @@ pub struct Cpu {
     pub halted: bool,
     /// Contadores de telemetria — úteis para smoke testing.
     pub stats: CpuStats,
+    /// Cache de decode por endereço de ROM (ver [DecodeCache]). Fora do save
+    /// state (é derivado da ROM); reconstruído sob demanda após um load.
+    #[cfg_attr(feature = "save-states", serde(skip))]
+    pub(crate) cache: DecodeCache,
+}
+
+/// Handler de execução pré-resolvido (decode até a folha). Mesmo tipo para ARM
+/// e THUMB — a instrução THUMB ocupa os 16 bits baixos do `u32`.
+pub(crate) type Handler = fn(&mut Cpu, &mut Bus, u32);
+
+/// Entradas por página do cache de decode (páginas alocadas sob demanda).
+const PAGE_SLOTS: usize = 1024;
+
+#[derive(Clone, Copy)]
+struct DecodeSlot {
+    /// Instrução crua (o fetch da ROM, feito uma única vez).
+    raw: u32,
+    /// Handler-folha resolvido; `None` = slot ainda não decodificado.
+    handler: Option<Handler>,
+}
+
+const EMPTY_SLOT: DecodeSlot = DecodeSlot {
+    raw: 0,
+    handler: None,
+};
+
+/// Cache de decode do interpretador (Fase 10, etapa 1): pra código executando
+/// da ROM (0x08–0x0D), o par `(instrução crua, handler-folha)` de cada endereço
+/// é resolvido **uma vez** e reaproveitado — a ROM é imutável, então não há
+/// invalidação. Código em RAM (BIOS/IWRAM/EWRAM) segue o fetch+decode normal.
+/// O resultado é idêntico bit a bit: o handler recebe a mesma instrução crua
+/// que o caminho sem cache leria do bus.
+#[derive(Default)]
+pub(crate) struct DecodeCache {
+    /// Páginas ARM (slot = offset/4); `None` até a primeira execução na página.
+    arm: Vec<Option<Box<[DecodeSlot]>>>,
+    /// Páginas THUMB (slot = offset/2).
+    thumb: Vec<Option<Box<[DecodeSlot]>>>,
+}
+
+impl DecodeCache {
+    /// Dimensiona as tabelas de páginas pra uma ROM de `rom_len` bytes (chamado
+    /// no `load_rom`). As páginas em si só alocam quando executadas.
+    pub(crate) fn sized(rom_len: usize) -> Self {
+        let pages = |slots: usize| slots.div_ceil(PAGE_SLOTS);
+        DecodeCache {
+            arm: vec![None; pages(rom_len / 4)],
+            thumb: vec![None; pages(rom_len / 2)],
+        }
+    }
+}
+
+/// Offset dentro da ROM se o PC aponta pros espelhos do cartucho (0x08–0x0D).
+#[inline]
+fn rom_offset(pc: u32) -> Option<usize> {
+    if (0x08..=0x0D).contains(&(pc >> 24)) {
+        Some((pc & 0x01FF_FFFF) as usize)
+    } else {
+        None
+    }
 }
 
 #[derive(Default)]
@@ -65,6 +125,7 @@ impl Cpu {
             branched: false,
             halted: false,
             stats: CpuStats::default(),
+            cache: DecodeCache::default(),
         };
         // Reset state: Supervisor mode, IRQ/FIQ off, ARM, PC=0 (vetor reset).
         cpu.cpsr = Cpsr(CpuMode::Supervisor as u32 | PsrFlags::I.bits() | PsrFlags::F.bits());
@@ -126,13 +187,13 @@ impl Cpu {
 
     fn step_arm(&mut self, bus: &mut Bus) -> u32 {
         let exec_pc = self.regs.pc();
-        let instr = bus.read_u32(exec_pc);
+        let (instr, handler) = self.fetch_decode_arm(exec_pc, bus);
         self.stats.arm_executed += 1;
 
         // Pré-adianta PC em +8 ANTES de execute, simulando o pipeline:
         // quando a instrução ler PC, vê exec_pc + 8.
         self.regs.set_pc(exec_pc.wrapping_add(8));
-        arm::execute(self, bus, instr);
+        arm::execute_decoded(self, bus, instr, handler);
 
         // Se não houve branch, queremos terminar com PC = exec_pc + 4.
         if !self.branched {
@@ -144,15 +205,68 @@ impl Cpu {
 
     fn step_thumb(&mut self, bus: &mut Bus) -> u32 {
         let exec_pc = self.regs.pc();
-        let instr = bus.read_u16(exec_pc);
+        let (instr, handler) = self.fetch_decode_thumb(exec_pc, bus);
         self.stats.thumb_executed += 1;
         self.regs.set_pc(exec_pc.wrapping_add(4));
-        thumb::execute(self, bus, instr);
+        handler(self, bus, instr);
         if !self.branched {
             self.regs.set_pc(exec_pc.wrapping_add(2));
         }
         self.branched = false;
         1
+    }
+
+    /// Fetch+decode ARM, pelo cache quando o PC está na ROM. O fetch de RAM
+    /// (caminho raro) decodifica na hora, idêntico ao comportamento antigo.
+    #[inline]
+    fn fetch_decode_arm(&mut self, pc: u32, bus: &mut Bus) -> (u32, Handler) {
+        if let Some(off) = rom_offset(pc) {
+            let slot = off >> 2;
+            let page = slot / PAGE_SLOTS;
+            if page < self.cache.arm.len() {
+                let entries = self.cache.arm[page]
+                    .get_or_insert_with(|| vec![EMPTY_SLOT; PAGE_SLOTS].into_boxed_slice());
+                let entry = &mut entries[slot % PAGE_SLOTS];
+                if let Some(h) = entry.handler {
+                    return (entry.raw, h);
+                }
+                let raw = bus.read_u32(pc);
+                let h = arm::decode(raw);
+                *entry = DecodeSlot {
+                    raw,
+                    handler: Some(h),
+                };
+                return (raw, h);
+            }
+        }
+        let raw = bus.read_u32(pc);
+        (raw, arm::decode(raw))
+    }
+
+    /// Fetch+decode THUMB, pelo cache quando o PC está na ROM.
+    #[inline]
+    fn fetch_decode_thumb(&mut self, pc: u32, bus: &mut Bus) -> (u32, Handler) {
+        if let Some(off) = rom_offset(pc) {
+            let slot = off >> 1;
+            let page = slot / PAGE_SLOTS;
+            if page < self.cache.thumb.len() {
+                let entries = self.cache.thumb[page]
+                    .get_or_insert_with(|| vec![EMPTY_SLOT; PAGE_SLOTS].into_boxed_slice());
+                let entry = &mut entries[slot % PAGE_SLOTS];
+                if let Some(h) = entry.handler {
+                    return (entry.raw, h);
+                }
+                let raw = bus.read_u16(pc);
+                let h = thumb::decode(raw);
+                *entry = DecodeSlot {
+                    raw: raw as u32,
+                    handler: Some(h),
+                };
+                return (raw as u32, h);
+            }
+        }
+        let raw = bus.read_u16(pc);
+        (raw as u32, thumb::decode(raw))
     }
 
     /// Branch ARM: alinha em 4 e marca branch para o step pular o "recuo".
