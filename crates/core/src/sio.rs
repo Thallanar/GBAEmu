@@ -59,6 +59,25 @@ pub struct Sio {
     pub siomulti: [u16; 4],
     /// SIOMLT_SEND; no modo normal de 8 bits, é o SIODATA8 (envio/recepção).
     pub siomlt_send: u16,
+    /// Sessão de link ativa (Fase Link, etapa b) — preenchida pelo host (app).
+    /// Fora do save state: uma sessão não sobrevive a um load.
+    #[cfg_attr(feature = "save-states", serde(skip))]
+    pub link: Link,
+}
+
+/// Estado da sessão de link em andamento. Com `active`, o start em
+/// multi-player **não** completa mais na hora: vira pendência que o host
+/// resolve na fronteira do quantum, com os dados reais do parceiro.
+#[derive(Default)]
+pub struct Link {
+    /// Há um parceiro conectado? (muda SI/SD e o destino do start)
+    pub active: bool,
+    /// Nosso lugar na mesa: 0 = parent (gera o clock), 1 = child.
+    pub id: u8,
+    /// O parceiro está em modo multi-player ("pronto") — vira o bit SD.
+    pub partner_ready: bool,
+    /// Parent: o jogo escreveu start; aguardando a troca do quantum.
+    pub(crate) pending_start: bool,
 }
 
 impl Sio {
@@ -91,9 +110,19 @@ impl Sio {
             a if a == SIOMULTI0_ADDR + 6 => self.siomulti[3],
             SIOCNT_ADDR => {
                 if self.mode() == Mode::Multi {
-                    // SI (bit 2) = 0: nos vemos como parent; SD (bit 3) = 0:
-                    // "nem todos prontos" — a deixa de "sem parceiro" dos jogos.
-                    self.siocnt & !0b1100
+                    // SI (bit 2): 0 = somos o parent; 1 = somos child numa
+                    // sessão. SD (bit 3): "todos prontos" = parceiro em multi.
+                    // Sem sessão, ambos leem 0 — a deixa de "sem parceiro".
+                    let mut v = self.siocnt & !0b1100;
+                    if self.link.active {
+                        if self.link.id != 0 {
+                            v |= 0b0100;
+                        }
+                        if self.link.partner_ready {
+                            v |= 0b1000;
+                        }
+                    }
+                    v
                 } else {
                     self.siocnt
                 }
@@ -141,6 +170,33 @@ impl Sio {
         false
     }
 
+    /// O jogo local está em modo multi-player? (= "pronto" pro parceiro; o
+    /// host manda isso na mensagem de quantum e vira o SD do outro lado.)
+    pub fn in_multi(&self) -> bool {
+        self.mode() == Mode::Multi
+    }
+
+    /// O que enviaríamos na próxima troca multi-player.
+    pub fn send_value(&self) -> u16 {
+        self.siomlt_send
+    }
+
+    /// Aplica uma troca multi-player concluída (dados na ordem dos IDs da
+    /// mesa). Devolve se a IRQ serial deve subir. No-op fora do modo
+    /// multi-player — sem latch quando o jogo local não está no serial.
+    pub fn complete_multi(&mut self, data: [u16; 4]) -> bool {
+        if !self.in_multi() {
+            self.link.pending_start = false;
+            return false;
+        }
+        self.siomulti = data;
+        // Busy limpa; bits 4-5 = nosso ID na mesa; erro (6) limpo.
+        self.siocnt &= !(START | 0b0111_0000);
+        self.siocnt |= (self.link.id as u16 & 0b11) << 4;
+        self.link.pending_start = false;
+        self.siocnt & IRQ_ENABLE != 0
+    }
+
     /// Valor guardado (sem a máscara de estado-de-linha da leitura) — pro
     /// read-modify-write do [`Self::write_u8`].
     fn stored_u16(&self, addr: u32) -> u16 {
@@ -157,12 +213,25 @@ impl Sio {
     }
 
     /// Sem parceiro: completa a transferência iniciada (se o modo permite) e
-    /// diz se a IRQ serial deve subir.
+    /// diz se a IRQ serial deve subir. Com sessão de link ativa, o start em
+    /// multi-player NÃO completa aqui — vira pendência pro quantum do host.
     fn maybe_complete_transfer(&mut self) -> bool {
         if self.siocnt & START == 0 {
             return false;
         }
         match self.mode() {
+            Mode::Multi if self.link.active => {
+                if self.link.id == 0 {
+                    // Parent: o host resolve na fronteira do quantum, com os
+                    // dados reais do parceiro. Busy fica aceso até lá.
+                    self.link.pending_start = true;
+                } else {
+                    // Child não gera clock: start é inócuo (no hardware o bit
+                    // 7 do child é só o busy, dirigido pelo parent).
+                    self.siocnt &= !START;
+                }
+                return false;
+            }
             Mode::Multi => {
                 // Clock vem sempre do parent (nós): completa na hora. Nosso
                 // dado ecoa em SIOMULTI0; parceiros ausentes leem linha alta.

@@ -16,6 +16,7 @@ use eframe::egui;
 
 mod audio;
 mod library;
+mod link;
 mod png;
 
 /// Quantidade de slots de save state em disco (`<rom>.ss1`..`.ss8`).
@@ -309,6 +310,11 @@ const SHOW_RAM_FINDER: bool = false;
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
+    // Fase Link (etapa b): `--link-host [porta]` hospeda (parent) e
+    // `--link-join <ip:porta>` entra (child). A sessão é estabelecida antes
+    // da janela abrir — o host bloqueia até o parceiro chegar.
+    let link_session = parse_link_args();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 720.0])
@@ -319,8 +325,46 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "AuroraGBA",
         options,
-        Box::new(|cc| Box::new(AuroraApp::new(cc))),
+        Box::new(|cc| Box::new(AuroraApp::new(cc, link_session))),
     )
+}
+
+/// Lê as flags de link da linha de comando e estabelece a sessão (ou None).
+fn parse_link_args() -> Option<link::LinkSession> {
+    let args: Vec<String> = std::env::args().collect();
+    let pos = |flag: &str| args.iter().position(|a| a == flag);
+    if let Some(i) = pos("--link-host") {
+        let port: u16 = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(7777);
+        eprintln!("link: aguardando o parceiro na porta {port}…");
+        match link::LinkSession::host(port) {
+            Ok(s) => {
+                eprintln!("link: parceiro conectado (somos o parent)");
+                Some(s)
+            }
+            Err(e) => {
+                eprintln!("link: falhou ({e}); seguindo sem link");
+                None
+            }
+        }
+    } else if let Some(i) = pos("--link-join") {
+        let addr = args
+            .get(i + 1)
+            .cloned()
+            .unwrap_or_else(|| "127.0.0.1:7777".into());
+        eprintln!("link: conectando em {addr}…");
+        match link::LinkSession::join(&addr) {
+            Ok(s) => {
+                eprintln!("link: conectado (somos o child)");
+                Some(s)
+            }
+            Err(e) => {
+                eprintln!("link: falhou ({e}); seguindo sem link");
+                None
+            }
+        }
+    } else {
+        None
+    }
 }
 
 struct AuroraApp {
@@ -377,10 +421,12 @@ struct AuroraApp {
     library: library::Library,
     /// Janela da biblioteca aberta?
     show_library: bool,
+    /// Sessão de lockstep do link cable (Fase Link, etapa b). `None` = solo.
+    link: Option<link::LinkSession>,
 }
 
 impl AuroraApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, link_session: Option<link::LinkSession>) -> Self {
         let image = egui::ColorImage::new([SCREEN_WIDTH, SCREEN_HEIGHT], egui::Color32::BLACK);
         let texture =
             cc.egui_ctx
@@ -434,7 +480,13 @@ impl AuroraApp {
             rebinding: None,
             library: library::Library::new(cache_dir),
             show_library: false,
+            link: link_session,
         };
+
+        if let Some(s) = &app.link {
+            let papel = if s.id == 0 { "parent" } else { "child" };
+            app.set_status(format!("🔗 link ativo — somos o {papel}"));
+        }
 
         // Restaura a última pasta de ROMs e já mostra a biblioteca no boot.
         if let Some(dir) = saved_lib_dir {
@@ -461,6 +513,12 @@ impl AuroraApp {
                 self.rom_path = Some(path.clone());
                 self.running = true;
                 self.load_save(&path);
+
+                // A sessão de link sobrevive à troca de ROM — o Gba é novo,
+                // então re-aplica a configuração (papel/ID na mesa).
+                if let Some(s) = &self.link {
+                    self.gba.link_configure(true, s.id);
+                }
 
                 // Identifica o jogo pelo game code do header pra habilitar o
                 // Shiny Hunter com os endereços certos.
@@ -1048,7 +1106,24 @@ impl AuroraApp {
     /// amostras pro host (ou descarta se `mute`, no fast-forward, pra não estourar
     /// o buffer nem sair em pitch errado); sem dispositivo, só esvazia o APU.
     fn step_frame(&mut self, mute: bool) {
-        self.gba.run_frame();
+        if let Some(session) = &mut self.link {
+            // Lockstep: 8 quanta = 1 frame, sincronizando o serial em cada
+            // fronteira. Se o parceiro sumir, degrada pra solo (cabo "puxado").
+            let mut err = None;
+            for _ in 0..8 {
+                if let Err(e) = session.run_quantum(&mut self.gba) {
+                    err = Some(e);
+                    break;
+                }
+            }
+            if let Some(e) = err {
+                self.link = None;
+                self.gba.link_configure(false, 0);
+                self.set_status(format!("link caiu ({e}) — seguindo sem parceiro"));
+            }
+        } else {
+            self.gba.run_frame();
+        }
         if let Some(audio) = &mut self.audio {
             if mute {
                 self.gba.bus.apu.buffer.clear();

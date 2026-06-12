@@ -145,6 +145,51 @@ impl Gba {
             cycles += self.step();
         }
     }
+
+    /// Executa ~`target` ciclos (para no fim da instrução que cruzar a meta) e
+    /// devolve quantos rodaram de fato. É o passo do lockstep do link (Fase
+    /// Link, etapa b): as instâncias avançam em quanta e sincronizam o serial
+    /// na fronteira de cada um.
+    pub fn run_cycles(&mut self, target: u32) -> u32 {
+        let mut cycles = 0u32;
+        while cycles < target {
+            cycles += self.step();
+        }
+        cycles
+    }
+
+    // ─────────────────────────── Link (etapa b) ───────────────────────────
+    // O host (app desktop) dirige a sessão: configura o link, espelha o
+    // "pronto" do parceiro e aplica a troca decidida na fronteira do quantum.
+    // O core só guarda estado e levanta a IRQ serial — rede é problema do app.
+
+    /// Liga/desliga a sessão de link. `id` 0 = parent (gera o clock).
+    pub fn link_configure(&mut self, active: bool, id: u8) {
+        self.bus.io.sio.link.active = active;
+        self.bus.io.sio.link.id = id;
+        self.bus.io.sio.link.partner_ready = false;
+    }
+
+    /// Espelha o "pronto" (modo multi-player ativo) do parceiro — vira o bit
+    /// SD que o jogo local lê no SIOCNT.
+    pub fn link_set_partner_ready(&mut self, ready: bool) {
+        self.bus.io.sio.link.partner_ready = ready;
+    }
+
+    /// Estado local pro quantum: (em multi-player?, start pendente?, valor a enviar).
+    pub fn link_status(&self) -> (bool, bool, u16) {
+        let sio = &self.bus.io.sio;
+        (sio.in_multi(), sio.link.pending_start, sio.send_value())
+    }
+
+    /// Aplica a troca multi-player concluída na fronteira do quantum (dados na
+    /// ordem dos IDs) e levanta a IRQ serial se o jogo a habilitou. No-op se o
+    /// jogo local não está em modo multi-player (sem latch fora do modo).
+    pub fn link_complete_multi(&mut self, data: [u16; 4]) {
+        if self.bus.io.sio.complete_multi(data) {
+            self.bus.io.raise(crate::io::irq_bits::SERIAL);
+        }
+    }
 }
 
 impl Default for Gba {
