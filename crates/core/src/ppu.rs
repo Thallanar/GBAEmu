@@ -391,15 +391,15 @@ impl Ppu {
     ) -> [u8; 4] {
         let (top_c, top_layer, top_semi) = top;
         let (sub_c, sub_layer) = sub;
-        if !effect {
-            return top_c;
-        }
         let sub_is_2nd = self.bldcnt & (1 << (8 + sub_layer)) != 0;
         let eva = (self.bldalpha & 0x1F).min(16) as u32;
         let evb = ((self.bldalpha >> 8) & 0x1F).min(16) as u32;
-        let evy = (self.bldy & 0x1F).min(16) as u32;
 
         // OBJ semitransparente: sempre 1º alvo, alpha-blend se há 2º alvo embaixo.
+        // Isso ocorre INDEPENDENTE do bit de efeito especial da janela — esse bit
+        // só controla os efeitos via BLDCNT (alpha por seleção, brilho). A névoa
+        // da Rusturf Tunnel, p.ex., liga WIN0 na tela toda com o efeito desligado;
+        // mesmo assim os sprites de névoa têm que misturar com o mapa atrás.
         if top_semi {
             return if sub_is_2nd {
                 alpha_blend(top_c, sub_c, eva, evb)
@@ -408,6 +408,11 @@ impl Ppu {
             };
         }
 
+        // Demais efeitos (alpha por BLDCNT, brilho/escurecer) são gated pela janela.
+        if !effect {
+            return top_c;
+        }
+        let evy = (self.bldy & 0x1F).min(16) as u32;
         let top_is_1st = self.bldcnt & (1 << top_layer) != 0;
         if !top_is_1st {
             return top_c;
@@ -1268,6 +1273,10 @@ mod tests {
         assert_eq!(p.apply_effects(semi_obj, (BLACK, 1), true), [127, 127, 127, 0xFF]);
         // Embaixo não há 2º alvo → OBJ opaco normal.
         assert_eq!(p.apply_effects(semi_obj, (BLACK, 2), true), WHITE);
+        // Mesmo com o efeito especial da janela DESLIGADO (effect=false), o OBJ
+        // semitransparente ainda mistura — regressão da névoa opaca da Rusturf
+        // Tunnel, que liga WIN0 na tela toda com WININ bit 5 = 0.
+        assert_eq!(p.apply_effects(semi_obj, (BLACK, 1), false), [127, 127, 127, 0xFF]);
     }
 
     #[test]
