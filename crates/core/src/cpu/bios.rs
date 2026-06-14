@@ -31,6 +31,13 @@ use super::Cpu;
 /// ```
 pub fn builtin_bios() -> Vec<u8> {
     let mut bios = vec![0u8; 0x4000];
+    // Vetor de reset real da BIOS do GBA em 0x00 (`b 0x000000C0` = 0xEA00002E).
+    // Alguns jogos LEEM a região BIOS — notavelmente Pokémon Emerald, cujo
+    // `copyvar VAR, 1` (ScrCmd_copyvar) faz `*GetVarPointer(1)`, e
+    // GetVarPointer(1)==NULL, então dereferencia o endereço 0. No HW real isso lê
+    // 0x002E (≠0); com a BIOS zerada líamos 0, o que zerava VAR_ICE_STEP_COUNT e
+    // disparava a "queda em escada" da Granite Cave B1F (script ON_FRAME de buraco).
+    bios[0..4].copy_from_slice(&0xEA00_002Eu32.to_le_bytes());
     const TRAMPOLINE: [u32; 6] = [
         0xE92D_500F, // stmfd sp!, {r0-r3,r12,lr}
         0xE3A0_0301, // mov   r0, #0x04000000
