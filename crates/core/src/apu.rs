@@ -24,6 +24,16 @@ const APU_CLOCK: u32 = 4_194_304;
 /// Ciclos de APU por amostra de saída.
 const CYCLES_PER_SAMPLE: u32 = APU_CLOCK / OUTPUT_RATE; // 128
 
+/// Ganho final de cada caminho ao mixar pro range de i16. No hardware, os 4
+/// canais PSG somados no máximo têm nível comparável a UM canal Direct Sound a
+/// 100%. Aqui o PSG full-scale é ±60 (4 × ±15 bipolar) × (vol+1)=8 × ratio=4/4
+/// = ±480, e o DS a 100% é ±256 (±128 × 2). Para igualar 4·PSG ≈ 1·DS,
+/// usamos PSG×28 (±13440) ≈ DS×52 (±13312). (Antes o PSG usava ×8 e ficava
+/// ~3.5× baixo demais, soterrado sob o Direct Sound — os "layers" PSG do M4A
+/// do Pokémon ficavam inaudíveis.)
+const PSG_GAIN: i32 = 28;
+const DS_GAIN: i32 = 52;
+
 /// Padrões de duty da onda quadrada (8 passos, 1 = alto).
 const DUTY: [[u8; 8]; 4] = [
     [0, 0, 0, 0, 0, 0, 0, 1], // 12.5%
@@ -252,19 +262,19 @@ impl Apu {
         let a = self.cur_a as i32 * if self.cnt_h & 0x04 != 0 { 2 } else { 1 };
         let b = self.cur_b as i32 * if self.cnt_h & 0x08 != 0 { 2 } else { 1 };
 
-        let mut l = psg_l * 8;
-        let mut r = psg_r * 8;
+        let mut l = psg_l * PSG_GAIN;
+        let mut r = psg_r * PSG_GAIN;
         if self.cnt_h & 0x0200 != 0 {
-            l += a * 52; // DS A enable L
+            l += a * DS_GAIN; // DS A enable L
         }
         if self.cnt_h & 0x0100 != 0 {
-            r += a * 52; // DS A enable R
+            r += a * DS_GAIN; // DS A enable R
         }
         if self.cnt_h & 0x2000 != 0 {
-            l += b * 52; // DS B enable L
+            l += b * DS_GAIN; // DS B enable L
         }
         if self.cnt_h & 0x1000 != 0 {
-            r += b * 52; // DS B enable R
+            r += b * DS_GAIN; // DS B enable R
         }
         (l.clamp(-32768, 32767) as i16, r.clamp(-32768, 32767) as i16)
     }
@@ -324,6 +334,22 @@ impl Envelope {
     fn trigger(&mut self) {
         self.volume = self.initial;
         self.timer = self.period;
+    }
+    /// Escreve NRx2 (bits0-2 period, bit3 add, bits4-7 volume inicial). Se o
+    /// canal estiver ativo, recarrega o volume audível na hora — comportamento
+    /// do AGB do qual o motor M4A (Pokémon) depende: ele dirige o envelope dos
+    /// canais PSG por software, escrevendo o volume desejado em NRx2 a cada
+    /// frame sem re-triggerar. Devolve `true` se o DAC ficou desligado (volume
+    /// inicial 0 e sem incremento), o que deve silenciar o canal.
+    fn write(&mut self, val: u8, channel_on: bool) -> bool {
+        self.period = val & 0x07;
+        self.add = val & 0x08 != 0;
+        self.initial = val >> 4;
+        if channel_on {
+            self.volume = self.initial;
+            self.timer = self.period;
+        }
+        self.initial == 0 && !self.add
     }
     fn clock(&mut self) {
         if self.period == 0 {
@@ -470,11 +496,9 @@ impl Square {
                 self.duty = val >> 6;
             }
             2 => {
-                // NRx2 (envelope): bits0-2 period, bit3 add, bits4-7 volume inicial.
-                self.env.period = val & 0x07;
-                self.env.add = val & 0x08 != 0;
-                self.env.initial = val >> 4;
-                if self.env.initial == 0 && !self.env.add {
+                // NRx2 (envelope). Recarrega o volume se o canal já estiver
+                // ativo (ver Envelope::write); desliga se o DAC ficou off.
+                if self.env.write(val, self.on) {
                     self.on = false;
                 }
             }
@@ -662,11 +686,9 @@ impl Noise {
         match field {
             0 => self.length = 64 - (val & 0x3F) as u16, // NR41
             1 => {
-                // NR42 envelope
-                self.env.period = val & 0x07;
-                self.env.add = val & 0x08 != 0;
-                self.env.initial = val >> 4;
-                if self.env.initial == 0 && !self.env.add {
+                // NR42 envelope. Recarrega o volume se o canal já estiver ativo
+                // (ver Envelope::write); desliga se o DAC ficou off.
+                if self.env.write(val, self.on) {
                     self.on = false;
                 }
             }
@@ -718,6 +740,36 @@ mod tests {
         a.write_u8(0x0400_0064, 0x00); // NR13
         a.write_u8(0x0400_0065, 0x80); // NR14: trigger
         assert!(a.ch1.on);
+        assert_eq!(a.ch1.env.volume, 15);
+    }
+
+    #[test]
+    fn square_nrx2_write_reloads_live_volume() {
+        // O motor M4A (Pokémon) dirige o envelope dos PSG por software: escreve
+        // o volume em NRx2 a cada frame, sem re-triggerar. O volume audível deve
+        // acompanhar essas escritas enquanto o canal está ativo.
+        let mut a = apu_on();
+        a.write_u8(0x0400_0063, 0xF0); // NR12: volume 15, sem envelope
+        a.write_u8(0x0400_0065, 0x80); // NR14: trigger
+        assert_eq!(a.ch1.env.volume, 15);
+
+        // Abaixa o volume sem re-trigger → deve valer na hora ("alto demais").
+        a.write_u8(0x0400_0063, 0x40); // NR12: volume 4
+        assert_eq!(a.ch1.env.volume, 4, "NRx2 deve recarregar o volume audível");
+
+        // Volume 0 com add=0 desliga o DAC.
+        a.write_u8(0x0400_0063, 0x00);
+        assert!(!a.ch1.on, "volume 0 sem incremento deve silenciar o canal");
+    }
+
+    #[test]
+    fn nrx2_write_while_off_does_not_reload_volume() {
+        // Com o canal desligado, a escrita só ajusta os parâmetros; o volume
+        // audível só é recarregado no próximo trigger.
+        let mut a = apu_on();
+        a.write_u8(0x0400_0063, 0xF0); // NR12: volume 15 (canal ainda off)
+        assert_eq!(a.ch1.env.volume, 0, "sem trigger, volume não recarrega");
+        a.write_u8(0x0400_0065, 0x80); // trigger
         assert_eq!(a.ch1.env.volume, 15);
     }
 
