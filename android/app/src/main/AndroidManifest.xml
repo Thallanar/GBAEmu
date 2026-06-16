@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Link cable na LAN: abre sockets TCP (host/convidado). Sem isto o
+         Android bloqueia bind/connect e a conexão não rola. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Suporta gamepad, mas não exige (touch é o padrão). -->
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
 
