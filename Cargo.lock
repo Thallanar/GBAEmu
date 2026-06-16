@@ -631,6 +631,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "auroragba-core",
+ "auroragba-link",
  "auroragba-shiny",
  "cpal",
  "eframe",
@@ -641,6 +642,13 @@ dependencies = [
  "log",
  "rfd",
  "ureq",
+]
+
+[[package]]
+name = "auroragba-link"
+version = "0.1.0"
+dependencies = [
+ "auroragba-core",
 ]
 
 [[package]]
