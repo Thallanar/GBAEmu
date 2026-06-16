@@ -158,6 +158,30 @@ impl Gba {
         cycles
     }
 
+    /// Roda até o jogo ARMAR uma transferência multi-player (o master escreve
+    /// START e o SIO marca `pending_start`) ou até gastar `target` ciclos —
+    /// o que vier primeiro. Devolve `(ciclos rodados, armou?)`.
+    ///
+    /// É o primitivo do link event-driven (Fase Link, etapa c): em vez de
+    /// sincronizar numa fronteira de quantum fixa, o master para EXATAMENTE no
+    /// instante em que o jogo dispara cada transferência (Timer3 no
+    /// CONN_ESTABLISHED pede mais de 8/frame) e troca pela rede ali — sem teto
+    /// de transferências por frame. Verifica antes de cada passo e na entrada,
+    /// pra pegar um start já armado por uma escrita anterior.
+    pub fn run_until_transfer(&mut self, target: u32) -> (u32, bool) {
+        if self.bus.io.sio.link.pending_start {
+            return (0, true);
+        }
+        let mut cycles = 0u32;
+        while cycles < target {
+            cycles += self.step();
+            if self.bus.io.sio.link.pending_start {
+                return (cycles, true);
+            }
+        }
+        (cycles, false)
+    }
+
     // ─────────────────────────── Link (etapa b) ───────────────────────────
     // O host (app desktop) dirige a sessão: configura o link, espelha o
     // "pronto" do parceiro e aplica a troca decidida na fronteira do quantum.
@@ -182,9 +206,32 @@ impl Gba {
         (sio.in_multi(), sio.link.pending_start, sio.send_value())
     }
 
-    /// Aplica a troca multi-player concluída na fronteira do quantum (dados na
-    /// ordem dos IDs) e levanta a IRQ serial se o jogo a habilitou. No-op se o
-    /// jogo local não está em modo multi-player (sem latch fora do modo).
+    /// Registradores seriais crus (pro trace de depuração do link): (siocnt
+    /// guardado, siomlt_send, rcnt). Não aplica a máscara de estado-de-linha
+    /// da leitura — é o que o jogo escreveu.
+    pub fn link_regs(&self) -> (u16, u16, u16) {
+        let sio = &self.bus.io.sio;
+        (sio.siocnt, sio.siomlt_send, sio.rcnt)
+    }
+
+    /// Estado de interrupção (pro trace): (IE, IME ligado?, IF). Diz se a IRQ
+    /// serial (bit 7) está armada e se está pendente/sendo atendida.
+    pub fn link_irq_state(&self) -> (u16, bool, u16) {
+        let io = &self.bus.io;
+        (io.ie, io.ime, io.iflag)
+    }
+
+    /// Início da transferência multi-player: acende o bit busy (SIOCNT bit 7)
+    /// em TODOS — no HW o clock do master seta busy em cada GBA. É o que um
+    /// escravo poll-based espera ver (busy→clear) pra detectar a transferência;
+    /// sem isso ele fica cego. Marca a pendência como comprometida.
+    pub fn link_begin_transfer(&mut self) {
+        self.bus.io.sio.begin_transfer();
+    }
+
+    /// Conclui a transferência multi-player (um quantum após o início, pra o
+    /// busy ficar visível): grava os dados na ordem dos IDs, apaga o busy e
+    /// levanta a IRQ serial se habilitada. No-op fora do modo multi-player.
     pub fn link_complete_multi(&mut self, data: [u16; 4]) {
         if self.bus.io.sio.complete_multi(data) {
             self.bus.io.raise(crate::io::irq_bits::SERIAL);

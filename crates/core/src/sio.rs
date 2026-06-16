@@ -160,11 +160,24 @@ impl Sio {
             a if a == SIOMULTI0_ADDR + 4 => self.siomulti[2] = val,
             a if a == SIOMULTI0_ADDR + 6 => self.siomulti[3] = val,
             SIOCNT_ADDR => {
+                if val != self.siocnt {
+                    log::debug!(
+                        "SIOCNT={val:04X} (start={} irq={} modo={:02b})",
+                        (val >> 7) & 1,
+                        (val >> 14) & 1,
+                        (val >> 12) & 0b11,
+                    );
+                }
                 self.siocnt = val;
                 return self.maybe_complete_transfer();
             }
             SIOMLT_SEND_ADDR => self.siomlt_send = val,
-            RCNT_ADDR => self.rcnt = val,
+            RCNT_ADDR => {
+                if val != self.rcnt {
+                    log::debug!("RCNT={val:04X}");
+                }
+                self.rcnt = val;
+            }
             _ => {}
         }
         false
@@ -179,6 +192,17 @@ impl Sio {
     /// O que enviaríamos na próxima troca multi-player.
     pub fn send_value(&self) -> u16 {
         self.siomlt_send
+    }
+
+    /// Início da transferência: acende o busy (bit 7) que o HW seta em todos os
+    /// GBAs durante a transferência — pro escravo poll-based detectar o
+    /// busy→clear. Também limpa o `pending_start` (a transferência saiu da fila
+    /// e está em curso, pra não ser disparada de novo no próximo quantum).
+    pub fn begin_transfer(&mut self) {
+        if self.in_multi() {
+            self.siocnt |= START;
+            self.link.pending_start = false;
+        }
     }
 
     /// Aplica uma troca multi-player concluída (dados na ordem dos IDs da
@@ -217,6 +241,10 @@ impl Sio {
     /// multi-player NÃO completa aqui — vira pendência pro quantum do host.
     fn maybe_complete_transfer(&mut self) -> bool {
         if self.siocnt & START == 0 {
+            // Escrita no SIOCNT SEM start cancela uma pendência de link (o
+            // jogo desistiu/reconfigurou antes da fronteira do quantum) —
+            // senão entregaríamos uma transferência fantasma ao parceiro.
+            self.link.pending_start = false;
             return false;
         }
         match self.mode() {
