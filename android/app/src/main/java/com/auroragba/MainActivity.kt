@@ -30,6 +30,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -71,6 +72,9 @@ class MainActivity : Activity() {
         const val PREFS = "auroragba"
         const val KEY_ROM_FOLDER = "rom_folder_uri"
         const val KEY_PAD_MAP = "pad_map"
+        const val KEY_LINK_ADDR = "link_addr"
+        // Porta TCP padrão do link (igual ao desktop: `link::DEFAULT_PORT`).
+        const val LINK_PORT = 7777
 
         // Botões GBA remapeáveis do controle físico (D-pad fica fixo). Os três
         // arrays andam juntos pelo índice; o pad_map persiste os keycodes nessa ordem.
@@ -134,6 +138,22 @@ class MainActivity : Activity() {
     // Captura de tela: a thread GL copia o framebuffer atual quando setado; o
     // encode PNG + gravação na galeria roda numa thread à parte (não trava o draw).
     private val pendingScreenshot = AtomicBoolean(false)
+
+    // ── Link cable ──────────────────────────────────────────────────────────
+    // Comandos do menu de Link (a thread GL processa, pois mexem no ponteiro):
+    // hospedar na porta (-1 = nenhum), conectar no endereço, cancelar, desconectar.
+    private val pendingLinkHost = AtomicInteger(-1)
+    private val pendingLinkJoin = AtomicReference<String?>(null)
+    private val pendingLinkCancel = AtomicBoolean(false)
+    private val pendingLinkDisconnect = AtomicBoolean(false)
+    // Estado publicado pela thread GL: 0 ocioso / 1 conectando / 2 conectado, e o
+    // papel (0 host / 1 convidado / -1). A UI lê pra montar o menu de Link.
+    private val linkStatePub = AtomicInteger(0)
+    private val linkRolePub = AtomicInteger(-1)
+    // Último estado visto na thread GL, pra avisar (toast) só nas transições.
+    @Volatile private var lastLinkState = 0
+    // Último endereço usado no "Conectar", persistido pra pré-preencher.
+    private var lastLinkAddr = ""
 
     // Game code do jogo atual (chave dos arquivos de save). Escrito na thread GL
     // ao carregar a ROM, lido na UI pra montar os caminhos.
@@ -203,6 +223,7 @@ class MainActivity : Activity() {
         window.attributes = window.attributes.apply { preferredRefreshRate = GBA_FPS }
         logRefresh("onCreate")
         loadPadMap()
+        loadLinkAddr()
 
         glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(2)
@@ -787,7 +808,7 @@ class MainActivity : Activity() {
         val speedItem = "⏩ Velocidade (${ffSpeed}x)"
         val items = mutableListOf(
             "Carregar ROM", "🔄 Resetar", "Salvar estado", "Carregar estado",
-            "📸 Captura de tela", speedItem, "🎮 Remapear controle",
+            "📸 Captura de tela", speedItem, "🎮 Remapear controle", "🔗 Link",
         )
         if (huntSupported) items.add("✨ Shiny Hunter")
         AlertDialog.Builder(this)
@@ -801,10 +822,89 @@ class MainActivity : Activity() {
                     "📸 Captura de tela" -> takeScreenshot()
                     speedItem -> speedMenu()
                     "🎮 Remapear controle" -> remapMenu()
+                    "🔗 Link" -> linkMenu()
                     "✨ Shiny Hunter" -> startShinyHunter()
                 }
             }
             .show()
+    }
+
+    /**
+     * Menu do link cable. O conteúdo depende do estado publicado pela thread GL:
+     * ocioso (hospedar/conectar), conectando (cancelar) ou conectado (papel +
+     * desconectar). Os comandos viram flags que a thread GL processa.
+     */
+    private fun linkMenu() {
+        when (linkStatePub.get()) {
+            2 -> {
+                val papel = if (linkRolePub.get() == 0) "host" else "convidado"
+                AlertDialog.Builder(this)
+                    .setTitle("🔗 Link — conectado")
+                    .setMessage("Somos o $papel. A troca acontece dentro do jogo.")
+                    .setPositiveButton("Desconectar") { _, _ -> pendingLinkDisconnect.set(true) }
+                    .setNegativeButton("Fechar", null)
+                    .show()
+            }
+            1 -> {
+                AlertDialog.Builder(this)
+                    .setTitle("🔗 Link — conectando…")
+                    .setMessage("Aguardando o parceiro.")
+                    .setPositiveButton("Cancelar") { _, _ -> pendingLinkCancel.set(true) }
+                    .setNegativeButton("Fechar", null)
+                    .show()
+            }
+            else -> {
+                AlertDialog.Builder(this)
+                    .setTitle("🔗 Link")
+                    .setItems(arrayOf("Hospedar (porta $LINK_PORT)", "Conectar a um host…")) { _, which ->
+                        when (which) {
+                            0 -> {
+                                pendingLinkHost.set(LINK_PORT)
+                                toast("Aguardando parceiro na porta $LINK_PORT…")
+                            }
+                            1 -> linkJoinDialog()
+                        }
+                    }
+                    .show()
+            }
+        }
+    }
+
+    /** Diálogo de "Conectar": pede o IP do host e dispara o join. */
+    private fun linkJoinDialog() {
+        val input = EditText(this).apply {
+            setText(lastLinkAddr)
+            hint = "192.168.0.10"
+            setSingleLine()
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Conectar a um host")
+            .setMessage("IP do parceiro na rede (porta $LINK_PORT por padrão):")
+            .setView(input)
+            .setPositiveButton("Conectar") { _, _ ->
+                val raw = input.text.toString().trim()
+                if (raw.isEmpty()) {
+                    toast("Endereço vazio")
+                    return@setPositiveButton
+                }
+                lastLinkAddr = raw
+                saveLinkAddr()
+                // Sem porta explícita → usa a padrão.
+                val addr = if (raw.contains(':')) raw else "$raw:$LINK_PORT"
+                pendingLinkJoin.set(addr)
+                toast("Conectando em $addr…")
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun loadLinkAddr() {
+        lastLinkAddr = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_LINK_ADDR, "") ?: ""
+    }
+
+    private fun saveLinkAddr() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putString(KEY_LINK_ADDR, lastLinkAddr).apply()
     }
 
     /** Escolha do multiplicador de velocidade (1x volta ao normal). */
@@ -1315,6 +1415,27 @@ class MainActivity : Activity() {
                 NativeBridge.huntStop(handle)
                 hunting = false
                 runOnUiThread { stopHuntUI() }
+            }
+
+            // Comandos do link (menu). Dá pra conectar mesmo sem ROM; a troca em
+            // si só anda com o jogo rodando (o protocolo corre no renderFrame).
+            val linkHostPort = pendingLinkHost.getAndSet(-1)
+            if (linkHostPort >= 0) NativeBridge.linkStartHost(handle, linkHostPort)
+            pendingLinkJoin.getAndSet(null)?.let { NativeBridge.linkStartJoin(handle, it) }
+            if (pendingLinkCancel.getAndSet(false)) NativeBridge.linkCancel(handle)
+            if (pendingLinkDisconnect.getAndSet(false)) NativeBridge.linkDisconnect(handle)
+            // Publica o estado (linkStatus também recolhe a sessão pronta) e avisa
+            // nas transições — o menu é estático, então o toast dá o retorno.
+            val ls = NativeBridge.linkStatus(handle)
+            linkStatePub.set(ls)
+            linkRolePub.set(NativeBridge.linkRole(handle))
+            if (ls != lastLinkState) {
+                val prev = lastLinkState
+                lastLinkState = ls
+                when {
+                    ls == 2 -> runOnUiThread { toast("🔗 Link conectado") }
+                    ls == 0 && prev == 2 -> runOnUiThread { toast("Link encerrado") }
+                }
             }
 
             // Save states só fora da caça (o menu durante o hunt nem os oferece).
