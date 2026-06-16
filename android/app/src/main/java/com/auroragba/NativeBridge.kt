@@ -130,4 +130,7 @@ object NativeBridge {
 
     /** Papel na mesa: 0 = host (parent), 1 = convidado (child), -1 = sem link. */
     external fun linkRole(handle: Long): Int
+
+    /** Consome a última falha de conexão (vazio = nada). Pra mostrar num toast. */
+    external fun linkTakeError(handle: Long): String
 }

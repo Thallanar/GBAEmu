@@ -1437,6 +1437,9 @@ class MainActivity : Activity() {
                     ls == 0 && prev == 2 -> runOnUiThread { toast("Link encerrado") }
                 }
             }
+            // Mostra a causa de uma falha de conexão (ex.: permissão, porta ocupada).
+            val linkErr = NativeBridge.linkTakeError(handle)
+            if (linkErr.isNotEmpty()) runOnUiThread { toast("Link falhou: $linkErr") }
 
             // Save states só fora da caça (o menu durante o hunt nem os oferece).
             if (!hunting) {

@@ -45,6 +45,9 @@ mod android_impl {
         link_pending: Option<Receiver<std::io::Result<LinkSession<TcpStream>>>>,
         /// Flag pra cancelar a conexão em andamento (accept/connect cancelável).
         link_cancel: Option<Arc<AtomicBool>>,
+        /// Última falha de conexão (mensagem do SO), pra UI mostrar. Consumida
+        /// por `linkTakeError`. `None` = nada novo a reportar.
+        link_error: Option<String>,
     }
 
     impl Emu {
@@ -59,6 +62,7 @@ mod android_impl {
                 link: None,
                 link_pending: None,
                 link_cancel: None,
+                link_error: None,
             }
         }
     }
@@ -817,8 +821,11 @@ mod android_impl {
                 log::info!("link conectado");
             }
             Ok(Err(e)) => {
+                // Cancelamento (Interrupted) é silencioso; o resto vira aviso
+                // pra UI (ex.: "Permission denied", "Address already in use").
                 if e.kind() != std::io::ErrorKind::Interrupted {
                     log::warn!("link falhou: {e}");
+                    emu.link_error = Some(e.to_string());
                 }
                 emu.link_pending = None;
                 emu.link_cancel = None;
@@ -952,6 +959,23 @@ mod android_impl {
             Some(s) => s.id as jint,
             None => -1,
         }
+    }
+
+    /// Consome a última falha de conexão (string vazia = nada novo). A UI mostra
+    /// num toast pra o usuário ver POR QUE não conectou.
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_linkTakeError(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jstring {
+        let msg = emu(handle).and_then(|e| e.link_error.take()).unwrap_or_default();
+        env.new_string(msg)
+            .map(|s| s.into_raw())
+            .unwrap_or(std::ptr::null_mut())
     }
 }
 
