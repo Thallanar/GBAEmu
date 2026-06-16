@@ -31,3 +31,4 @@ cpal.workspace = true
 ureq.workspace = true
 image.workspace = true
 rfd = "0.14"
+mdns-sd = "0.20.0"
