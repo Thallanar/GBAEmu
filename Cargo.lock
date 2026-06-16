@@ -609,6 +609,7 @@ version = "0.1.0"
 dependencies = [
  "android_logger",
  "auroragba-core",
+ "auroragba-link",
  "auroragba-shiny",
  "jni",
  "log",
