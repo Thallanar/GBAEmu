@@ -912,25 +912,37 @@ class MainActivity : Activity() {
             .putString(KEY_LINK_ADDR, lastLinkAddr).apply()
     }
 
-    /** Segura o Wi-Fi em baixa latência (modo de jogo) enquanto há link. */
+    /**
+     * Segura o Wi-Fi em baixa latência (modo de jogo) enquanto há link. É só
+     * otimização: qualquer falha aqui é engolida (log) pra nunca derrubar o app
+     * nem atrapalhar o link — no pior caso, roda com a latência normal do Wi-Fi.
+     */
     private fun acquireWifiLock() {
-        if (wifiLock == null) {
-            val wm = applicationContext
-                .getSystemService(WIFI_SERVICE) as android.net.wifi.WifiManager
-            // LOW_LATENCY (API 29+) é o ideal pra tempo real; antes disso, HIGH_PERF.
-            val mode = if (Build.VERSION.SDK_INT >= 29) {
-                android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-            } else {
-                @Suppress("DEPRECATION")
-                android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        try {
+            if (wifiLock == null) {
+                val wm = applicationContext
+                    .getSystemService(WIFI_SERVICE) as android.net.wifi.WifiManager
+                // LOW_LATENCY (API 29+) é o ideal pra tempo real; antes, HIGH_PERF.
+                val mode = if (Build.VERSION.SDK_INT >= 29) {
+                    android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    @Suppress("DEPRECATION")
+                    android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiLock = wm.createWifiLock(mode, "auroragba-link")
             }
-            wifiLock = wm.createWifiLock(mode, "auroragba-link")
+            wifiLock?.let { if (!it.isHeld) it.acquire() }
+        } catch (e: Throwable) {
+            Log.w(TAG, "WifiLock indisponível (segue sem): $e")
         }
-        wifiLock?.let { if (!it.isHeld) it.acquire() }
     }
 
     private fun releaseWifiLock() {
-        wifiLock?.let { if (it.isHeld) it.release() }
+        try {
+            wifiLock?.let { if (it.isHeld) it.release() }
+        } catch (e: Throwable) {
+            Log.w(TAG, "WifiLock release falhou: $e")
+        }
     }
 
     /** Escolha do multiplicador de velocidade (1x volta ao normal). */
