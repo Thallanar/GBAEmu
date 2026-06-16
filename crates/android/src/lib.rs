@@ -12,12 +12,18 @@
 mod android_impl {
     use auroragba_core::joypad::Button;
     use auroragba_core::{apu, Gba};
+    use auroragba_link::LinkSession;
     use auroragba_shiny::games::{self, GameProfile};
     use auroragba_shiny::gfx::RomGfx;
     use auroragba_shiny::{CheckResult, Hunter};
-    use jni::objects::{JByteArray, JByteBuffer, JClass, JShortArray};
+    use jni::objects::{JByteArray, JByteBuffer, JClass, JShortArray, JString};
     use jni::sys::{jboolean, jbyteArray, jint, jintArray, jlong, jstring, JNI_FALSE, JNI_TRUE};
     use jni::JNIEnv;
+    use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{self, Receiver, TryRecvError};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     /// Estado que vive atrás do handle: o emulador mais o driver do Shiny Hunter.
     /// O `hunter` precisa persistir entre tentativas (mantém contadores e o PRNG
@@ -31,6 +37,14 @@ mod android_impl {
         target: usize,
         /// Tabelas de gráficos da ROM (sprites do alvo); localizadas no loadRom.
         rom_gfx: Option<RomGfx>,
+        /// Sessão de link cable ativa (`None` = solo). Espelha o desktop.
+        link: Option<LinkSession<TcpStream>>,
+        /// Conexão de link em andamento numa thread nativa: o canal traz a sessão
+        /// pronta; o `renderFrame` a recolhe (na thread de emulação). A thread de
+        /// fundo NÃO toca o `Emu` — só o `Sender`.
+        link_pending: Option<Receiver<std::io::Result<LinkSession<TcpStream>>>>,
+        /// Flag pra cancelar a conexão em andamento (accept/connect cancelável).
+        link_cancel: Option<Arc<AtomicBool>>,
     }
 
     impl Emu {
@@ -42,6 +56,9 @@ mod android_impl {
                 profile: None,
                 target: 0,
                 rom_gfx: None,
+                link: None,
+                link_pending: None,
+                link_cancel: None,
             }
         }
     }
@@ -178,20 +195,34 @@ mod android_impl {
         handle: jlong,
         buffer: JByteBuffer,
     ) {
-        let Some(gba) = gba(handle) else {
+        let Some(emu) = emu(handle) else {
             return;
         };
-        gba.run_frame();
+        // Recolhe uma conexão de link que tenha ficado pronta (na thread de
+        // emulação, dona do `Emu`).
+        poll_link(emu);
+        if let Some(session) = &mut emu.link {
+            // Link event-driven: o master roda até o jogo armar cada
+            // transferência e troca pela rede; o child espelha. Se o parceiro
+            // sumir, degrada pra solo (cabo "puxado").
+            if let Err(e) = session.run_frame(&mut emu.gba) {
+                log::warn!("link caiu ({e}) — seguindo solo");
+                emu.link = None;
+                emu.gba.link_configure(false, 0);
+            }
+        } else {
+            emu.gba.run_frame();
+        }
         // O áudio fica no buffer do APU e é consumido por `drainAudio`. Limite de
         // segurança: se ninguém estiver drenando, não deixa o buffer crescer sem
         // fim (mantém ~1 s de áudio estéreo).
-        let buf = &mut gba.bus.apu.buffer;
+        let buf = &mut emu.gba.bus.apu.buffer;
         let cap = apu::OUTPUT_RATE as usize * 2;
         if buf.len() > cap {
             buf.drain(..buf.len() - cap);
         }
 
-        write_framebuffer(&env, gba, &buffer);
+        write_framebuffer(&env, &emu.gba, &buffer);
     }
 
     /// Copia o framebuffer atual pro `ByteBuffer` sem avançar a emulação. O Shiny
@@ -696,6 +727,230 @@ mod android_impl {
         match env.new_int_array(px.len() as jint) {
             Ok(arr) if env.set_int_array_region(&arr, 0, &px).is_ok() => arr.into_raw(),
             _ => empty(),
+        }
+    }
+
+    // ===== Link cable (Fase Link, L3) ===================================
+    //
+    // A conexão (accept/connect) bloqueia, então roda numa thread nativa: ela só
+    // fala com o `Sender`, e a thread de emulação (dona do `Emu`) recolhe a
+    // sessão pronta no `renderFrame`/`linkStatus` via `poll_link`. O Kotlin só
+    // faz chamadas não-bloqueantes (start/cancel/status), espelhando o painel do
+    // desktop. Wire/protocolo são os do crate portátil — cross-platform.
+
+    /// Intervalo do loop cancelável de accept/connect.
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+    fn link_cancelled() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::Interrupted, "conexão cancelada")
+    }
+
+    /// Hospeda e espera o parceiro (accept não-bloqueante, cancelável). ID 0.
+    fn connect_host(port: u16, cancel: &AtomicBool) -> std::io::Result<LinkSession<TcpStream>> {
+        let listener = TcpListener::bind(("0.0.0.0", port))?;
+        listener.set_nonblocking(true)?;
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(link_cancelled());
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false)?;
+                    stream.set_nodelay(true)?;
+                    return LinkSession::establish(stream, 0, None);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Conecta no host, tentando de novo enquanto ele não sobe (cancelável). ID 1.
+    fn connect_join(addr: &str, cancel: &AtomicBool) -> std::io::Result<LinkSession<TcpStream>> {
+        let target = addr.to_socket_addrs()?.next().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "endereço sem destino")
+        })?;
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(link_cancelled());
+            }
+            match TcpStream::connect_timeout(&target, POLL_INTERVAL) {
+                Ok(stream) => {
+                    stream.set_nodelay(true)?;
+                    return LinkSession::establish(stream, 1, None);
+                }
+                Err(_) => std::thread::sleep(POLL_INTERVAL),
+            }
+        }
+    }
+
+    /// Dispara uma conexão numa thread nativa e guarda o canal/cancel no `Emu`.
+    /// A thread só usa o `Sender` — não toca o `Emu`.
+    fn start_link(
+        emu: &mut Emu,
+        connect: impl FnOnce(Arc<AtomicBool>) -> std::io::Result<LinkSession<TcpStream>> + Send + 'static,
+    ) {
+        cancel_link(emu); // descarta qualquer tentativa anterior
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let thread_cancel = cancel.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(connect(thread_cancel));
+        });
+        emu.link_pending = Some(rx);
+        emu.link_cancel = Some(cancel);
+    }
+
+    /// Recolhe a sessão pronta (se houver). Chamado na thread de emulação.
+    fn poll_link(emu: &mut Emu) {
+        let Some(rx) = &emu.link_pending else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(session)) => {
+                emu.gba.link_configure(true, session.id);
+                emu.link = Some(session);
+                emu.link_pending = None;
+                emu.link_cancel = None;
+                log::info!("link conectado");
+            }
+            Ok(Err(e)) => {
+                if e.kind() != std::io::ErrorKind::Interrupted {
+                    log::warn!("link falhou: {e}");
+                }
+                emu.link_pending = None;
+                emu.link_cancel = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                emu.link_pending = None;
+                emu.link_cancel = None;
+            }
+        }
+    }
+
+    /// Sinaliza cancelamento e descarta a tentativa pendente.
+    fn cancel_link(emu: &mut Emu) {
+        if let Some(c) = &emu.link_cancel {
+            c.store(true, Ordering::Relaxed);
+        }
+        emu.link_pending = None;
+        emu.link_cancel = None;
+    }
+
+    /// Começa a hospedar um link na porta `port` (thread de fundo). Não bloqueia.
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_linkStartHost(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        port: jint,
+    ) {
+        if let Some(emu) = emu(handle) {
+            let port = port as u16;
+            start_link(emu, move |cancel| connect_host(port, &cancel));
+        }
+    }
+
+    /// Começa a conectar num host `addr` ("ip:porta") (thread de fundo).
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_linkStartJoin(
+        mut env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        addr: JString,
+    ) {
+        let Some(emu) = emu(handle) else {
+            return;
+        };
+        let addr: String = match env.get_string(&addr) {
+            Ok(s) => s.into(),
+            Err(e) => {
+                log::error!("linkStartJoin: endereço inválido: {e}");
+                return;
+            }
+        };
+        start_link(emu, move |cancel| connect_join(&addr, &cancel));
+    }
+
+    /// Cancela a conexão de link em andamento.
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_linkCancel(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) {
+        if let Some(emu) = emu(handle) {
+            cancel_link(emu);
+        }
+    }
+
+    /// Encerra a sessão de link ativa, voltando ao solo.
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_linkDisconnect(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) {
+        if let Some(emu) = emu(handle) {
+            cancel_link(emu);
+            if emu.link.take().is_some() {
+                emu.gba.link_configure(false, 0);
+            }
+        }
+    }
+
+    /// Estado do link: 0 = ocioso, 1 = conectando, 2 = conectado. Também recolhe
+    /// a sessão pronta (pra a UI ver o "conectado" mesmo sem um frame rodando).
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_linkStatus(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jint {
+        let Some(emu) = emu(handle) else {
+            return 0;
+        };
+        poll_link(emu);
+        if emu.link.is_some() {
+            2
+        } else if emu.link_pending.is_some() {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Papel na mesa: 0 = host (parent), 1 = convidado (child), -1 = sem link.
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_linkRole(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jint {
+        match emu(handle).and_then(|e| e.link.as_ref()) {
+            Some(s) => s.id as jint,
+            None => -1,
         }
     }
 }
