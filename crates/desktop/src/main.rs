@@ -15,6 +15,7 @@ use auroragba_shiny::{CheckResult, Hunter};
 use eframe::egui;
 
 mod audio;
+mod discovery;
 mod library;
 mod link;
 mod png;
@@ -431,6 +432,10 @@ struct AuroraApp {
     link_port: String,
     /// Campo de texto do endereço ("ip:porta") pra conectar.
     link_addr: String,
+    /// Escuta de hosts na LAN (descoberta UDP). `None` = indisponível.
+    discovery: Option<discovery::Browser>,
+    /// Anúncio do nosso host na LAN enquanto hospedamos. `None` = não anunciando.
+    link_advertiser: Option<discovery::Advertiser>,
 }
 
 /// Ação escolhida no painel de Link, aplicada depois de fechar a UI (pra não
@@ -438,8 +443,20 @@ struct AuroraApp {
 enum LinkAction {
     Host,
     Join,
+    /// Conectar num host descoberto na LAN (endereço já pronto).
+    JoinAddr(String),
     Cancel,
     Disconnect,
+}
+
+/// Nome amigável da máquina pra anunciar na LAN. Sem dependência: tenta as
+/// variáveis de ambiente usuais e cai num genérico.
+fn host_name() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "AuroraGBA".to_string())
 }
 
 impl AuroraApp {
@@ -502,6 +519,14 @@ impl AuroraApp {
             show_link: false,
             link_port: link::DEFAULT_PORT.to_string(),
             link_addr: format!("127.0.0.1:{}", link::DEFAULT_PORT),
+            discovery: match discovery::Browser::start() {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    log::info!("descoberta de link na LAN indisponível: {e}");
+                    None
+                }
+            },
+            link_advertiser: None,
         };
 
         if let Some(s) = &app.link {
@@ -1139,6 +1164,7 @@ impl AuroraApp {
                 self.set_status(format!("🔗 link conectado — somos o {papel}"));
                 self.link = Some(session);
                 self.link_pending = None;
+                self.link_advertiser = None; // conectou: para de se anunciar
             }
             Some(Err(e)) => {
                 // `Interrupted` = cancelamento pedido pelo usuário, sem alarde.
@@ -1146,6 +1172,7 @@ impl AuroraApp {
                     self.set_status(format!("link falhou ({e})"));
                 }
                 self.link_pending = None;
+                self.link_advertiser = None;
             }
         }
     }
@@ -1158,6 +1185,8 @@ impl AuroraApp {
         // UI roda — as mutações de fato acontecem depois, via `action`.
         let connected_id = self.link.as_ref().map(|s| s.id);
         let pending_hosting = self.link_pending.as_ref().map(|p| p.hosting);
+        // Snapshot dos hosts descobertos na LAN (vazio se a descoberta está off).
+        let peers = self.discovery.as_ref().map(|d| d.peers()).unwrap_or_default();
         let mut open = self.show_link;
         let mut action: Option<LinkAction> = None;
 
@@ -1224,6 +1253,30 @@ impl AuroraApp {
                         }
                     });
                     ui.separator();
+                    ui.label("Parceiros na rede:");
+                    if self.discovery.is_none() {
+                        ui.label(
+                            egui::RichText::new("Descoberta indisponível — use o endereço manual.")
+                                .small()
+                                .weak(),
+                        );
+                    } else if peers.is_empty() {
+                        ui.label(
+                            egui::RichText::new("Procurando hosts na LAN…")
+                                .small()
+                                .weak(),
+                        );
+                    } else {
+                        for peer in &peers {
+                            if ui
+                                .button(format!("🔗 {} ({})", peer.name, peer.addr))
+                                .clicked()
+                            {
+                                action = Some(LinkAction::JoinAddr(peer.addr.to_string()));
+                            }
+                        }
+                    }
+                    ui.separator();
                     ui.label(
                         egui::RichText::new("Os dois lados precisam estar na mesma rede (LAN).")
                             .small()
@@ -1235,7 +1288,14 @@ impl AuroraApp {
 
         match action {
             Some(LinkAction::Host) => match self.link_port.trim().parse::<u16>() {
-                Ok(port) => self.link_pending = Some(link::PendingLink::host(port)),
+                Ok(port) => {
+                    self.link_pending = Some(link::PendingLink::host(port));
+                    // Anuncia o host na LAN pra os parceiros nos acharem sem IP
+                    // (best-effort: se o broadcast falhar, o manual ainda vale).
+                    self.link_advertiser = discovery::Advertiser::start(port, host_name())
+                        .map_err(|e| log::info!("não consegui anunciar o link na LAN: {e}"))
+                        .ok();
+                }
                 Err(_) => self.set_status("porta inválida"),
             },
             Some(LinkAction::Join) => {
@@ -1246,11 +1306,15 @@ impl AuroraApp {
                     self.link_pending = Some(link::PendingLink::join(addr));
                 }
             }
+            Some(LinkAction::JoinAddr(addr)) => {
+                self.link_pending = Some(link::PendingLink::join(addr));
+            }
             Some(LinkAction::Cancel) => {
                 if let Some(p) = &self.link_pending {
                     p.cancel();
                 }
                 self.link_pending = None;
+                self.link_advertiser = None; // para de anunciar
                 self.set_status("conexão de link cancelada");
             }
             Some(LinkAction::Disconnect) => {
@@ -1610,9 +1674,11 @@ impl eframe::App for AuroraApp {
         if self.show_library {
             self.library_window(ctx);
         }
-        // Janela do Link (quando aberta).
+        // Janela do Link (quando aberta). Repinta de tempos em tempos pra a
+        // lista de parceiros na LAN refletir os anúncios que vão chegando.
         if self.show_link {
             self.link_window(ctx);
+            ctx.request_repaint_after(Duration::from_millis(500));
         }
         // Mantém repintando enquanto remapeia (pra capturar a tecla/botão sem
         // depender de outro evento) ou se a janela está aberta.
