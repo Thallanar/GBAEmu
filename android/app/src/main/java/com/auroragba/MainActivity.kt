@@ -154,6 +154,10 @@ class MainActivity : Activity() {
     @Volatile private var lastLinkState = 0
     // Último endereço usado no "Conectar", persistido pra pré-preencher.
     private var lastLinkAddr = ""
+    // Trava o Wi-Fi em baixa latência enquanto o link está ativo: sem isso o
+    // rádio dorme entre pacotes e a ida-e-volta do lockstep ganha ~100-200 ms,
+    // derrubando o fps. Segurada enquanto conectando/conectado.
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
     // Game code do jogo atual (chave dos arquivos de save). Escrito na thread GL
     // ao carregar a ROM, lido na UI pra montar os caminhos.
@@ -533,6 +537,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        releaseWifiLock()
         if (handle != 0L) {
             NativeBridge.destroy(handle)
             handle = 0L
@@ -905,6 +910,27 @@ class MainActivity : Activity() {
     private fun saveLinkAddr() {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
             .putString(KEY_LINK_ADDR, lastLinkAddr).apply()
+    }
+
+    /** Segura o Wi-Fi em baixa latência (modo de jogo) enquanto há link. */
+    private fun acquireWifiLock() {
+        if (wifiLock == null) {
+            val wm = applicationContext
+                .getSystemService(WIFI_SERVICE) as android.net.wifi.WifiManager
+            // LOW_LATENCY (API 29+) é o ideal pra tempo real; antes disso, HIGH_PERF.
+            val mode = if (Build.VERSION.SDK_INT >= 29) {
+                android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                @Suppress("DEPRECATION")
+                android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wm.createWifiLock(mode, "auroragba-link")
+        }
+        wifiLock?.let { if (!it.isHeld) it.acquire() }
+    }
+
+    private fun releaseWifiLock() {
+        wifiLock?.let { if (it.isHeld) it.release() }
     }
 
     /** Escolha do multiplicador de velocidade (1x volta ao normal). */
@@ -1432,9 +1458,14 @@ class MainActivity : Activity() {
             if (ls != lastLinkState) {
                 val prev = lastLinkState
                 lastLinkState = ls
-                when {
-                    ls == 2 -> runOnUiThread { toast("🔗 Link conectado") }
-                    ls == 0 && prev == 2 -> runOnUiThread { toast("Link encerrado") }
+                runOnUiThread {
+                    when {
+                        ls == 2 -> toast("🔗 Link conectado")
+                        ls == 0 && prev == 2 -> toast("Link encerrado")
+                    }
+                    // Segura o Wi-Fi em baixa latência enquanto há link (conectando
+                    // ou conectado); solta ao voltar pro solo.
+                    if (ls == 0) releaseWifiLock() else acquireWifiLock()
                 }
             }
             // Mostra a causa de uma falha de conexão (ex.: permissão, porta ocupada).
