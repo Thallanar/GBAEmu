@@ -336,7 +336,7 @@ fn parse_link_args() -> Option<link::LinkSession> {
     if let Some(i) = pos("--link-host") {
         let port: u16 = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(7777);
         eprintln!("link: aguardando o parceiro na porta {port}…");
-        match link::host(port) {
+        match link::PendingLink::host(port).wait() {
             Ok(s) => {
                 eprintln!("link: parceiro conectado (somos o parent)");
                 Some(s)
@@ -352,7 +352,7 @@ fn parse_link_args() -> Option<link::LinkSession> {
             .cloned()
             .unwrap_or_else(|| "127.0.0.1:7777".into());
         eprintln!("link: conectando em {addr}…");
-        match link::join(&addr) {
+        match link::PendingLink::join(addr).wait() {
             Ok(s) => {
                 eprintln!("link: conectado (somos o child)");
                 Some(s)
@@ -423,6 +423,23 @@ struct AuroraApp {
     show_library: bool,
     /// Sessão de lockstep do link cable (Fase Link, etapa b). `None` = solo.
     link: Option<link::LinkSession>,
+    /// Conexão de link em andamento numa thread de fundo. `None` = sem tentativa.
+    link_pending: Option<link::PendingLink>,
+    /// Janela de Link aberta?
+    show_link: bool,
+    /// Campo de texto da porta pra hospedar.
+    link_port: String,
+    /// Campo de texto do endereço ("ip:porta") pra conectar.
+    link_addr: String,
+}
+
+/// Ação escolhida no painel de Link, aplicada depois de fechar a UI (pra não
+/// segurar `&self` enquanto se mexe em `self.link`/`self.link_pending`).
+enum LinkAction {
+    Host,
+    Join,
+    Cancel,
+    Disconnect,
 }
 
 impl AuroraApp {
@@ -481,6 +498,10 @@ impl AuroraApp {
             library: library::Library::new(cache_dir),
             show_library: false,
             link: link_session,
+            link_pending: None,
+            show_link: false,
+            link_port: link::DEFAULT_PORT.to_string(),
+            link_addr: format!("127.0.0.1:{}", link::DEFAULT_PORT),
         };
 
         if let Some(s) = &app.link {
@@ -1102,6 +1123,145 @@ impl AuroraApp {
         }
     }
 
+    /// Verifica se a thread de conexão de link terminou. Em sucesso, instala a
+    /// sessão e configura o `Gba` com o nosso papel na mesa; em falha, volta ao
+    /// modo solo com um aviso (cancelamento é silencioso). Enquanto pendente,
+    /// pede repintura pra UI animar o spinner.
+    fn poll_link(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &self.link_pending else {
+            return;
+        };
+        match pending.poll() {
+            None => ctx.request_repaint(),
+            Some(Ok(session)) => {
+                let papel = if session.id == 0 { "host" } else { "convidado" };
+                self.gba.link_configure(true, session.id);
+                self.set_status(format!("🔗 link conectado — somos o {papel}"));
+                self.link = Some(session);
+                self.link_pending = None;
+            }
+            Some(Err(e)) => {
+                // `Interrupted` = cancelamento pedido pelo usuário, sem alarde.
+                if e.kind() != std::io::ErrorKind::Interrupted {
+                    self.set_status(format!("link falhou ({e})"));
+                }
+                self.link_pending = None;
+            }
+        }
+    }
+
+    /// Painel de Link: hospedar/conectar (ocioso), spinner (conectando) ou
+    /// status + desconectar (conectado). A conexão roda em thread de fundo
+    /// ([`link::PendingLink`]), então a UI nunca trava esperando o parceiro.
+    fn link_window(&mut self, ctx: &egui::Context) {
+        // Espelha o estado em valores `Copy` pra não segurar `&self` enquanto a
+        // UI roda — as mutações de fato acontecem depois, via `action`.
+        let connected_id = self.link.as_ref().map(|s| s.id);
+        let pending_hosting = self.link_pending.as_ref().map(|p| p.hosting);
+        let mut open = self.show_link;
+        let mut action: Option<LinkAction> = None;
+
+        egui::Window::new("🔗 Link")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                if let Some(id) = connected_id {
+                    let papel = if id == 0 { "host (parent)" } else { "convidado (child)" };
+                    ui.label(format!("✅ Conectado — somos o {papel}."));
+                    ui.label(
+                        egui::RichText::new(
+                            "A troca acontece dentro do jogo (balcão da Pokémon Center).",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    ui.separator();
+                    if ui.button("Desconectar").clicked() {
+                        action = Some(LinkAction::Disconnect);
+                    }
+                } else if let Some(hosting) = pending_hosting {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(if hosting {
+                            "Aguardando o parceiro conectar…"
+                        } else {
+                            "Conectando…"
+                        });
+                    });
+                    if hosting {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Ouvindo na porta {}. Passe o seu IP da rede pro parceiro.",
+                                self.link_port
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    }
+                    ui.separator();
+                    if ui.button("Cancelar").clicked() {
+                        action = Some(LinkAction::Cancel);
+                    }
+                } else {
+                    ui.label("Hospedar (você gera o clock — é o master):");
+                    ui.horizontal(|ui| {
+                        ui.label("Porta:");
+                        ui.add(egui::TextEdit::singleline(&mut self.link_port).desired_width(70.0));
+                        if ui.button("Hospedar").clicked() {
+                            action = Some(LinkAction::Host);
+                        }
+                    });
+                    ui.separator();
+                    ui.label("Conectar a um host:");
+                    ui.horizontal(|ui| {
+                        ui.label("Endereço:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.link_addr).desired_width(160.0),
+                        );
+                        if ui.button("Conectar").clicked() {
+                            action = Some(LinkAction::Join);
+                        }
+                    });
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new("Os dois lados precisam estar na mesma rede (LAN).")
+                            .small()
+                            .weak(),
+                    );
+                }
+            });
+        self.show_link = open;
+
+        match action {
+            Some(LinkAction::Host) => match self.link_port.trim().parse::<u16>() {
+                Ok(port) => self.link_pending = Some(link::PendingLink::host(port)),
+                Err(_) => self.set_status("porta inválida"),
+            },
+            Some(LinkAction::Join) => {
+                let addr = self.link_addr.trim().to_string();
+                if addr.is_empty() {
+                    self.set_status("endereço vazio");
+                } else {
+                    self.link_pending = Some(link::PendingLink::join(addr));
+                }
+            }
+            Some(LinkAction::Cancel) => {
+                if let Some(p) = &self.link_pending {
+                    p.cancel();
+                }
+                self.link_pending = None;
+                self.set_status("conexão de link cancelada");
+            }
+            Some(LinkAction::Disconnect) => {
+                self.link = None;
+                self.gba.link_configure(false, 0);
+                self.set_status("link encerrado");
+            }
+            None => {}
+        }
+    }
+
     /// Roda exatamente 1 frame, lidando com o áudio: com dispositivo, drena as
     /// amostras pro host (ou descarta se `mute`, no fast-forward, pra não estourar
     /// o buffer nem sair em pitch errado); sem dispositivo, só esvazia o APU.
@@ -1229,6 +1389,10 @@ impl eframe::App for AuroraApp {
         if let Some(rebind) = self.rebinding {
             self.apply_rebind(ctx, rebind, pad_event);
         }
+
+        // Recebe a sessão de link quando a thread de conexão termina (e segue
+        // repintando enquanto ela está pendente, pra a UI animar o spinner).
+        self.poll_link(ctx);
 
         // Hotkeys globais. F5/F9/F12 disparam na borda (key_pressed); rewind e
         // fast-forward agem enquanto a tecla está segurada (key_down). Nenhuma é
@@ -1397,6 +1561,10 @@ impl eframe::App for AuroraApp {
                         self.show_input_config = true;
                         ui.close_menu();
                     }
+                    if ui.button("🔗 Link…").clicked() {
+                        self.show_link = true;
+                        ui.close_menu();
+                    }
                 });
                 ui.separator();
                 ui.label(format!("Scale: {:.0}x", self.scale));
@@ -1441,6 +1609,10 @@ impl eframe::App for AuroraApp {
         // Janela da biblioteca de ROMs (quando aberta).
         if self.show_library {
             self.library_window(ctx);
+        }
+        // Janela do Link (quando aberta).
+        if self.show_link {
+            self.link_window(ctx);
         }
         // Mantém repintando enquanto remapeia (pra capturar a tecla/botão sem
         // depender de outro evento) ou se a janela está aberta.
