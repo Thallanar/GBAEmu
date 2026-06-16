@@ -1107,16 +1107,11 @@ impl AuroraApp {
     /// o buffer nem sair em pitch errado); sem dispositivo, só esvazia o APU.
     fn step_frame(&mut self, mute: bool) {
         if let Some(session) = &mut self.link {
-            // Lockstep: 8 quanta = 1 frame, sincronizando o serial em cada
-            // fronteira. Se o parceiro sumir, degrada pra solo (cabo "puxado").
-            let mut err = None;
-            for _ in 0..8 {
-                if let Err(e) = session.run_quantum(&mut self.gba) {
-                    err = Some(e);
-                    break;
-                }
-            }
-            if let Some(e) = err {
+            // Link event-driven: o master roda até o jogo armar cada
+            // transferência e troca pela rede ali; o child espelha. Um frame de
+            // cada lado por chamada. Se o parceiro sumir, degrada pra solo
+            // (cabo "puxado").
+            if let Err(e) = session.run_frame(&mut self.gba) {
                 self.link = None;
                 self.gba.link_configure(false, 0);
                 self.set_status(format!("link caiu ({e}) — seguindo sem parceiro"));

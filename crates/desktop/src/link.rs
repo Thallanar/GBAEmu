@@ -1,73 +1,113 @@
-//! Lockstep do link cable entre duas instâncias (Fase Link, etapa b).
+//! Link cable entre duas instâncias — sincronização **event-driven**,
+//! dirigida pelo master (Fase Link, etapa c).
 //!
-//! Modelo: as duas instâncias avançam em **quanta** de ciclos e sincronizam o
-//! serial na fronteira de cada um — nenhuma fica mais de um quantum à frente
-//! da outra (o `exchange` é bloqueante nos dois lados). A cada fronteira os
-//! lados trocam uma mensagem pequena com:
-//!   - `ready`: o jogo local está em modo multi-player (vira o SD do outro);
-//!   - `start`: (só faz sentido vindo do parent) o jogo escreveu start neste
-//!     quantum — a transferência acontece NESTA fronteira, nos dois lados,
-//!     com os `send` desta mesma rodada (determinismo: ambos veem os mesmos
-//!     dados no mesmo ponto da emulação);
-//!   - `send`: o SIOMLT_SEND local.
+//! Modelo: o parent (host TCP, ID 0) é o master, como no hardware — ele gera o
+//! clock. Ele roda a CPU até o jogo ARMAR uma transferência (escrever START) ou
+//! até o fim do frame, e SÓ AÍ troca uma mensagem pela rede. Cada mensagem leva
+//! `delta` = ciclos que o master avançou; o child roda exatamente esse `delta`,
+//! espelhando o tempo do master. Assim **não há teto de transferências por
+//! frame**: o handshake (1/VBlank) e o CONN_ESTABLISHED (dirigido pelo Timer3,
+//! bem mais rápido) cabem do mesmo jeito — cada transferência do jogo vira uma
+//! troca pela rede no instante exato em que acontece.
 //!
-//! O parent (host TCP, ID 0) gera o clock, como no hardware. Parceiro não
-//! pronto lê linha alta (0xFFFF), igual ao cabo de verdade. Latência de
-//! transferência = até 1 quantum (~2 ms) — folgado pro protocolo de link do
-//! Gen 3, que é todo em handshakes.
+//! O `exchange`/`recv` é bloqueante: o master escreve a rodada e lê a resposta;
+//! o child lê a rodada e responde. Isso trava os dois a ≤1 rodada de distância.
+//! Parceiro não pronto lê linha alta (0xFFFF), igual ao cabo de verdade. Os dois
+//! lados completam a transferência com os `send` da MESMA rodada (amostrados
+//! antes do handler de conclusão), então veem a mesma mesa no mesmo ponto.
 //!
-//! Wire format (sem dependências): HELLO de 8 bytes (`AGBL` + versão + papel + 2 reservados) e mensagens de 8 bytes (`seq` u32 LE | flags u8 | `send` u16 LE | reservado u8).
+//! Wire format (sem dependências): HELLO de 8 bytes (`AGBL` + versão + papel +
+//! 2 reservados) e mensagens de 12 bytes (`seq` u32 LE | `delta` u32 LE |
+//! flags u8 | `send` u16 LE | reservado u8).
 
-use std::io::{self, Read, Write};
+use std::fs::File;
+use std::io::{self, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 use auroragba_core::Gba;
 
-/// Ciclos por quantum: 1/8 de frame (~2,1 ms). Pequeno o bastante pro
-/// handshake serial do Gen 3, grande o bastante pra ~480 trocas TCP/s não
-/// pesarem em localhost/LAN.
-pub const QUANTUM_CYCLES: u32 = 280_896 / 8;
+/// Ciclos por frame do GBA — o teto de cada `run_frame`.
+pub const FRAME_CYCLES: u32 = 280_896;
+
+/// Fatia curta de ciclos rodada com o busy (SIOCNT bit 7) ainda aceso, ENTRE
+/// armar a transferência e concluí-la. Dá uma janela observável pra um detector
+/// poll-based ver a borda busy→clear. ~1/128 de frame (~16 µs): centenas de
+/// iterações de poll, sem atrasar a IRQ serial do parceiro.
+const BUSY_WINDOW_CYCLES: u32 = FRAME_CYCLES / 128;
+
+/// Variável de ambiente que liga o trace da sessão em `/tmp` (depuração do
+/// protocolo de link). Sem ela, nenhum arquivo é aberto e o trace é no-op.
+const TRACE_ENV: &str = "AURORAGBA_LINK_TRACE";
 
 const HELLO_MAGIC: &[u8; 4] = b"AGBL";
-const PROTO_VERSION: u8 = 1;
+// Bump: o wire mudou (12 bytes, com delta+frame_end) e o protocolo virou
+// master-clocked event-driven — incompatível com a v1 de lockstep por quantum.
+const PROTO_VERSION: u8 = 2;
 
 const FLAG_READY: u8 = 1 << 0;
 const FLAG_START: u8 = 1 << 1;
+const FLAG_FRAME_END: u8 = 1 << 2;
 
-/// Mensagem trocada na fronteira de cada quantum.
+/// Mensagem de uma rodada do link event-driven. O master dita o ritmo:
+///   - `delta`: ciclos que o master avançou desde a rodada anterior — o child
+///     roda EXATAMENTE isso, espelhando o tempo do master (lockstep);
+///   - `start`: o master armou uma transferência NESTA rodada (ele parou no
+///     instante exato do START); os dois completam com os `send` desta rodada;
+///   - `frame_end`: última rodada do frame do master — o child sai do loop;
+///   - `ready`: o emissor está em modo multi-player (vira o SD do outro);
+///   - `send`: o SIOMLT_SEND local, amostrado ANTES do handler de conclusão.
+///
+/// O child responde com `delta`/`start`/`frame_end` zerados (só `ready`/`send`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Msg {
     pub seq: u32,
+    pub delta: u32,
     pub ready: bool,
     pub start: bool,
+    pub frame_end: bool,
     pub send: u16,
 }
 
 impl Msg {
-    fn to_wire(self) -> [u8; 8] {
-        let mut w = [0u8; 8];
+    fn to_wire(self) -> [u8; 12] {
+        let mut w = [0u8; 12];
         w[..4].copy_from_slice(&self.seq.to_le_bytes());
-        w[4] = ((self.ready as u8) * FLAG_READY) | ((self.start as u8) * FLAG_START);
-        w[5..7].copy_from_slice(&self.send.to_le_bytes());
+        w[4..8].copy_from_slice(&self.delta.to_le_bytes());
+        w[8] = ((self.ready as u8) * FLAG_READY)
+            | ((self.start as u8) * FLAG_START)
+            | ((self.frame_end as u8) * FLAG_FRAME_END);
+        w[9..11].copy_from_slice(&self.send.to_le_bytes());
         w
     }
 
-    fn from_wire(w: [u8; 8]) -> Msg {
+    fn from_wire(w: [u8; 12]) -> Msg {
         Msg {
             seq: u32::from_le_bytes(w[..4].try_into().unwrap()),
-            ready: w[4] & FLAG_READY != 0,
-            start: w[4] & FLAG_START != 0,
-            send: u16::from_le_bytes(w[5..7].try_into().unwrap()),
+            delta: u32::from_le_bytes(w[4..8].try_into().unwrap()),
+            ready: w[8] & FLAG_READY != 0,
+            start: w[8] & FLAG_START != 0,
+            frame_end: w[8] & FLAG_FRAME_END != 0,
+            send: u16::from_le_bytes(w[9..11].try_into().unwrap()),
         }
     }
 }
 
-/// Sessão de lockstep estabelecida (transporte + nosso lugar na mesa).
+/// Sessão de link estabelecida (transporte + nosso lugar na mesa).
 pub struct LinkSession {
     stream: TcpStream,
     /// 0 = parent (host TCP, gera o clock), 1 = child.
     pub id: u8,
     seq: u32,
+    /// Último estado de "pronto" (local, parceiro) — pra logar só transições.
+    last_ready: (bool, bool),
+    /// Trace da sessão em arquivo, ligado por `AURORAGBA_LINK_TRACE` — a conversa
+    /// serial completa pra depurar o protocolo de trade. `None` (o normal) =
+    /// trace desligado, zero I/O.
+    trace: Option<BufWriter<File>>,
+    /// Últimos registradores crus (siocnt, send, rcnt) — pra logar só mudanças.
+    last_regs: (u16, u16, u16),
+    /// Último estado de IRQ (ie, ime, iflag) — pra logar só mudanças.
+    last_irq: (u16, bool, u16),
 }
 
 impl LinkSession {
@@ -87,7 +127,26 @@ impl LinkSession {
     fn handshake(stream: TcpStream, id: u8) -> io::Result<LinkSession> {
         // Mensagens de 8 bytes a ~480 Hz: Nagle só atrapalha.
         stream.set_nodelay(true)?;
-        let mut s = LinkSession { stream, id, seq: 0 };
+        let role = if id == 0 { "parent" } else { "child" };
+        // Trace só quando AURORAGBA_LINK_TRACE está setada — fora isso, zero I/O.
+        let trace = if std::env::var_os(TRACE_ENV).is_some() {
+            File::create(format!("/tmp/auroragba-link-{role}.log"))
+                .map(BufWriter::new)
+                .map_err(|e| eprintln!("link: não consegui abrir o trace ({e})"))
+                .ok()
+        } else {
+            None
+        };
+        let mut s = LinkSession {
+            stream,
+            id,
+            seq: 0,
+            last_ready: (false, false),
+            trace,
+            last_regs: (0, 0, 0),
+            last_irq: (0, false, 0),
+        };
+        s.trace(format_args!("# sessão de link iniciada (papel={role})"));
         let mut hello = [0u8; 8];
         hello[..4].copy_from_slice(HELLO_MAGIC);
         hello[4] = PROTO_VERSION;
@@ -110,52 +169,188 @@ impl LinkSession {
         Ok(s)
     }
 
-    /// Troca de fronteira: envia a nossa, recebe a do parceiro (bloqueante —
-    /// é isso que mantém as instâncias a ≤1 quantum de distância).
+    /// Rodada do master: envia a nossa, recebe a resposta do child (bloqueante —
+    /// trava os dois a ≤1 rodada de distância). Confere o `seq` ecoado.
     fn exchange(&mut self, out: Msg) -> io::Result<Msg> {
         self.stream.write_all(&out.to_wire())?;
-        let mut buf = [0u8; 8];
-        self.stream.read_exact(&mut buf)?;
-        let inc = Msg::from_wire(buf);
+        let inc = self.recv()?;
         if inc.seq != out.seq {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("lockstep fora de fase: esperava seq {}, veio {}", out.seq, inc.seq),
+                format!("link fora de fase: esperava seq {}, veio {}", out.seq, inc.seq),
             ));
         }
         Ok(inc)
     }
 
-    /// Roda um quantum da emulação e sincroniza o serial na fronteira.
-    pub fn run_quantum(&mut self, gba: &mut Gba) -> io::Result<()> {
-        gba.run_cycles(QUANTUM_CYCLES);
+    /// Lê uma mensagem do parceiro (bloqueante).
+    fn recv(&mut self) -> io::Result<Msg> {
+        let mut buf = [0u8; 12];
+        self.stream.read_exact(&mut buf)?;
+        Ok(Msg::from_wire(buf))
+    }
 
-        let (ready, pending_start, send) = gba.link_status();
-        let out = Msg {
-            seq: self.seq,
-            ready,
-            start: self.id == 0 && pending_start,
-            send,
-        };
-        let inc = self.exchange(out)?;
-        self.seq = self.seq.wrapping_add(1);
+    /// Escreve uma mensagem pro parceiro.
+    fn send_msg(&mut self, out: Msg) -> io::Result<()> {
+        self.stream.write_all(&out.to_wire())
+    }
 
-        gba.link_set_partner_ready(inc.ready);
-
-        // A transferência deste quantum (decidida pelo parent) acontece AGORA
-        // nos dois lados, com os `send` desta rodada.
-        let started = if self.id == 0 { out.start } else { inc.start };
-        if started {
-            let (parent_send, child_send, child_ready) = if self.id == 0 {
-                (out.send, inc.send, inc.ready)
-            } else {
-                (inc.send, out.send, true) // se recebemos start, nós (child) participamos
-            };
-            // Child ausente/não pronto = linha alta, como no cabo real.
-            let child = if child_ready { child_send } else { 0xFFFF };
-            gba.link_complete_multi([parent_send, child, 0xFFFF, 0xFFFF]);
+    /// Roda um frame da emulação sincronizando o serial. O master dirige; o
+    /// child espelha. Cada lado decide pelo `id`.
+    pub fn run_frame(&mut self, gba: &mut Gba) -> io::Result<()> {
+        if self.id == 0 {
+            self.run_frame_master(gba)
+        } else {
+            self.run_frame_child(gba)
         }
-        Ok(())
+    }
+
+    /// Master (parent, ID 0): roda a CPU até o jogo armar uma transferência ou
+    /// até o fim do frame, e troca pela rede NESSE instante. Repete até fechar
+    /// o frame — quantas transferências o jogo pedir (sem teto por frame).
+    fn run_frame_master(&mut self, gba: &mut Gba) -> io::Result<()> {
+        let mut total = 0u32;
+        loop {
+            // Roda até o jogo escrever START (para no instante exato) ou gastar
+            // o que falta do frame.
+            let budget = FRAME_CYCLES.saturating_sub(total);
+            let (ran, armed) = gba.run_until_transfer(budget);
+            total += ran;
+            let frame_end = total >= FRAME_CYCLES;
+
+            self.trace_regs_irq(gba);
+
+            // Valor a enviar amostrado AGORA — antes da conclusão (que roda o
+            // handler e zera/consome o SIOMLT_SEND). Ver nota no child.
+            let (ready, _pending, send) = gba.link_status();
+            let out = Msg { seq: self.seq, delta: ran, ready, start: armed, frame_end, send };
+            let inc = self.exchange(out)?;
+
+            gba.link_set_partner_ready(inc.ready);
+            self.trace_ready(out.ready, inc.ready);
+            self.seq = self.seq.wrapping_add(1);
+
+            if armed {
+                // Child ausente/não pronto = linha alta, como no cabo real.
+                let child = if inc.ready { inc.send } else { 0xFFFF };
+                self.trace(format_args!(
+                    "q{}: TROCA parent={send:04X} child={child:04X}",
+                    out.seq
+                ));
+                // Acende o busy (idempotente — o jogo já escreveu START), deixa
+                // uma janela curta visível e conclui (dados + IRQ serial). O
+                // handler serial corre no `ran` da próxima rodada.
+                gba.link_begin_transfer();
+                gba.run_cycles(BUSY_WINDOW_CYCLES);
+                gba.link_complete_multi([send, child, 0xFFFF, 0xFFFF]);
+            }
+
+            if frame_end {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Child (ID != 0): não gera clock. Espelha o avanço do master (roda o
+    /// `delta` de cada rodada) e, quando o master sinaliza `start`, completa a
+    /// transferência com o mesmo par de `send` da rodada.
+    fn run_frame_child(&mut self, gba: &mut Gba) -> io::Result<()> {
+        loop {
+            let inc = self.recv()?;
+            if inc.seq != self.seq {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("link fora de fase: esperava seq {}, veio {}", self.seq, inc.seq),
+                ));
+            }
+            // Espelha o tempo do master.
+            gba.run_cycles(inc.delta);
+
+            self.trace_regs_irq(gba);
+
+            // Nosso `send` amostrado ANTES do handler de conclusão (abaixo). No
+            // HW o master lê o registrador do escravo no instante do início da
+            // transferência, ANTES de o handler do escravo rodar; amostrar
+            // depois pegava o 0000 pós-handler e derrubava o playerCount do
+            // master (que precisa de SLAVE_HANDSHAKE em todos os slots).
+            let (ready, _pending, send) = gba.link_status();
+            let out = Msg {
+                seq: self.seq,
+                delta: 0,
+                ready,
+                start: false,
+                frame_end: false,
+                send,
+            };
+            self.send_msg(out)?;
+
+            gba.link_set_partner_ready(inc.ready);
+            self.trace_ready(out.ready, inc.ready);
+            self.seq = self.seq.wrapping_add(1);
+
+            if inc.start {
+                let parent = inc.send;
+                self.trace(format_args!(
+                    "q{}: TROCA parent={parent:04X} child={send:04X}",
+                    out.seq
+                ));
+                gba.link_begin_transfer();
+                gba.run_cycles(BUSY_WINDOW_CYCLES);
+                gba.link_complete_multi([parent, send, 0xFFFF, 0xFFFF]);
+            }
+
+            if inc.frame_end {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Loga os registradores seriais crus e o estado de IRQ, só nas mudanças
+    /// (revela o jogo preparando valores e mexendo no controle).
+    fn trace_regs_irq(&mut self, gba: &Gba) {
+        if self.trace.is_none() {
+            return; // sem trace: nem calcula os registradores
+        }
+        let seq = self.seq;
+        let regs = gba.link_regs();
+        if regs != self.last_regs {
+            self.trace(format_args!(
+                "q{seq}: regs siocnt={:04X} send={:04X} rcnt={:04X}",
+                regs.0, regs.1, regs.2
+            ));
+            self.last_regs = regs;
+        }
+        // Só o que importa pro link: IE, IME e o BIT SERIAL do IF (o IF inteiro
+        // muda todo frame por VBlank — ruído). Serial armada = IME & IE bit 7.
+        let raw = gba.link_irq_state();
+        let irq = (raw.0, raw.1, raw.2 & 0x80);
+        if irq != self.last_irq {
+            self.trace(format_args!(
+                "q{seq}: irq ie={:04X} ime={} if_serial={} (serial_armada={})",
+                irq.0,
+                irq.1 as u8,
+                (irq.2 != 0) as u8,
+                irq.1 && (irq.0 & 0x80) != 0
+            ));
+            self.last_irq = irq;
+        }
+    }
+
+    /// Loga transições do "pronto" (local, parceiro).
+    fn trace_ready(&mut self, local: bool, partner: bool) {
+        if (local, partner) != self.last_ready {
+            let seq = self.seq;
+            self.trace(format_args!("q{seq}: pronto local={local} parceiro={partner}"));
+            self.last_ready = (local, partner);
+        }
+    }
+
+    /// Anexa uma linha ao trace da sessão (no-op se o arquivo não abriu).
+    fn trace(&mut self, args: std::fmt::Arguments) {
+        if let Some(w) = &mut self.trace {
+            let _ = writeln!(w, "{args}");
+            let _ = w.flush();
+        }
     }
 }
 
@@ -203,12 +398,10 @@ mod tests {
             let mut gba = make_gba();
             gba.link_configure(true, 0);
             setup_multi(&mut gba, 0xAAAA);
-            // Quantum 1: ambos só ficam prontos (SD do parent sobe).
-            s.run_quantum(&mut gba).unwrap();
-            // Jogo do parent dispara o start.
+            // Jogo do parent dispara o start (pré-armado): o master para nesse
+            // instante já na 1ª rodada do frame e troca pela rede.
             gba.bus.write_u16(SIOCNT_ADDR, 0b10 << 12 | 1 << 14 | 1 << 7);
-            // Quantum 2: a troca acontece na fronteira.
-            s.run_quantum(&mut gba).unwrap();
+            s.run_frame(&mut gba).unwrap();
             gba
         });
 
@@ -217,8 +410,7 @@ mod tests {
             let mut gba = make_gba();
             gba.link_configure(true, 1);
             setup_multi(&mut gba, 0xBBBB);
-            s.run_quantum(&mut gba).unwrap();
-            s.run_quantum(&mut gba).unwrap();
+            s.run_frame(&mut gba).unwrap();
             gba
         });
 
@@ -257,7 +449,7 @@ mod tests {
             gba.link_configure(true, 0);
             setup_multi(&mut gba, 0x1234);
             gba.bus.write_u16(SIOCNT_ADDR, 0b10 << 12 | 1 << 14 | 1 << 7);
-            s.run_quantum(&mut gba).unwrap();
+            s.run_frame(&mut gba).unwrap();
             gba
         });
 
@@ -266,7 +458,7 @@ mod tests {
             let mut gba = make_gba();
             gba.link_configure(true, 1);
             // Child NÃO entra em multi (RCNT/SIOCNT default).
-            s.run_quantum(&mut gba).unwrap();
+            s.run_frame(&mut gba).unwrap();
             gba
         });
 
@@ -282,9 +474,16 @@ mod tests {
 
     #[test]
     fn wire_format_roundtrip() {
-        let m = Msg { seq: 0xDEAD_BEEF, ready: true, start: false, send: 0x55AA };
+        let m = Msg {
+            seq: 0xDEAD_BEEF,
+            delta: 0x0004_4940,
+            ready: true,
+            start: false,
+            frame_end: true,
+            send: 0x55AA,
+        };
         assert_eq!(Msg::from_wire(m.to_wire()), m);
-        let m = Msg { seq: 7, ready: false, start: true, send: 0 };
+        let m = Msg { seq: 7, delta: 0, ready: false, start: true, frame_end: false, send: 0 };
         assert_eq!(Msg::from_wire(m.to_wire()), m);
     }
 }
