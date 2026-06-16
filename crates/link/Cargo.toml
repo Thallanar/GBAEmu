@@ -1,0 +1,11 @@
+[package]
+name = "auroragba-link"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Portable link cable protocol + state machine for AuroraGBA (transport-agnostic)"
+
+[dependencies]
+auroragba-core = { path = "../core" }

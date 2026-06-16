@@ -336,7 +336,7 @@ fn parse_link_args() -> Option<link::LinkSession> {
     if let Some(i) = pos("--link-host") {
         let port: u16 = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(7777);
         eprintln!("link: aguardando o parceiro na porta {port}…");
-        match link::LinkSession::host(port) {
+        match link::host(port) {
             Ok(s) => {
                 eprintln!("link: parceiro conectado (somos o parent)");
                 Some(s)
@@ -352,7 +352,7 @@ fn parse_link_args() -> Option<link::LinkSession> {
             .cloned()
             .unwrap_or_else(|| "127.0.0.1:7777".into());
         eprintln!("link: conectando em {addr}…");
-        match link::LinkSession::join(&addr) {
+        match link::join(&addr) {
             Ok(s) => {
                 eprintln!("link: conectado (somos o child)");
                 Some(s)
