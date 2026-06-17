@@ -108,4 +108,29 @@ object NativeBridge {
      * vazio se não der. `shiny` escolhe a paleta normal ou shiny.
      */
     external fun huntTargetSprite(handle: Long, target: Int, shiny: Boolean): IntArray
+
+    // ── Link cable ───────────────────────────────────────────────────────────
+    // A conexão (accept/connect) roda numa thread nativa; estas funções não
+    // bloqueiam. O estado é recolhido a cada frame (renderFrame/linkStatus).
+
+    /** Começa a hospedar um link na porta `port` (somos o host/master). */
+    external fun linkStartHost(handle: Long, port: Int)
+
+    /** Começa a conectar num host `addr` ("ip:porta"); somos o convidado. */
+    external fun linkStartJoin(handle: Long, addr: String)
+
+    /** Cancela a conexão de link em andamento. */
+    external fun linkCancel(handle: Long)
+
+    /** Encerra a sessão de link ativa, voltando ao solo. */
+    external fun linkDisconnect(handle: Long)
+
+    /** Estado do link: 0 = ocioso, 1 = conectando, 2 = conectado. */
+    external fun linkStatus(handle: Long): Int
+
+    /** Papel na mesa: 0 = host (parent), 1 = convidado (child), -1 = sem link. */
+    external fun linkRole(handle: Long): Int
+
+    /** Consome a última falha de conexão (vazio = nada). Pra mostrar num toast. */
+    external fun linkTakeError(handle: Long): String
 }
