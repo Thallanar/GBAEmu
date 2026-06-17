@@ -472,7 +472,11 @@ fn sio_reg(a: u32) -> bool {
 
 fn vram_offset(addr: u32) -> usize {
     let a = (addr as usize) & 0x1FFFF;
-    if a < 0x10000 { a } else { 0x10000 + (a & 0x7FFF) }
+    if a < 0x10000 {
+        a
+    } else {
+        0x10000 + (a & 0x7FFF)
+    }
 }
 
 #[cfg(test)]
@@ -567,7 +571,7 @@ mod tests {
     fn strb_to_obj_vram_is_ignored_in_tile_mode() {
         let mut bus = Bus::new();
         bus.ppu.dispcnt = 0; // modo 0 (tiles): OBJ começa em 0x10000
-        // 0x06010000 cai na região de OBJ → byte ignorado.
+                             // 0x06010000 cai na região de OBJ → byte ignorado.
         bus.write_u8(0x0601_0000, 0xEE);
         assert_eq!(bus.vram[0x10000], 0x00);
         // Já em VRAM-BG (0x06000000) duplica normalmente.

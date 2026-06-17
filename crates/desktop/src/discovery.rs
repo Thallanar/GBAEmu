@@ -275,7 +275,12 @@ impl Browser {
             .map_err(|e| log::info!("busca mDNS indisponível: {e}"))
             .ok();
 
-        Ok(Browser { udp_peers, mdns_peers, udp_stop, mdns })
+        Ok(Browser {
+            udp_peers,
+            mdns_peers,
+            udp_stop,
+            mdns,
+        })
     }
 
     /// Lista atual de hosts vistos — UNIÃO de mDNS e UDP, deduplicada por
@@ -301,8 +306,10 @@ impl Browser {
             }
         }
 
-        let mut peers: Vec<Peer> =
-            by_addr.into_iter().map(|(addr, name)| Peer { name, addr }).collect();
+        let mut peers: Vec<Peer> = by_addr
+            .into_iter()
+            .map(|(addr, name)| Peer { name, addr })
+            .collect();
         peers.sort_by(|a, b| a.name.cmp(&b.name).then(a.addr.cmp(&b.addr)));
         peers
     }
@@ -324,7 +331,10 @@ mod tests {
     #[test]
     fn anuncio_roundtrip() {
         let buf = encode_announce(7777, "Sala do Ash");
-        assert_eq!(decode_announce(&buf), Some((7777, "Sala do Ash".to_string())));
+        assert_eq!(
+            decode_announce(&buf),
+            Some((7777, "Sala do Ash".to_string()))
+        );
     }
 
     #[test]

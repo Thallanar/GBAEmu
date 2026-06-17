@@ -484,7 +484,11 @@ mod tests {
         gba.bus.write_u32(func_addr, 0xDEAD_BEEF);
         gba.bus.write_u8(cursor_addr, 1);
         force_starter_cursor(&mut gba, &profile, &mudkip);
-        assert_eq!(gba.bus.read_u8(cursor_addr), 1, "menu fechado não deve forçar");
+        assert_eq!(
+            gba.bus.read_u8(cursor_addr),
+            1,
+            "menu fechado não deve forçar"
+        );
 
         // Menu aberto: força a seleção pro Poké Ball do alvo (2 = direita).
         gba.bus.write_u32(func_addr, input_func);
@@ -498,7 +502,11 @@ mod tests {
         };
         gba.bus.write_u8(cursor_addr, 1);
         force_starter_cursor(&mut gba, &profile, &legend);
-        assert_eq!(gba.bus.read_u8(cursor_addr), 1, "lendário não mexe no cursor");
+        assert_eq!(
+            gba.bus.read_u8(cursor_addr),
+            1,
+            "lendário não mexe no cursor"
+        );
     }
 
     #[test]
@@ -601,7 +609,11 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert_ne!(seq(&mut a), seq(&mut b), "instâncias geraram a MESMA sequência");
+        assert_ne!(
+            seq(&mut a),
+            seq(&mut b),
+            "instâncias geraram a MESMA sequência"
+        );
     }
 
     /// `best_shiny_value`/`best_attempt` guardam o menor valor já visto e quando.
@@ -629,7 +641,11 @@ mod tests {
 
         let mut hunter = Hunter::new();
         // PIDs escolhidos pra dar shiny_value 50, depois 20, depois 80.
-        for (pid, expected_sv) in [(0x0000_3301u32, 50u16), (0x0000_3327, 20), (0x0000_3363, 80)] {
+        for (pid, expected_sv) in [
+            (0x0000_3301u32, 50u16),
+            (0x0000_3327, 20),
+            (0x0000_3363, 80),
+        ] {
             write_synthetic_mon(&mut gba, profile.enemy_party, pid, otid, 100);
             hunter.check(&mut gba, &profile, &target);
             assert_eq!(hunter.last_shiny_value, expected_sv);

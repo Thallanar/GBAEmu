@@ -180,7 +180,10 @@ impl<T: Transport> LinkSession<T> {
         if inc.seq != out.seq {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("link fora de fase: esperava seq {}, veio {}", out.seq, inc.seq),
+                format!(
+                    "link fora de fase: esperava seq {}, veio {}",
+                    out.seq, inc.seq
+                ),
             ));
         }
         Ok(inc)
@@ -226,7 +229,14 @@ impl<T: Transport> LinkSession<T> {
             // Valor a enviar amostrado AGORA — antes da conclusão (que roda o
             // handler e zera/consome o SIOMLT_SEND). Ver nota no child.
             let (ready, _pending, send) = gba.link_status();
-            let out = Msg { seq: self.seq, delta: ran, ready, start: armed, frame_end, send };
+            let out = Msg {
+                seq: self.seq,
+                delta: ran,
+                ready,
+                start: armed,
+                frame_end,
+                send,
+            };
             let inc = self.exchange(out)?;
 
             gba.link_set_partner_ready(inc.ready);
@@ -263,7 +273,10 @@ impl<T: Transport> LinkSession<T> {
             if inc.seq != self.seq {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("link fora de fase: esperava seq {}, veio {}", self.seq, inc.seq),
+                    format!(
+                        "link fora de fase: esperava seq {}, veio {}",
+                        self.seq, inc.seq
+                    ),
                 ));
             }
             // Espelha o tempo do master.
@@ -343,7 +356,9 @@ impl<T: Transport> LinkSession<T> {
     fn trace_ready(&mut self, local: bool, partner: bool) {
         if (local, partner) != self.last_ready {
             let seq = self.seq;
-            self.trace(format_args!("q{seq}: pronto local={local} parceiro={partner}"));
+            self.trace(format_args!(
+                "q{seq}: pronto local={local} parceiro={partner}"
+            ));
             self.last_ready = (local, partner);
         }
     }
@@ -403,7 +418,8 @@ mod tests {
             setup_multi(&mut gba, 0xAAAA);
             // Jogo do parent dispara o start (pré-armado): o master para nesse
             // instante já na 1ª rodada do frame e troca pela rede.
-            gba.bus.write_u16(SIOCNT_ADDR, 0b10 << 12 | 1 << 14 | 1 << 7);
+            gba.bus
+                .write_u16(SIOCNT_ADDR, 0b10 << 12 | 1 << 14 | 1 << 7);
             s.run_frame(&mut gba).unwrap();
             gba
         });
@@ -430,7 +446,11 @@ mod tests {
             assert_eq!(r16(gba, SIOMULTI0_ADDR + 6), 0xFFFF);
             // Busy limpo + IRQ serial pedida (IF bit 7) nos dois lados.
             assert_eq!(r16(gba, SIOCNT_ADDR) & (1 << 7), 0);
-            assert_ne!(r16(gba, 0x0400_0202) & (1 << 7), 0, "IF serial deveria subir");
+            assert_ne!(
+                r16(gba, 0x0400_0202) & (1 << 7),
+                0,
+                "IF serial deveria subir"
+            );
         }
         // IDs da mesa: parent lê 0, child lê 1 (bits 4-5); SD=1 nos dois
         // (parceiro pronto); SI: parent=0, child=1.
@@ -453,7 +473,8 @@ mod tests {
             let mut gba = make_gba();
             gba.link_configure(true, 0);
             setup_multi(&mut gba, 0x1234);
-            gba.bus.write_u16(SIOCNT_ADDR, 0b10 << 12 | 1 << 14 | 1 << 7);
+            gba.bus
+                .write_u16(SIOCNT_ADDR, 0b10 << 12 | 1 << 14 | 1 << 7);
             s.run_frame(&mut gba).unwrap();
             gba
         });
@@ -490,7 +511,14 @@ mod tests {
             send: 0x55AA,
         };
         assert_eq!(Msg::from_wire(m.to_wire()), m);
-        let m = Msg { seq: 7, delta: 0, ready: false, start: true, frame_end: false, send: 0 };
+        let m = Msg {
+            seq: 7,
+            delta: 0,
+            ready: false,
+            start: true,
+            frame_end: false,
+            send: 0,
+        };
         assert_eq!(Msg::from_wire(m.to_wire()), m);
     }
 }

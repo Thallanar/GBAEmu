@@ -33,13 +33,13 @@ bitflags! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "save-states", derive(serde::Serialize, serde::Deserialize))]
 pub enum CpuMode {
-    User       = 0b10000,
-    Fiq        = 0b10001,
-    Irq        = 0b10010,
+    User = 0b10000,
+    Fiq = 0b10001,
+    Irq = 0b10010,
     Supervisor = 0b10011,
-    Abort      = 0b10111,
-    Undefined  = 0b11011,
-    System     = 0b11111,
+    Abort = 0b10111,
+    Undefined = 0b11011,
+    System = 0b11111,
 }
 
 impl CpuMode {
@@ -59,11 +59,11 @@ impl CpuMode {
     /// Índice no banco de SPSR (User/System não tem SPSR próprio).
     pub fn spsr_index(self) -> Option<usize> {
         match self {
-            Self::Fiq        => Some(0),
-            Self::Irq        => Some(1),
+            Self::Fiq => Some(0),
+            Self::Irq => Some(1),
             Self::Supervisor => Some(2),
-            Self::Abort      => Some(3),
-            Self::Undefined  => Some(4),
+            Self::Abort => Some(3),
+            Self::Undefined => Some(4),
             Self::User | Self::System => None,
         }
     }
@@ -80,12 +80,30 @@ impl Cpsr {
         Self(CpuMode::System as u32 | PsrFlags::I.bits() | PsrFlags::F.bits())
     }
 
-    #[inline] pub fn n(self) -> bool { self.0 & PsrFlags::N.bits() != 0 }
-    #[inline] pub fn z(self) -> bool { self.0 & PsrFlags::Z.bits() != 0 }
-    #[inline] pub fn c(self) -> bool { self.0 & PsrFlags::C.bits() != 0 }
-    #[inline] pub fn v(self) -> bool { self.0 & PsrFlags::V.bits() != 0 }
-    #[inline] pub fn thumb(self) -> bool { self.0 & PsrFlags::T.bits() != 0 }
-    #[inline] pub fn irq_disabled(self) -> bool { self.0 & PsrFlags::I.bits() != 0 }
+    #[inline]
+    pub fn n(self) -> bool {
+        self.0 & PsrFlags::N.bits() != 0
+    }
+    #[inline]
+    pub fn z(self) -> bool {
+        self.0 & PsrFlags::Z.bits() != 0
+    }
+    #[inline]
+    pub fn c(self) -> bool {
+        self.0 & PsrFlags::C.bits() != 0
+    }
+    #[inline]
+    pub fn v(self) -> bool {
+        self.0 & PsrFlags::V.bits() != 0
+    }
+    #[inline]
+    pub fn thumb(self) -> bool {
+        self.0 & PsrFlags::T.bits() != 0
+    }
+    #[inline]
+    pub fn irq_disabled(self) -> bool {
+        self.0 & PsrFlags::I.bits() != 0
+    }
 
     pub fn set_flag(&mut self, f: PsrFlags, value: bool) {
         if value {

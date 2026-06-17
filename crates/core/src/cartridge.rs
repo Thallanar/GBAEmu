@@ -535,7 +535,7 @@ mod tests {
         send(&mut bus, 0xA5A5_5A5A_0F0F_F0F0u64 as u128, 64);
         bus.write_u16(0x0D00_0000, 0); // stop
         let _ = bus.read_u16(0x0D00_0000); // poll
-        // Lê de volta via bus.
+                                           // Lê de volta via bus.
         send(&mut bus, 0b11, 2);
         send(&mut bus, 0x07, 14);
         bus.write_u16(0x0D00_0000, 0);

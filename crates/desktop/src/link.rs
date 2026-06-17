@@ -69,7 +69,11 @@ impl PendingLink {
         thread::spawn(move || {
             let _ = tx.send(f(thread_cancel));
         });
-        PendingLink { rx, cancel, hosting }
+        PendingLink {
+            rx,
+            cancel,
+            hosting,
+        }
     }
 
     /// Verifica se a conexão terminou. `None` = ainda em andamento.
@@ -77,9 +81,9 @@ impl PendingLink {
         match self.rx.try_recv() {
             Ok(r) => Some(r),
             Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => {
-                Some(Err(io::Error::other("thread de conexão encerrou sem responder")))
-            }
+            Err(TryRecvError::Disconnected) => Some(Err(io::Error::other(
+                "thread de conexão encerrou sem responder",
+            ))),
         }
     }
 

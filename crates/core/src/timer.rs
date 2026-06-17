@@ -235,7 +235,11 @@ mod tests {
         assert_eq!(until, 16, "0x10000-0xFFF0 = 16 incrementos a 1 ciclo cada");
         // Ticar (until-1) NÃO deve overflowar; o último ciclo, sim.
         assert_eq!(t.tick(until - 1).snd_overflows[0], 0);
-        assert_eq!(t.tick(1).snd_overflows[0], 1, "overflow exatamente em `until`");
+        assert_eq!(
+            t.tick(1).snd_overflows[0],
+            1,
+            "overflow exatamente em `until`"
+        );
     }
 
     #[test]

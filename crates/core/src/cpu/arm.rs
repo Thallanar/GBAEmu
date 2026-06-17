@@ -76,7 +76,11 @@ fn h_coprocessor(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
 }
 fn h_unimpl(cpu: &mut Cpu, _bus: &mut Bus, instr: u32) {
     let pc = cpu.regs.pc().wrapping_sub(8);
-    log::warn!("ARM: opcode não implementado @ PC={:08X} instr={:08X}", pc, instr);
+    log::warn!(
+        "ARM: opcode não implementado @ PC={:08X} instr={:08X}",
+        pc,
+        instr
+    );
     cpu.stats.record_unimpl(pc, instr, false);
 }
 
@@ -231,22 +235,22 @@ fn exec_data_processing<const OPCODE: u32, const IMM: bool, const S: bool>(
 
     use OpResult::*;
     let result = match OPCODE {
-        0x0 => Logical(a & op2),                          // AND
-        0x1 => Logical(a ^ op2),                          // EOR
-        0x2 => Arith(sub_with_flags(a, op2)),             // SUB
-        0x3 => Arith(sub_with_flags(op2, a)),             // RSB
-        0x4 => Arith(add_with_flags(a, op2)),             // ADD
-        0x5 => Arith(adc_with_flags(a, op2, carry_in)),   // ADC
-        0x6 => Arith(sbc_with_flags(a, op2, carry_in)),   // SBC
-        0x7 => Arith(sbc_with_flags(op2, a, carry_in)),   // RSC
-        0x8 => LogicalNoWrite(a & op2),                   // TST
-        0x9 => LogicalNoWrite(a ^ op2),                   // TEQ
-        0xA => ArithNoWrite(sub_with_flags(a, op2)),      // CMP
-        0xB => ArithNoWrite(add_with_flags(a, op2)),      // CMN
-        0xC => Logical(a | op2),                          // ORR
-        0xD => Logical(op2),                              // MOV
-        0xE => Logical(a & !op2),                         // BIC
-        0xF => Logical(!op2),                             // MVN
+        0x0 => Logical(a & op2),                        // AND
+        0x1 => Logical(a ^ op2),                        // EOR
+        0x2 => Arith(sub_with_flags(a, op2)),           // SUB
+        0x3 => Arith(sub_with_flags(op2, a)),           // RSB
+        0x4 => Arith(add_with_flags(a, op2)),           // ADD
+        0x5 => Arith(adc_with_flags(a, op2, carry_in)), // ADC
+        0x6 => Arith(sbc_with_flags(a, op2, carry_in)), // SBC
+        0x7 => Arith(sbc_with_flags(op2, a, carry_in)), // RSC
+        0x8 => LogicalNoWrite(a & op2),                 // TST
+        0x9 => LogicalNoWrite(a ^ op2),                 // TEQ
+        0xA => ArithNoWrite(sub_with_flags(a, op2)),    // CMP
+        0xB => ArithNoWrite(add_with_flags(a, op2)),    // CMN
+        0xC => Logical(a | op2),                        // ORR
+        0xD => Logical(op2),                            // MOV
+        0xE => Logical(a & !op2),                       // BIC
+        0xF => Logical(!op2),                           // MVN
         _ => unreachable!(),
     };
 
@@ -374,10 +378,18 @@ fn exec_psr_transfer(cpu: &mut Cpu, instr: u32) {
         };
 
         let mut mask: u32 = 0;
-        if instr & (1 << 19) != 0 { mask |= 0xFF00_0000; }
-        if instr & (1 << 18) != 0 { mask |= 0x00FF_0000; }
-        if instr & (1 << 17) != 0 { mask |= 0x0000_FF00; }
-        if instr & (1 << 16) != 0 { mask |= 0x0000_00FF; }
+        if instr & (1 << 19) != 0 {
+            mask |= 0xFF00_0000;
+        }
+        if instr & (1 << 18) != 0 {
+            mask |= 0x00FF_0000;
+        }
+        if instr & (1 << 17) != 0 {
+            mask |= 0x0000_FF00;
+        }
+        if instr & (1 << 16) != 0 {
+            mask |= 0x0000_00FF;
+        }
 
         let in_user = cpu.cpsr.mode() == CpuMode::User;
         let effective_mask = if !use_spsr && in_user {
@@ -457,7 +469,8 @@ fn exec_multiply_long(cpu: &mut Cpu, instr: u32) {
     cpu.regs.set(rd_hi, (product >> 32) as u32);
 
     if set_flags {
-        cpu.cpsr.set_flag(PsrFlags::N, product & 0x8000_0000_0000_0000 != 0);
+        cpu.cpsr
+            .set_flag(PsrFlags::N, product & 0x8000_0000_0000_0000 != 0);
         cpu.cpsr.set_flag(PsrFlags::Z, product == 0);
     }
 }
@@ -494,7 +507,11 @@ fn exec_single_data_transfer<const LOAD: bool, const BYTE: bool, const IMM: bool
     };
 
     let base = cpu.regs.get(rn);
-    let signed_offset = if up { offset } else { 0u32.wrapping_sub(offset) };
+    let signed_offset = if up {
+        offset
+    } else {
+        0u32.wrapping_sub(offset)
+    };
     let addr = if pre {
         base.wrapping_add(signed_offset)
     } else {
@@ -561,8 +578,16 @@ fn exec_halfword_transfer(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
     };
 
     let base = cpu.regs.get(rn);
-    let signed_offset = if up { offset } else { 0u32.wrapping_sub(offset) };
-    let addr = if pre { base.wrapping_add(signed_offset) } else { base };
+    let signed_offset = if up {
+        offset
+    } else {
+        0u32.wrapping_sub(offset)
+    };
+    let addr = if pre {
+        base.wrapping_add(signed_offset)
+    } else {
+        base
+    };
 
     if load {
         let value: u32 = match sh {
@@ -571,7 +596,11 @@ fn exec_halfword_transfer(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
                 // Endereço desalinhado em halfword: ROR de 8 bits.
                 let aligned = addr & !1;
                 let v = bus.read_u16(aligned) as u32;
-                if addr & 1 != 0 { v.rotate_right(8) } else { v }
+                if addr & 1 != 0 {
+                    v.rotate_right(8)
+                } else {
+                    v
+                }
             }
             0b10 => {
                 // LDRSB: signed byte.
@@ -754,7 +783,7 @@ fn exec_swi(cpu: &mut Cpu, bus: &mut Bus, instr: u32) {
 
     cpu.cpsr.set_mode(CpuMode::Supervisor);
     cpu.cpsr.set_flag(PsrFlags::T, false); // sempre entra em ARM
-    cpu.cpsr.set_flag(PsrFlags::I, true);  // IRQ desabilitado
+    cpu.cpsr.set_flag(PsrFlags::I, true); // IRQ desabilitado
     cpu.regs.switch_mode(CpuMode::Supervisor);
 
     if let Some(idx) = CpuMode::Supervisor.spsr_index() {

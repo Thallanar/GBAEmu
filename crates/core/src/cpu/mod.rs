@@ -531,7 +531,7 @@ mod tests {
         cpu.regs.set(3, 0x3333);
         cpu.step(&mut bus); // STM!
         assert_eq!(cpu.regs.get(0), 0x0300_008C); // 12 bytes adiantados
-        // Volta o base e recarrega em r4,r5,r6:
+                                                  // Volta o base e recarrega em r4,r5,r6:
         cpu.regs.set(0, 0x0300_0080);
         cpu.step(&mut bus); // LDM!
         assert_eq!(cpu.regs.get(4), 0x1111);
@@ -567,7 +567,11 @@ mod tests {
         assert_eq!(cpu.regs.get(1), final_base, "writeback de r1");
         // Memória: r0..r3 nas posições crescentes a partir de final_base.
         assert_eq!(bus.read_u32(final_base), 0xA, "r0 (menor) inalterado");
-        assert_eq!(bus.read_u32(final_base + 4), final_base, "r1 grava o valor com writeback");
+        assert_eq!(
+            bus.read_u32(final_base + 4),
+            final_base,
+            "r1 grava o valor com writeback"
+        );
         assert_eq!(bus.read_u32(final_base + 8), 0xC);
         assert_eq!(bus.read_u32(final_base + 12), 0xD);
     }
@@ -597,7 +601,11 @@ mod tests {
         bus.write_u8(0x0300_0050, 0xCD);
         cpu.step(&mut bus);
         assert_eq!(cpu.regs.get(2), 0xCD, "Rd recebe o byte antigo");
-        assert_eq!(bus.read_u8(0x0300_0050), 0xAB, "memória recebe o byte de Rm");
+        assert_eq!(
+            bus.read_u8(0x0300_0050),
+            0xAB,
+            "memória recebe o byte de Rm"
+        );
     }
 
     /// SWP com Rd == Rm: troca registrador com memória de forma atômica.
@@ -753,7 +761,7 @@ mod tests {
     #[test]
     fn irq_dispatches_to_vector() {
         let (mut cpu, mut bus) = make_gba_with_rom(&[0xE320_F000]); // NOP (MSR cpsr_c, #0 — no-op safe)
-        // Habilita IRQ globalmente e no CPSR.
+                                                                    // Habilita IRQ globalmente e no CPSR.
         bus.io.ime = true;
         bus.io.ie = 0x0008; // TIMER0
         bus.io.iflag = 0x0008;
@@ -762,7 +770,10 @@ mod tests {
         cpu.step(&mut bus);
         assert_eq!(cpu.regs.pc(), 0x18);
         assert_eq!(cpu.cpsr.mode(), CpuMode::Irq);
-        assert!(cpu.cpsr.irq_disabled(), "I bit deve ser setado ao entrar na exceção");
+        assert!(
+            cpu.cpsr.irq_disabled(),
+            "I bit deve ser setado ao entrar na exceção"
+        );
     }
 
     /// Regressão (bug do boot do Emerald): após entrar no IRQ (PC=0x18), o

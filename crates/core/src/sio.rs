@@ -340,7 +340,11 @@ mod tests {
         // Normal 8, clock externo (bit 0 = 0), start.
         let irq = w16(&mut sio, SIOCNT_ADDR, START);
         assert!(!irq);
-        assert_ne!(r16(&sio, SIOCNT_ADDR) & START, 0, "sem cabo, externo nunca completa");
+        assert_ne!(
+            r16(&sio, SIOCNT_ADDR) & START,
+            0,
+            "sem cabo, externo nunca completa"
+        );
     }
 
     #[test]
@@ -351,7 +355,10 @@ mod tests {
         // STRB no byte baixo ligando só o start: o byte alto (modo) persiste
         // e a transferência completa no modo multi já configurado.
         let irq = sio.write_u8(SIOCNT_ADDR, START as u8);
-        assert!(irq, "start por escrita de byte deve usar o modo já configurado");
+        assert!(
+            irq,
+            "start por escrita de byte deve usar o modo já configurado"
+        );
         assert_eq!(r16(&sio, SIOMULTI0_ADDR + 2), 0xFFFF);
     }
 
