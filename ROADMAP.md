@@ -35,7 +35,8 @@ auroragba/
 │   ├── core/        # CPU, PPU, APU, memória — sem I/O
 │   ├── desktop/     # frontend egui
 │   ├── android/     # bindings JNI
-│   └── shiny/       # módulo Shiny Hunter
+│   ├── shiny/       # módulo Shiny Hunter
+│   └── link/        # protocolo de link cable portátil (transporte + sync)
 ├── assets/
 └── tests/
 ```
@@ -165,16 +166,43 @@ auroragba/
 - [X] App Kotlin (Gradle): SurfaceView com o framebuffer + overlay de controles touch
 - [X] Build via cargo-ndk + Gradle; **validado rodando Pokémon Emerald no emulador**
 - [X] Áudio (AudioTrack 32768 Hz estéreo; pacing pelo write bloqueante)
-- [ ] Saves (.sav + estados) no armazenamento do app — próximo PR
-- [ ] Suporte a controle Bluetooth / gamepad físico
+- [X] Render via OpenGL ES (escala na GPU, menos calor)
+- [X] Saves: `.sav` automático + save states (8 slots) no menu, espelhados numa
+      pasta visível `saves/` via SAF tree, com import e sync por timestamp
+- [X] Biblioteca: pasta de ROMs persistente via SAF tree
+- [X] Suporte a controle Bluetooth / gamepad físico (com remapeamento pelo menu)
+- [X] Shiny Hunter no celular: modo retrato com painel (sprite alvo + stats)
+- [X] Extras de UX: fast-forward 2x/4x/8x, captura de tela (PNG na galeria),
+      botão de reset, pacing de apresentação (~59,73 fps ao compositor)
 - [ ] Empacotamento APK assinado / distribuição
 
-### Fase 8 — Polimento (contínuo)
+### Fase 8 — ✨ Polimento & features extras (contínuo)
 
-- [ ] Shaders (LCD, scanlines, CRT)
-- [ ] Cheat codes (GameShark / CodeBreaker)
-- [ ] Localização PT-BR
-- [ ] Netplay (futuro)
+Recursos de qualidade de vida e apresentação, sem ordem fixa — entram conforme
+fazem sentido. Nenhum entregue ainda.
+
+**Vídeo / apresentação:**
+
+- [ ] Shaders (LCD grid, scanlines, CRT, integer scaling, aspect lock)
+- [ ] Filtros de upscale (xBRZ / HQ2x) como alternativa aos shaders
+- [ ] Bordas / molduras (skins de GBA ao redor da tela)
+
+**Cheats:**
+
+- [ ] Cheat codes GameShark / CodeBreaker / Action Replay (parser + aplicação
+      por frame na RAM)
+- [ ] Gerenciador de cheats na UI (lista por jogo, liga/desliga, persistido)
+- [ ] Importar arquivos `.cht` / formato compatível
+
+**Acessibilidade & UX:**
+
+- [ ] Localização PT-BR (e estrutura i18n para outros idiomas)
+- [ ] Temas de UI além do dark (seguindo o accent holográfico/shiny)
+- [ ] Macros / turbo de botão (auto-fire configurável)
+
+**Já encaminhado em outra fase:**
+
+- [~] Netplay → virou a **Fase Link** (link cable real na LAN, ver abaixo)
 
 ### Fase 9 — ⚡ Performance & fluidez (planejada em 9/jun/2026)
 
@@ -189,17 +217,61 @@ As engasgadas em scroll/movimento têm uma 2ª causa independente: o **pacing po
 
 Plano em 3 etapas (ordem decidida):
 
-- [ ] **1. Otimizar o core guiado por profiling** (flamegraph rodando Emerald):
-      suspeitos usuais — fast path do bus (match por região + bounds check em
-      todo acesso), dispatch do decode, PPU por scanline, ticking de
-      timers/DMA a cada instrução. Meta realista sem JIT: ×3–5. JIT (semanas)
-      só se o profiling provar necessidade. Resolve FF fraco + calor Android.
-- [ ] **2. Pacing uniforme no desktop**: trocar as rajadas por cadência de
-      ~1 frame/update com controle fino do buffer de áudio (dynamic rate
-      control clássico) — conserta o judder independente da velocidade do core.
-- [ ] **3. Fast-forward personalizável**: multiplicador configurável na UI
-      (slider/atalho, persistido no storage do eframe), em vez do orçamento
-      fixo de 12 ms. Por último de propósito: só rende com o teto novo do core.
+- [X] **1. Otimizar o core guiado por profiling** (flamegraph rodando Emerald):
+      batch da PPU + fast-path do bus (#22, ×1,43) e batch dos timers com
+      catch-up ciclo-exato (#27, áudio bit-idêntico). A otimização mais pesada
+      (cache de decode + handlers monomorfizados) migrou para a **Fase 10**.
+- [~] **2. Pacing uniforme no desktop**: tentado e **estacionado** — baseline
+      mantido. O dynamic rate control não resolveu o judder de forma limpa; as
+      lições ficaram registradas. No Android, o pacing de apresentação (~59,73
+      fps anunciados ao compositor) já foi entregue (#28).
+- [X] **3. Fast-forward personalizável**: no Android via menu (2x/4x/8x, #35);
+      no desktop continua no atalho de Espaço com orçamento fixo.
+
+### Fase 10 — ⚙️ Aceleração do core (continuação da Fase 9.1)
+
+Otimizações estruturais do interpretador, medidas em release headless.
+
+- [X] Cache de decode por endereço de ROM (#37) — evita redecodificar o mesmo
+      opcode a cada execução.
+- [X] Handlers monomorfizados por sub-opcode (#38) — dispatch especializado em
+      vez de ramificar dentro do handler genérico.
+- [ ] JIT (recompilação dinâmica) — só se o profiling provar necessidade depois
+      de esgotar o interpretador. Trabalho de semanas; mantido como último recurso.
+
+### Fase Link — 🔗 Cabo de link / multiplayer
+
+> Visão: trocar/batalhar **a qualquer hora e lugar**, cross-platform
+> (celular↔celular, pc↔pc, mesmo aparelho). Hoje o link já funciona na LAN;
+> o "qualquer lugar" (relay/internet) é a fase final.
+
+**Núcleo do protocolo (no core + crate `link`):**
+
+- [X] Registradores SIO com semântica de cabo desconectado (#39, etapa a)
+- [X] Lockstep TCP entre duas instâncias desktop (#40, etapa b)
+- [X] Trade multiplayer Gen 3 via sync event-driven (#44, etapa c) — troca de
+      Pokémon validada entre duas instâncias
+- [X] **L1** — protocolo extraído para a crate portátil `link` (transporte + sync)
+
+**Frontend desktop (L2):**
+
+- [X] **L2a** — painel de Link no desktop, conexão em thread de fundo
+- [X] **L2b** — descoberta de parceiros na LAN via UDP broadcast
+- [X] **L2c** — descoberta por mDNS junto com o UDP broadcast
+
+**Android (L3):**
+
+- [X] **L3a** — bindings JNI do link cable no Android
+- [X] **L3b** — painel de Link na UI Android
+
+**Pendências:**
+
+- [~] Link Android↔PC sobre Wi-Fi: o lockstep síncrono trava (N×RTT por frame);
+      PC↔PC na LAN cabeada roda liso. Frente "thread de emulação separada" foi
+      **revertida** (piorou) — não refazer. Caminho a atacar: latência
+      (rollback / netcode tolerante a atraso).
+- [ ] **L4** — relay/internet ("qualquer lugar"): jogar fora da mesma LAN.
+- [ ] Battle link (além de trade) entre jogos Gen 3.
 
 ---
 
@@ -267,11 +339,22 @@ Plano em 3 etapas (ordem decidida):
   de soft-reset + **injeção de seed no RNG** + UI + painel com sprite normal/shiny
   da ROM, **validado na ROM real do Emerald**. Os 3 iniciais de Hoenn
   (Torchic/Treecko/Mudkip) caçam via controle do cursor do menu em **malha
-  fechada** (endereços achados com o detector de RAM do desktop). Faltam outros
-  jogos e o método de random encounters.
-- [~] Fase 7 — Android: ponte JNI + app Kotlin (SurfaceView + controles touch +
+  fechada** (endereços achados com o detector de RAM do desktop). Ruby/Sapphire
+  também fechados. Faltam FireRed/LeafGreen e o método de random encounters.
+- [~] Fase 7 — Android: ponte JNI + app Kotlin (render GL ES + controles touch +
   **áudio via AudioTrack**), build via cargo-ndk + Gradle, **validado no emulador
-  rodando Pokémon Emerald**. Faltam saves e gamepad físico.
+  rodando Pokémon Emerald**. Saves (`.sav` + estados, espelho SAF), biblioteca de
+  ROMs persistente, gamepad físico remapeável, fast-forward, screenshot, reset e
+  Shiny Hunter em retrato — tudo entregue. Falta só APK assinado / distribuição.
+- [X] Fase 9 — Performance: batch da PPU + fast-path do bus (×1,43) + batch dos
+  timers ciclo-exato. Pacing uniforme no desktop tentado e **estacionado**
+  (baseline mantido); fast-forward por menu no Android.
+- [~] Fase 10 — Aceleração do core: cache de decode + handlers monomorfizados
+  entregues; JIT só se o profiling provar necessidade.
+- [~] Fase Link — Cabo de link: SIO desconectado → lockstep TCP → **trade Gen 3**
+  validada, crate `link` portátil, painel + descoberta LAN (UDP + mDNS) no desktop
+  e bindings + painel no Android. Falta link Android↔PC sobre Wi-Fi (latência) e
+  o relay de internet (L4).
 
 ### Validação (jsmolka gba-tests)
 
@@ -286,8 +369,6 @@ Plano em 3 etapas (ordem decidida):
   HLE não foram formatados); arquivos novos/reescritos já estão fmt-clean.
 - **Timing de ciclos**: hoje cada instrução conta como 1 ciclo (placeholder);
   falta wait states por região de memória (afeta precisão fina e pitch de áudio).
-- **Faltam**: Fase 6 (mais jogos/métodos no Shiny Hunter), mosaic afim (só BG
-  texto + OBJ implementados), e o resto do Android (áudio, saves, gamepad).
-- Suíte: **108 testes** no core (com a feature `save-states`) + 10 no desktop
-  (encoder PNG, round-trip da config de input, cache de capa, lookup de box art),
-  clippy estrito limpo.
+- **Faltam**: Fase 6 (FireRed/LeafGreen + método de random encounters no Shiny
+  Hunter), mosaic afim (só BG texto + OBJ implementados), APK Android assinado,
+  link Android↔PC sobre Wi-Fi (latência) e o relay de internet (Fase Link L4).
