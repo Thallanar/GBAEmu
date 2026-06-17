@@ -932,8 +932,16 @@ class MainActivity : Activity() {
                 wifiLock = wm.createWifiLock(mode, "auroragba-link")
             }
             wifiLock?.let { if (!it.isHeld) it.acquire() }
+            val held = wifiLock?.isHeld == true
+            val lowLat = Build.VERSION.SDK_INT >= 29
+            toast(
+                if (held && lowLat) "Wi-Fi: baixa latência ✓"
+                else if (held) "Wi-Fi: alta performance ✓"
+                else "Wi-Fi lock não pegou (segue normal)"
+            )
         } catch (e: Throwable) {
             Log.w(TAG, "WifiLock indisponível (segue sem): $e")
+            toast("Wi-Fi lock falhou (segue normal)")
         }
     }
 
