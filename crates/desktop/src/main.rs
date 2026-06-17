@@ -1186,7 +1186,11 @@ impl AuroraApp {
         let connected_id = self.link.as_ref().map(|s| s.id);
         let pending_hosting = self.link_pending.as_ref().map(|p| p.hosting);
         // Snapshot dos hosts descobertos na LAN (vazio se a descoberta está off).
-        let peers = self.discovery.as_ref().map(|d| d.peers()).unwrap_or_default();
+        let peers = self
+            .discovery
+            .as_ref()
+            .map(|d| d.peers())
+            .unwrap_or_default();
         let mut open = self.show_link;
         let mut action: Option<LinkAction> = None;
 
@@ -1196,7 +1200,11 @@ impl AuroraApp {
             .collapsible(false)
             .show(ctx, |ui| {
                 if let Some(id) = connected_id {
-                    let papel = if id == 0 { "host (parent)" } else { "convidado (child)" };
+                    let papel = if id == 0 {
+                        "host (parent)"
+                    } else {
+                        "convidado (child)"
+                    };
                     ui.label(format!("✅ Conectado — somos o {papel}."));
                     ui.label(
                         egui::RichText::new(

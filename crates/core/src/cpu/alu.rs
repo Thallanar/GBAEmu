@@ -52,13 +52,22 @@ pub fn barrel_shift(
 
 fn lsl(v: u32, amt: u32, carry_in: bool) -> ShiftOut {
     match amt {
-        0 => ShiftOut { value: v, carry: carry_in },
+        0 => ShiftOut {
+            value: v,
+            carry: carry_in,
+        },
         1..=31 => ShiftOut {
             value: v << amt,
             carry: (v >> (32 - amt)) & 1 != 0,
         },
-        32 => ShiftOut { value: 0, carry: v & 1 != 0 },
-        _ => ShiftOut { value: 0, carry: false },
+        32 => ShiftOut {
+            value: 0,
+            carry: v & 1 != 0,
+        },
+        _ => ShiftOut {
+            value: 0,
+            carry: false,
+        },
     }
 }
 
@@ -66,13 +75,22 @@ fn lsr(v: u32, amt: u32, carry_in: bool, imm_form: bool) -> ShiftOut {
     // Encoding imediato: amt==0 significa LSR #32.
     let effective = if amt == 0 && imm_form { 32 } else { amt };
     match effective {
-        0 => ShiftOut { value: v, carry: carry_in }, // só ocorre em "register form"
+        0 => ShiftOut {
+            value: v,
+            carry: carry_in,
+        }, // só ocorre em "register form"
         1..=31 => ShiftOut {
             value: v >> effective,
             carry: (v >> (effective - 1)) & 1 != 0,
         },
-        32 => ShiftOut { value: 0, carry: v & 0x8000_0000 != 0 },
-        _ => ShiftOut { value: 0, carry: false },
+        32 => ShiftOut {
+            value: 0,
+            carry: v & 0x8000_0000 != 0,
+        },
+        _ => ShiftOut {
+            value: 0,
+            carry: false,
+        },
     }
 }
 
@@ -80,7 +98,10 @@ fn asr(v: u32, amt: u32, carry_in: bool, imm_form: bool) -> ShiftOut {
     let effective = if amt == 0 && imm_form { 32 } else { amt };
     let sv = v as i32;
     match effective {
-        0 => ShiftOut { value: v, carry: carry_in },
+        0 => ShiftOut {
+            value: v,
+            carry: carry_in,
+        },
         1..=31 => ShiftOut {
             value: (sv >> effective) as u32,
             carry: (sv >> (effective - 1)) & 1 != 0,
@@ -88,7 +109,10 @@ fn asr(v: u32, amt: u32, carry_in: bool, imm_form: bool) -> ShiftOut {
         _ => {
             // amt >= 32: resultado é todo-1 ou todo-0 conforme o sinal.
             let filled = if sv < 0 { 0xFFFF_FFFF } else { 0 };
-            ShiftOut { value: filled, carry: sv < 0 }
+            ShiftOut {
+                value: filled,
+                carry: sv < 0,
+            }
         }
     }
 }
@@ -99,13 +123,19 @@ fn ror(v: u32, amt: u32, carry_in: bool, imm_form: bool) -> ShiftOut {
         return rrx(v, carry_in);
     }
     if amt == 0 {
-        return ShiftOut { value: v, carry: carry_in };
+        return ShiftOut {
+            value: v,
+            carry: carry_in,
+        };
     }
     let amt = amt % 32;
     if amt == 0 {
         // ROR por múltiplo de 32 (em register form): valor inalterado,
         // carry = bit 31.
-        return ShiftOut { value: v, carry: v & 0x8000_0000 != 0 };
+        return ShiftOut {
+            value: v,
+            carry: v & 0x8000_0000 != 0,
+        };
     }
     ShiftOut {
         value: v.rotate_right(amt),
@@ -117,7 +147,10 @@ fn ror(v: u32, amt: u32, carry_in: bool, imm_form: bool) -> ShiftOut {
 fn rrx(v: u32, carry_in: bool) -> ShiftOut {
     let carry_out = v & 1 != 0;
     let cin = if carry_in { 0x8000_0000 } else { 0 };
-    ShiftOut { value: (v >> 1) | cin, carry: carry_out }
+    ShiftOut {
+        value: (v >> 1) | cin,
+        carry: carry_out,
+    }
 }
 
 // ───────────────────── ALU arithmetic ─────────────────────
@@ -134,7 +167,11 @@ pub fn add_with_flags(a: u32, b: u32) -> ArithOut {
     let (value, carry) = a.overflowing_add(b);
     // Overflow signed: ocorre quando os sinais de a e b são iguais e o resultado tem sinal oposto.
     let overflow = ((a ^ value) & (b ^ value) & 0x8000_0000) != 0;
-    ArithOut { value, carry, overflow }
+    ArithOut {
+        value,
+        carry,
+        overflow,
+    }
 }
 
 pub fn adc_with_flags(a: u32, b: u32, carry_in: bool) -> ArithOut {
@@ -143,7 +180,11 @@ pub fn adc_with_flags(a: u32, b: u32, carry_in: bool) -> ArithOut {
     let (value, c2) = s1.overflowing_add(cin);
     let carry = c1 || c2;
     let overflow = ((a ^ value) & (b ^ value) & 0x8000_0000) != 0;
-    ArithOut { value, carry, overflow }
+    ArithOut {
+        value,
+        carry,
+        overflow,
+    }
 }
 
 /// Subtração ARM: a - b. Convenção do ARM: C = NOT borrow (ou seja,
@@ -151,7 +192,11 @@ pub fn adc_with_flags(a: u32, b: u32, carry_in: bool) -> ArithOut {
 pub fn sub_with_flags(a: u32, b: u32) -> ArithOut {
     let (value, borrow) = a.overflowing_sub(b);
     let overflow = ((a ^ b) & (a ^ value) & 0x8000_0000) != 0;
-    ArithOut { value, carry: !borrow, overflow }
+    ArithOut {
+        value,
+        carry: !borrow,
+        overflow,
+    }
 }
 
 /// SBC: a - b - !C. Equivalente a a + ~b + C.

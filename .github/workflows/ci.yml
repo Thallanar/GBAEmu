@@ -32,7 +32,7 @@ jobs:
       - name: Install Linux deps (eframe)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libasound2-dev
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -50,7 +50,21 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libasound2-dev
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libasound2-dev libudev-dev
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --exclude auroragba-android
       - run: cargo test --workspace --exclude auroragba-android
+
+  android:
+    name: Android build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+      - name: Build native lib (arm64 + x86_64)
+        run: cargo ndk -t arm64-v8a -t x86_64 build -p auroragba-android

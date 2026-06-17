@@ -75,11 +75,26 @@ impl RegisterFile {
         self.active[idx] = value;
     }
 
-    #[inline] pub fn pc(&self) -> u32 { self.active[15] }
-    #[inline] pub fn set_pc(&mut self, v: u32) { self.active[15] = v; }
-    #[inline] pub fn lr(&self) -> u32 { self.active[14] }
-    #[inline] pub fn set_lr(&mut self, v: u32) { self.active[14] = v; }
-    #[inline] pub fn sp(&self) -> u32 { self.active[13] }
+    #[inline]
+    pub fn pc(&self) -> u32 {
+        self.active[15]
+    }
+    #[inline]
+    pub fn set_pc(&mut self, v: u32) {
+        self.active[15] = v;
+    }
+    #[inline]
+    pub fn lr(&self) -> u32 {
+        self.active[14]
+    }
+    #[inline]
+    pub fn set_lr(&mut self, v: u32) {
+        self.active[14] = v;
+    }
+    #[inline]
+    pub fn sp(&self) -> u32 {
+        self.active[13]
+    }
 
     /// Troca o banco ativo para refletir um novo modo.
     /// Chamado quando o CPSR muda de modo (via MSR ou exception entry).
@@ -99,10 +114,22 @@ impl RegisterFile {
                 self.fiq.sp = self.active[13];
                 self.fiq.lr = self.active[14];
             }
-            CpuMode::Irq => { self.irq.sp = self.active[13]; self.irq.lr = self.active[14]; }
-            CpuMode::Supervisor => { self.svc.sp = self.active[13]; self.svc.lr = self.active[14]; }
-            CpuMode::Abort => { self.abt.sp = self.active[13]; self.abt.lr = self.active[14]; }
-            CpuMode::Undefined => { self.und.sp = self.active[13]; self.und.lr = self.active[14]; }
+            CpuMode::Irq => {
+                self.irq.sp = self.active[13];
+                self.irq.lr = self.active[14];
+            }
+            CpuMode::Supervisor => {
+                self.svc.sp = self.active[13];
+                self.svc.lr = self.active[14];
+            }
+            CpuMode::Abort => {
+                self.abt.sp = self.active[13];
+                self.abt.lr = self.active[14];
+            }
+            CpuMode::Undefined => {
+                self.und.sp = self.active[13];
+                self.und.lr = self.active[14];
+            }
             CpuMode::User | CpuMode::System => {
                 self.user_bank.sp = self.active[13];
                 self.user_bank.lr = self.active[14];

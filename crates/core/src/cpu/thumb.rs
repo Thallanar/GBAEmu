@@ -205,12 +205,20 @@ fn fmt1_move_shifted<const KIND: u32>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
 // ──────────────── Format 2: Add/subtract ────────────────
 // 00011 I op Rn/imm3(3) Rs(3) Rd(3)
 fn fmt2_add_sub<const IMM: bool, const SUB: bool>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
-    let operand2 = if IMM { (i >> 6) & 7 } else { cpu.regs.get(((i >> 6) & 7) as usize) };
+    let operand2 = if IMM {
+        (i >> 6) & 7
+    } else {
+        cpu.regs.get(((i >> 6) & 7) as usize)
+    };
     let rs = ((i >> 3) & 7) as usize;
     let rd = (i & 7) as usize;
     let a = cpu.regs.get(rs);
 
-    let out = if SUB { sub_with_flags(a, operand2) } else { add_with_flags(a, operand2) };
+    let out = if SUB {
+        sub_with_flags(a, operand2)
+    } else {
+        add_with_flags(a, operand2)
+    };
     cpu.regs.set(rd, out.value);
     cpu.cpsr.set_nz(out.value);
     cpu.cpsr.set_flag(PsrFlags::C, out.carry);
@@ -225,24 +233,28 @@ fn fmt3_mcas_imm<const OP: u32>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
     let a = cpu.regs.get(rd);
 
     match OP {
-        0 => { // MOV
+        0 => {
+            // MOV
             cpu.regs.set(rd, imm);
             cpu.cpsr.set_nz(imm);
         }
-        1 => { // CMP
+        1 => {
+            // CMP
             let out = sub_with_flags(a, imm);
             cpu.cpsr.set_nz(out.value);
             cpu.cpsr.set_flag(PsrFlags::C, out.carry);
             cpu.cpsr.set_flag(PsrFlags::V, out.overflow);
         }
-        2 => { // ADD
+        2 => {
+            // ADD
             let out = add_with_flags(a, imm);
             cpu.regs.set(rd, out.value);
             cpu.cpsr.set_nz(out.value);
             cpu.cpsr.set_flag(PsrFlags::C, out.carry);
             cpu.cpsr.set_flag(PsrFlags::V, out.overflow);
         }
-        _ => { // SUB
+        _ => {
+            // SUB
             let out = sub_with_flags(a, imm);
             cpu.regs.set(rd, out.value);
             cpu.cpsr.set_nz(out.value);
@@ -262,22 +274,37 @@ fn fmt4_alu<const OP: u32>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
     let c_in = cpu.cpsr.c();
 
     let (write, value, set_cv) = match OP {
-        0x0 => (true,  a & b, None),                                       // AND
-        0x1 => (true,  a ^ b, None),                                       // EOR
+        0x0 => (true, a & b, None), // AND
+        0x1 => (true, a ^ b, None), // EOR
         0x2 => (true, shift_op(ShiftKind::Lsl, a, b & 0xFF, c_in, cpu), None), // LSL by reg
         0x3 => (true, shift_op(ShiftKind::Lsr, a, b & 0xFF, c_in, cpu), None), // LSR by reg
         0x4 => (true, shift_op(ShiftKind::Asr, a, b & 0xFF, c_in, cpu), None), // ASR by reg
-        0x5 => { let o = adc_with_flags(a, b, c_in); (true, o.value, Some((o.carry, o.overflow))) } // ADC
-        0x6 => { let o = sbc_with_flags(a, b, c_in); (true, o.value, Some((o.carry, o.overflow))) } // SBC
+        0x5 => {
+            let o = adc_with_flags(a, b, c_in);
+            (true, o.value, Some((o.carry, o.overflow)))
+        } // ADC
+        0x6 => {
+            let o = sbc_with_flags(a, b, c_in);
+            (true, o.value, Some((o.carry, o.overflow)))
+        } // SBC
         0x7 => (true, shift_op(ShiftKind::Ror, a, b & 0xFF, c_in, cpu), None), // ROR by reg
-        0x8 => (false, a & b, None),                                       // TST
-        0x9 => { let o = sub_with_flags(0, b); (true, o.value, Some((o.carry, o.overflow))) } // NEG
-        0xA => { let o = sub_with_flags(a, b); (false, o.value, Some((o.carry, o.overflow))) } // CMP
-        0xB => { let o = add_with_flags(a, b); (false, o.value, Some((o.carry, o.overflow))) } // CMN
-        0xC => (true,  a | b, None),                                       // ORR
-        0xD => (true,  a.wrapping_mul(b), None),                           // MUL
-        0xE => (true,  a & !b, None),                                      // BIC
-        0xF => (true,  !b, None),                                          // MVN
+        0x8 => (false, a & b, None), // TST
+        0x9 => {
+            let o = sub_with_flags(0, b);
+            (true, o.value, Some((o.carry, o.overflow)))
+        } // NEG
+        0xA => {
+            let o = sub_with_flags(a, b);
+            (false, o.value, Some((o.carry, o.overflow)))
+        } // CMP
+        0xB => {
+            let o = add_with_flags(a, b);
+            (false, o.value, Some((o.carry, o.overflow)))
+        } // CMN
+        0xC => (true, a | b, None), // ORR
+        0xD => (true, a.wrapping_mul(b), None), // MUL
+        0xE => (true, a & !b, None), // BIC
+        0xF => (true, !b, None),    // MVN
         _ => unreachable!(),
     };
 
@@ -309,20 +336,32 @@ fn fmt5_hi_reg<const OP: u32>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
     let a = cpu.regs.get(rd);
 
     match OP {
-        0 => { // ADD (não atualiza flags)
+        0 => {
+            // ADD (não atualiza flags)
             let v = a.wrapping_add(b);
-            if rd == 15 { cpu.set_pc_thumb(v); } else { cpu.regs.set(rd, v); }
+            if rd == 15 {
+                cpu.set_pc_thumb(v);
+            } else {
+                cpu.regs.set(rd, v);
+            }
         }
-        1 => { // CMP (atualiza flags)
+        1 => {
+            // CMP (atualiza flags)
             let o = sub_with_flags(a, b);
             cpu.cpsr.set_nz(o.value);
             cpu.cpsr.set_flag(PsrFlags::C, o.carry);
             cpu.cpsr.set_flag(PsrFlags::V, o.overflow);
         }
-        2 => { // MOV (não atualiza flags)
-            if rd == 15 { cpu.set_pc_thumb(b); } else { cpu.regs.set(rd, b); }
+        2 => {
+            // MOV (não atualiza flags)
+            if rd == 15 {
+                cpu.set_pc_thumb(b);
+            } else {
+                cpu.regs.set(rd, b);
+            }
         }
-        _ => { // BX
+        _ => {
+            // BX
             let thumb = b & 1 != 0;
             cpu.cpsr.set_flag(PsrFlags::T, thumb);
             if thumb {
@@ -384,18 +423,24 @@ fn fmt8_load_store_sign_ext<const H: bool, const S: bool>(cpu: &mut Cpu, bus: &m
     let addr = cpu.regs.get(rb).wrapping_add(cpu.regs.get(ro));
 
     let v = match (S, H) {
-        (false, false) => { // STRH
+        (false, false) => {
+            // STRH
             let v = cpu.regs.get(rd);
             bus.write_u16(addr & !1, v as u16);
             return;
         }
-        (false, true)  => { // LDRH
+        (false, true) => {
+            // LDRH
             let aligned = addr & !1;
             let v = bus.read_u16(aligned) as u32;
-            if addr & 1 != 0 { v.rotate_right(8) } else { v }
+            if addr & 1 != 0 {
+                v.rotate_right(8)
+            } else {
+                v
+            }
         }
-        (true, false)  => bus.read_u8(addr) as i8 as i32 as u32, // LDRSB
-        (true, true)   => {
+        (true, false) => bus.read_u8(addr) as i8 as i32 as u32, // LDRSB
+        (true, true) => {
             if addr & 1 != 0 {
                 bus.read_u8(addr) as i8 as i32 as u32
             } else {
@@ -451,7 +496,8 @@ fn fmt10_load_store_halfword<const LOAD: bool>(cpu: &mut Cpu, bus: &mut Bus, i: 
     if LOAD {
         let aligned = addr & !1;
         let v = bus.read_u16(aligned) as u32;
-        cpu.regs.set(rd, if addr & 1 != 0 { v.rotate_right(8) } else { v });
+        cpu.regs
+            .set(rd, if addr & 1 != 0 { v.rotate_right(8) } else { v });
     } else {
         bus.write_u16(addr & !1, cpu.regs.get(rd) as u16);
     }
@@ -477,7 +523,11 @@ fn fmt11_sp_relative<const LOAD: bool>(cpu: &mut Cpu, bus: &mut Bus, i: u32) {
 fn fmt12_load_address<const USE_SP: bool>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
     let rd = ((i >> 8) & 7) as usize;
     let offset = (i & 0xFF) * 4;
-    let base = if USE_SP { cpu.regs.sp() } else { cpu.regs.pc() & !2 };
+    let base = if USE_SP {
+        cpu.regs.sp()
+    } else {
+        cpu.regs.pc() & !2
+    };
     cpu.regs.set(rd, base.wrapping_add(offset));
 }
 
@@ -486,7 +536,11 @@ fn fmt12_load_address<const USE_SP: bool>(cpu: &mut Cpu, _bus: &mut Bus, i: u32)
 fn fmt13_add_to_sp<const SUB: bool>(cpu: &mut Cpu, _bus: &mut Bus, i: u32) {
     let offset = (i & 0x7F) * 4;
     let sp = cpu.regs.sp();
-    let v = if SUB { sp.wrapping_sub(offset) } else { sp.wrapping_add(offset) };
+    let v = if SUB {
+        sp.wrapping_sub(offset)
+    } else {
+        sp.wrapping_add(offset)
+    };
     cpu.regs.set(13, v);
 }
 

@@ -45,7 +45,8 @@ fn rd_u32(rom: &[u8], off: usize) -> Option<u32> {
 }
 
 fn rd_u16(rom: &[u8], off: usize) -> Option<u16> {
-    rom.get(off..off + 2).map(|b| u16::from_le_bytes([b[0], b[1]]))
+    rom.get(off..off + 2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
 }
 
 /// Quantas entradas consecutivas a partir de `table` (stride 8) têm `ptr` válido
@@ -215,7 +216,12 @@ fn bgr555_to_rgba8(c: u16) -> [u8; 4] {
     let r = (c & 0x1F) as u8;
     let g = ((c >> 5) & 0x1F) as u8;
     let b = ((c >> 10) & 0x1F) as u8;
-    [(r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), 0xFF]
+    [
+        (r << 3) | (r >> 2),
+        (g << 3) | (g >> 2),
+        (b << 3) | (b >> 2),
+        0xFF,
+    ]
 }
 
 #[cfg(test)]

@@ -81,7 +81,9 @@ fn main() -> std::io::Result<()> {
         }
         Some("--watch") => {
             let addr = u32::from_str_radix(
-                args.next().expect("--watch precisa do endereço").trim_start_matches("0x"),
+                args.next()
+                    .expect("--watch precisa do endereço")
+                    .trim_start_matches("0x"),
                 16,
             )
             .expect("endereço hex inválido");

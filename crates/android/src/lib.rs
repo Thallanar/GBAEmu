@@ -704,7 +704,11 @@ mod android_impl {
         target: jint,
         shiny: jboolean,
     ) -> jintArray {
-        let empty = || env.new_int_array(0).map(|a| a.into_raw()).unwrap_or(std::ptr::null_mut());
+        let empty = || {
+            env.new_int_array(0)
+                .map(|a| a.into_raw())
+                .unwrap_or(std::ptr::null_mut())
+        };
         let Some(emu) = emu(handle) else {
             return empty();
         };
@@ -717,7 +721,8 @@ mod android_impl {
         let Some(gfx) = emu.rom_gfx else {
             return empty();
         };
-        let Some(sprite) = gfx.decode_front(&emu.gba.bus.cartridge.rom, t.species, shiny != 0) else {
+        let Some(sprite) = gfx.decode_front(&emu.gba.bus.cartridge.rom, t.species, shiny != 0)
+        else {
             return empty();
         };
         // RGBA (bytes) → ARGB (i32 por pixel) pro Bitmap.ARGB_8888 do Android.
@@ -794,7 +799,9 @@ mod android_impl {
     /// A thread só usa o `Sender` — não toca o `Emu`.
     fn start_link(
         emu: &mut Emu,
-        connect: impl FnOnce(Arc<AtomicBool>) -> std::io::Result<LinkSession<TcpStream>> + Send + 'static,
+        connect: impl FnOnce(Arc<AtomicBool>) -> std::io::Result<LinkSession<TcpStream>>
+            + Send
+            + 'static,
     ) {
         cancel_link(emu); // descarta qualquer tentativa anterior
         let cancel = Arc::new(AtomicBool::new(false));
@@ -972,7 +979,9 @@ mod android_impl {
         _class: JClass,
         handle: jlong,
     ) -> jstring {
-        let msg = emu(handle).and_then(|e| e.link_error.take()).unwrap_or_default();
+        let msg = emu(handle)
+            .and_then(|e| e.link_error.take())
+            .unwrap_or_default();
         env.new_string(msg)
             .map(|s| s.into_raw())
             .unwrap_or(std::ptr::null_mut())

@@ -305,11 +305,19 @@ impl Gba {
         if take(&mut p, 4) != Some(STATE_MAGIC.as_slice()) {
             return Err(StateError::BadMagic);
         }
-        let ver = u32::from_le_bytes(take(&mut p, 4).ok_or(StateError::BadMagic)?.try_into().unwrap());
+        let ver = u32::from_le_bytes(
+            take(&mut p, 4)
+                .ok_or(StateError::BadMagic)?
+                .try_into()
+                .unwrap(),
+        );
         if ver != STATE_VERSION {
             return Err(StateError::BadVersion(ver));
         }
-        let code_len = *take(&mut p, 1).ok_or(StateError::BadMagic)?.first().unwrap() as usize;
+        let code_len = *take(&mut p, 1)
+            .ok_or(StateError::BadMagic)?
+            .first()
+            .unwrap() as usize;
         let code = take(&mut p, code_len).ok_or(StateError::BadMagic)?;
         if code != self.bus.cartridge.game_code().as_bytes() {
             return Err(StateError::WrongGame);

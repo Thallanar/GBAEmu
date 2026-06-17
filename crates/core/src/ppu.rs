@@ -311,11 +311,7 @@ impl Ppu {
             // prioridade, OBJ fica à frente dos BGs, e BG menor à frente do maior.
             for prio in (0..=3u8).rev() {
                 for bg in (0..4usize).rev() {
-                    if bg_on[bg]
-                        && bg_prio[bg] == prio
-                        && bg_op[bg][x]
-                        && win & (1 << bg) != 0
-                    {
+                    if bg_on[bg] && bg_prio[bg] == prio && bg_op[bg][x] && win & (1 << bg) != 0 {
                         sub = (top.0, top.1);
                         top = (bg_c[bg][x], bg as u8, false);
                     }
@@ -374,8 +370,16 @@ impl Ppu {
         let x2 = (self.win_h[w] & 0xFF) as usize;
         let y1 = (self.win_v[w] >> 8) as usize;
         let y2 = (self.win_v[w] & 0xFF) as usize;
-        let in_x = if x1 <= x2 { x >= x1 && x < x2 } else { x >= x1 || x < x2 };
-        let in_y = if y1 <= y2 { y >= y1 && y < y2 } else { y >= y1 || y < y2 };
+        let in_x = if x1 <= x2 {
+            x >= x1 && x < x2
+        } else {
+            x >= x1 || x < x2
+        };
+        let in_y = if y1 <= y2 {
+            y >= y1 && y < y2
+        } else {
+            y >= y1 || y < y2
+        };
         in_x && in_y
     }
 
@@ -383,12 +387,7 @@ impl Ppu {
     /// camadas da frente; `effect` diz se a janela permite efeito especial aqui.
     /// OBJ semitransparente força alpha-blend com a 2ª camada (se ela for 2º
     /// alvo), independente do modo do BLDCNT.
-    fn apply_effects(
-        &self,
-        top: ([u8; 4], u8, bool),
-        sub: ([u8; 4], u8),
-        effect: bool,
-    ) -> [u8; 4] {
+    fn apply_effects(&self, top: ([u8; 4], u8, bool), sub: ([u8; 4], u8), effect: bool) -> [u8; 4] {
         let (top_c, top_layer, top_semi) = top;
         let (sub_c, sub_layer) = sub;
         let sub_is_2nd = self.bldcnt & (1 << (8 + sub_layer)) != 0;
@@ -773,15 +772,7 @@ impl Ppu {
                 let tex_y = (tex_y as usize / mov) * mov;
 
                 if let Some(color) = self.sample_sprite(
-                    vram,
-                    palette,
-                    tile_base,
-                    is_8bpp,
-                    pal_bank,
-                    one_d,
-                    w,
-                    tex_x,
-                    tex_y,
+                    vram, palette, tile_base, is_8bpp, pal_bank, one_d, w, tex_x, tex_y,
                 ) {
                     if is_window {
                         obj_win[sx] = true; // marca a região da janela-OBJ
@@ -1008,7 +999,12 @@ fn sign_extend_28(v: u32) -> i32 {
 #[inline]
 fn alpha_blend(top: [u8; 4], sub: [u8; 4], eva: u32, evb: u32) -> [u8; 4] {
     let mix = |a: u8, b: u8| (((a as u32 * eva + b as u32 * evb) >> 4).min(255)) as u8;
-    [mix(top[0], sub[0]), mix(top[1], sub[1]), mix(top[2], sub[2]), 0xFF]
+    [
+        mix(top[0], sub[0]),
+        mix(top[1], sub[1]),
+        mix(top[2], sub[2]),
+        0xFF,
+    ]
 }
 
 /// Clareia em direção ao branco: `c + (255-c)*evy/16`, por canal.
@@ -1270,13 +1266,19 @@ mod tests {
         p.bldcnt = 1 << (8 + 1);
         p.bldalpha = 8 | (8 << 8);
         let semi_obj = (WHITE, LAYER_OBJ, true);
-        assert_eq!(p.apply_effects(semi_obj, (BLACK, 1), true), [127, 127, 127, 0xFF]);
+        assert_eq!(
+            p.apply_effects(semi_obj, (BLACK, 1), true),
+            [127, 127, 127, 0xFF]
+        );
         // Embaixo não há 2º alvo → OBJ opaco normal.
         assert_eq!(p.apply_effects(semi_obj, (BLACK, 2), true), WHITE);
         // Mesmo com o efeito especial da janela DESLIGADO (effect=false), o OBJ
         // semitransparente ainda mistura — regressão da névoa opaca da Rusturf
         // Tunnel, que liga WIN0 na tela toda com WININ bit 5 = 0.
-        assert_eq!(p.apply_effects(semi_obj, (BLACK, 1), false), [127, 127, 127, 0xFF]);
+        assert_eq!(
+            p.apply_effects(semi_obj, (BLACK, 1), false),
+            [127, 127, 127, 0xFF]
+        );
     }
 
     #[test]
@@ -1314,7 +1316,7 @@ mod tests {
 
         // Tile 0 (4bpp): pixel 0 = índice 1, pixel 1 = índice 2 (cores diferentes).
         v[0] = 0x21; // nibble baixo (px0)=1, nibble alto (px1)=2
-        // Map entry (0,0): tile 0, banco 0.
+                     // Map entry (0,0): tile 0, banco 0.
         v[0x800] = 0;
         v[0x801] = 0;
         // Paleta: índice 1 = vermelho, índice 2 = verde.
