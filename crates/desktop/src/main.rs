@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use auroragba_core::joypad::Button as GbaButton;
 use auroragba_core::{Gba, SCREEN_HEIGHT, SCREEN_WIDTH};
 use auroragba_shiny::games::GameProfile;
-use auroragba_shiny::games::HuntMethod;
 use auroragba_shiny::gfx::RomGfx;
 use auroragba_shiny::{CheckResult, Hunter};
 use eframe::egui;
@@ -304,9 +303,80 @@ impl CursorFinder {
     }
 }
 
+/// Localizador (debug) do **bit** de estado de batalha (ex.: `gMain.inBattle`) na
+/// IWRAM. O flag costuma ser um bitfield (divide o byte com outros bits), então
+/// procuramos um BIT — não o byte inteiro — que seja 1 em **todo** snapshot de
+/// batalha e **nunca** num snapshot de overworld:
+///   - `battle_and[i]`: AND dos snapshots de batalha (bits 1 em toda batalha);
+///   - `over_or[i]`: OR dos snapshots de overworld (bits já vistos 1 fora dela).
+///
+/// Candidato em `i` = `battle_and[i] & !over_or[i]` (bits que sobram). Usa
+/// **snapshots explícitos** (não acumulação por frame): assim os frames de
+/// transição do início da batalha — em que `inBattle` já é 1 mas a tela ainda
+/// parece overworld — não envenenam o OR. Mais snapshots de cada lado afunilam.
+#[derive(Default)]
+struct BattleStateFinder {
+    battle_and: Vec<u8>,
+    over_or: Vec<u8>,
+    battle_snaps: u32,
+    over_snaps: u32,
+}
+
+impl BattleStateFinder {
+    const IWRAM_LEN: usize = 0x8000;
+
+    fn start(&mut self) {
+        self.battle_and = vec![0xFFu8; Self::IWRAM_LEN];
+        self.over_or = vec![0x00u8; Self::IWRAM_LEN];
+        self.battle_snaps = 0;
+        self.over_snaps = 0;
+    }
+
+    fn tracking(&self) -> bool {
+        !self.battle_and.is_empty()
+    }
+
+    /// Dobra o estado atual da IWRAM num snapshot de batalha (AND) ou de overworld
+    /// (OR), conforme o botão clicado.
+    fn snapshot(&mut self, iwram: &[u8], in_battle: bool) {
+        if self.battle_and.is_empty() {
+            self.start();
+        }
+        if in_battle {
+            for (acc, &v) in self.battle_and.iter_mut().zip(iwram.iter()) {
+                *acc &= v;
+            }
+            self.battle_snaps += 1;
+        } else {
+            for (acc, &v) in self.over_or.iter_mut().zip(iwram.iter()) {
+                *acc |= v;
+            }
+            self.over_snaps += 1;
+        }
+    }
+
+    /// `(offset, máscara de bits candidatos)` — bits 1 em toda batalha e nunca no
+    /// overworld. Só faz sentido com ≥1 snapshot de cada lado.
+    fn candidates(&self) -> Vec<(u16, u8)> {
+        if self.battle_snaps == 0 || self.over_snaps == 0 {
+            return Vec::new();
+        }
+        self.battle_and
+            .iter()
+            .zip(self.over_or.iter())
+            .enumerate()
+            .filter_map(|(i, (&b, &o))| {
+                let mask = b & !o;
+                (mask != 0).then_some((i as u16, mask))
+            })
+            .collect()
+    }
+}
+
 /// Mostra o painel de busca de RAM (debug) pra achar endereços por versão (ex.:
-/// o cursor do menu do inicial). Fica desligado por padrão pra não poluir a UI;
-/// vire pra `true` quando precisar mapear um jogo novo.
+/// o cursor do menu do inicial) e o readout de estado de batalha. Fica desligado
+/// por padrão pra não poluir a UI; vire pra `true` quando precisar mapear um jogo
+/// novo (cursor do inicial, flag de batalha).
 const SHOW_RAM_FINDER: bool = false;
 
 fn main() -> eframe::Result<()> {
@@ -401,6 +471,8 @@ struct AuroraApp {
     hunt_started: Option<Instant>,
     /// Detector (debug) do byte do cursor do inicial na RAM. Ver [`CursorFinder`].
     cursor_finder: CursorFinder,
+    /// Localizador (debug) do bit de estado de batalha. Ver [`BattleStateFinder`].
+    battle_finder: BattleStateFinder,
     /// Slot de save state atual (0-indexado) usado por F5/F9.
     current_slot: usize,
     /// Anel de estados serializados pro rewind (o mais recente no fim).
@@ -494,6 +566,7 @@ impl AuroraApp {
             sprite_cache: HashMap::new(),
             hunt_started: None,
             cursor_finder: CursorFinder::default(),
+            battle_finder: BattleStateFinder::default(),
             current_slot: 0,
             rewind: VecDeque::new(),
             status: None,
@@ -918,6 +991,7 @@ impl AuroraApp {
 
         if SHOW_RAM_FINDER {
             self.cursor_finder_ui(ui);
+            self.battle_state_finder_ui(ui);
         }
     }
 
@@ -967,6 +1041,67 @@ impl AuroraApp {
         });
     }
 
+    /// Localizador (debug) do bit de estado de batalha (`gMain.inBattle` & cia).
+    /// O `gEnemyParty` fica sujo depois da fuga, então a detecção de overworld do
+    /// Marco 2 vai depender desse flag. Por snapshots explícitos: tire um no
+    /// overworld (andando) e um na batalha (com o menu FIGHT/RUN na tela). Repita
+    /// alguns de cada — bem dentro de cada estado, nunca na transição — até
+    /// sobrar 1 candidato.
+    fn battle_state_finder_ui(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("🔎 Achar flag de batalha (debug)").show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Reset → ande no overworld e clique 'Snapshot overworld' → \
+                     entre numa batalha e, com o menu na tela, clique 'Snapshot \
+                     batalha' → fuja. Repita 2-3× de cada lado até sobrar 1.",
+                )
+                .small()
+                .weak(),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Reset").clicked() {
+                    self.battle_finder.start();
+                }
+                if ui.button("Snapshot overworld").clicked() {
+                    self.battle_finder.snapshot(&self.gba.bus.iwram[..], false);
+                }
+                if ui.button("Snapshot batalha").clicked() {
+                    self.battle_finder.snapshot(&self.gba.bus.iwram[..], true);
+                }
+            });
+            // Suspeito forte: gMain (0x030022C0) + 0x439 = byte do bitfield onde
+            // mora `inBattle` (bit 0x02). Olhe esta linha: no overworld o bit deve
+            // ser 0, na batalha 0x02. (Se não bater, o gMain pode ser de outra
+            // revisão — aí use a lista filtrada abaixo.)
+            let suspect = 0x0000_26F9usize;
+            let sval = self.gba.bus.iwram[suspect];
+            ui.monospace(format!(
+                "suspeito 0x030026F9 = {sval:#04X}  (inBattle bit 0x02 = {:#04X})",
+                sval & 0x02
+            ));
+            if self.battle_finder.tracking() {
+                ui.label(format!(
+                    "snapshots: overworld={}, batalha={}",
+                    self.battle_finder.over_snaps, self.battle_finder.battle_snaps
+                ));
+                let cands = self.battle_finder.candidates();
+                // Filtra pro entorno do gMain (≥0x2000): corta o ruído dos buffers
+                // de batalha na RAM baixa, que também são "0 no overworld, 1 na luta".
+                let near_gmain: Vec<_> = cands.iter().filter(|(off, _)| *off >= 0x2000).collect();
+                ui.label(format!(
+                    "candidatos: {} total, {} perto do gMain (≥0x2000)",
+                    cands.len(),
+                    near_gmain.len()
+                ));
+                for &&(off, mask) in near_gmain.iter().take(24) {
+                    let addr = 0x0300_0000u32 + off as u32;
+                    let val = self.gba.bus.iwram[off as usize];
+                    ui.monospace(format!("0x{addr:08X}  bit={mask:#04X}  (byte={val:#04X})"));
+                }
+            }
+        });
+    }
+
     /// Um passo da caça (lote de frames). Para e pausa ao achar o shiny.
     fn hunt_step(&mut self) {
         let Some(profile) = self.profile else {
@@ -982,31 +1117,16 @@ impl AuroraApp {
             .tick(&mut self.gba, profile, target, batch, 60 * 60);
         // Descarta o áudio gerado durante a caça (não toca; evita crescer o buffer).
         self.gba.bus.apu.buffer.clear();
-        // Marco 1 do WildSpin: ainda não há fuga pra encadear tentativas, então a
-        // caça pausa em QUALQUER selvagem (shiny ou não) pra você ver/conferir. No
-        // Marco 2 (fuga automática) isso volta a pausar só no shiny.
-        let wild_probe_pause =
-            target.method == HuntMethod::WildSpin && result == CheckResult::NotShiny;
-        if result == CheckResult::Shiny || wild_probe_pause {
+        if result == CheckResult::Shiny {
             // Achou! Devolve o controle no momento pós-seleção: o jogo entra na
             // batalha sozinho e o inicial shiny aparece (com os sparkles). O
             // jogador assiste/joga a partir daí (pode apertar Z=A pra avançar).
             self.hunting = false;
             self.running = true;
-            if wild_probe_pause {
-                log::info!(
-                    "Selvagem encontrado (tentativa {}): espécie={} PID={:08X} shiny_value={} (não-shiny). Caça pausada — fuga automática vem no Marco 2.",
-                    self.hunter.attempts,
-                    self.hunter.last_species,
-                    self.hunter.last_pid,
-                    self.hunter.last_shiny_value,
-                );
-            } else {
-                log::info!(
-                    "✨ Shiny encontrado em {} tentativas! Controle devolvido pra você ver a batalha.",
-                    self.hunter.attempts
-                );
-            }
+            log::info!(
+                "✨ Shiny encontrado em {} tentativas! Controle devolvido pra você ver a batalha.",
+                self.hunter.attempts
+            );
         }
     }
 
@@ -1540,7 +1660,8 @@ impl eframe::App for AuroraApp {
                 }
             }
             // Alimenta o detector de cursor (debug) com o estado da RAM deste
-            // frame; no-op se não estiver rastreando.
+            // frame; no-op se não estiver rastreando. (O localizador de batalha usa
+            // snapshots por botão, não acumulação por frame.)
             if SHOW_RAM_FINDER {
                 self.cursor_finder.observe(&self.gba.bus.iwram[..]);
             }

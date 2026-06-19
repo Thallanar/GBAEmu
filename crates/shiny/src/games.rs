@@ -112,6 +112,11 @@ pub struct GameProfile {
     /// Endereços do menu do inicial, pra forçar a seleção em malha fechada.
     /// `None` = jogo sem método Starter mapeado (a direção é ignorada).
     pub starter_menu: Option<StarterMenu>,
+    /// Flag "em batalha" (ex.: `gMain.inBattle`): `(endereço, máscara do bit)`. A
+    /// caça de selvagem ([`HuntMethod::WildSpin`]) usa pra saber quando a batalha
+    /// acabou (o `gEnemyParty` fica sujo após a fuga, então não serve). `None` =
+    /// não mapeado ⇒ a caça com fuga não funciona nesse jogo.
+    pub battle_flag: Option<(u32, u8)>,
     /// Alvos de caça suportados neste jogo.
     pub targets: &'static [TargetDef],
 }
@@ -148,6 +153,9 @@ const EMERALD: GameProfile = GameProfile {
         cursor_addr: 0x0300_5E08,
         input_funcs: &[0x0813_425D],
     }),
+    // gMain.inBattle (gMain 0x030022C0 + 0x439): 0x00 no overworld, 0x02 na
+    // batalha. Confirmado na ROM real com o localizador de flag de batalha.
+    battle_flag: Some((0x0300_26F9, 0x02)),
     targets: &[
         // Lendários estáticos (soft-reset na frente). Índices INTERNOS do Gen 3
         // (≠ dex nacional): a cauda de Hoenn é REORDENADA — não é um offset fixo.
@@ -316,6 +324,8 @@ const RUBY: GameProfile = GameProfile {
     enemy_party: 0x0300_45C0,
     rng_addr: Some(0x0300_4818),
     starter_menu: Some(RS_STARTER_MENU),
+    // Flag de batalha do R/S ainda não mapeado (sem caça de selvagem aqui por ora).
+    battle_flag: None,
     targets: &[
         TargetDef {
             name: "Groudon",
@@ -341,6 +351,7 @@ const SAPPHIRE: GameProfile = GameProfile {
     enemy_party: 0x0300_45C0,
     rng_addr: Some(0x0300_4818),
     starter_menu: Some(RS_STARTER_MENU),
+    battle_flag: None,
     targets: &[
         TargetDef {
             name: "Kyogre",
