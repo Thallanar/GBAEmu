@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use auroragba_core::joypad::Button as GbaButton;
 use auroragba_core::{Gba, SCREEN_HEIGHT, SCREEN_WIDTH};
 use auroragba_shiny::games::GameProfile;
+use auroragba_shiny::games::HuntMethod;
 use auroragba_shiny::gfx::RomGfx;
 use auroragba_shiny::{CheckResult, Hunter};
 use eframe::egui;
@@ -981,16 +982,31 @@ impl AuroraApp {
             .tick(&mut self.gba, profile, target, batch, 60 * 60);
         // Descarta o áudio gerado durante a caça (não toca; evita crescer o buffer).
         self.gba.bus.apu.buffer.clear();
-        if result == CheckResult::Shiny {
+        // Marco 1 do WildSpin: ainda não há fuga pra encadear tentativas, então a
+        // caça pausa em QUALQUER selvagem (shiny ou não) pra você ver/conferir. No
+        // Marco 2 (fuga automática) isso volta a pausar só no shiny.
+        let wild_probe_pause =
+            target.method == HuntMethod::WildSpin && result == CheckResult::NotShiny;
+        if result == CheckResult::Shiny || wild_probe_pause {
             // Achou! Devolve o controle no momento pós-seleção: o jogo entra na
             // batalha sozinho e o inicial shiny aparece (com os sparkles). O
             // jogador assiste/joga a partir daí (pode apertar Z=A pra avançar).
             self.hunting = false;
             self.running = true;
-            log::info!(
-                "✨ Shiny encontrado em {} tentativas! Controle devolvido pra você ver a batalha.",
-                self.hunter.attempts
-            );
+            if wild_probe_pause {
+                log::info!(
+                    "Selvagem encontrado (tentativa {}): espécie={} PID={:08X} shiny_value={} (não-shiny). Caça pausada — fuga automática vem no Marco 2.",
+                    self.hunter.attempts,
+                    self.hunter.last_species,
+                    self.hunter.last_pid,
+                    self.hunter.last_shiny_value,
+                );
+            } else {
+                log::info!(
+                    "✨ Shiny encontrado em {} tentativas! Controle devolvido pra você ver a batalha.",
+                    self.hunter.attempts
+                );
+            }
         }
     }
 

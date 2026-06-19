@@ -23,6 +23,13 @@ pub enum HuntMethod {
     /// Inicial no laboratório: amassa A pra chegar na bag e (se preciso) segura
     /// uma direção pra mover o cursor até o inicial certo.
     Starter,
+    /// Selvagem na grama: sem reset. O personagem fica na mesma moita e o Hunter
+    /// cicla as direções (cada uma segurada o bastante pra virar **passo**, não só
+    /// rotação) — o ciclo ►/▲/◄/▼ volta à origem, então a caça é auto-contida
+    /// (não precisa saber qual tile vizinho está livre). Cada passo na grama rola
+    /// o sorteio de encontro; quando um selvagem carrega no `gEnemyParty`, checa o
+    /// shiny. (A fuga pra encadear tentativas vem no Marco 2.)
+    WildSpin,
 }
 
 /// No menu de seleção do inicial (3 Poké Balls em linha), de que lado fica o
@@ -217,6 +224,18 @@ const EMERALD: GameProfile = GameProfile {
             slot: Slot::Player,
             method: HuntMethod::Starter,
             cursor: StarterCursor::Right,
+        },
+        // Selvagem na grama (qualquer espécie). `species: 0` = não filtra: a caça
+        // para no PRIMEIRO selvagem que carregar, qualquer que seja. Use deixando
+        // o personagem parado EM CIMA da grama; o Hunter cicla as direções pra dar
+        // passos. Pra mirar uma espécie específica, troque `species` pelo índice
+        // interno Gen 3 do alvo (no Marco 2, os não-alvo são fugidos e ignorados).
+        TargetDef {
+            name: "Selvagem (qualquer)",
+            species: 0,
+            slot: Slot::Enemy,
+            method: HuntMethod::WildSpin,
+            cursor: StarterCursor::Center,
         },
     ],
 };
