@@ -875,10 +875,18 @@ impl AuroraApp {
 
         // Sprite do alvo: normal + shiny lado a lado, pra comparar a cor que
         // estamos caçando. Quando o shiny aparece, destacamos a coluna dele.
+        // Pra alvos de espécie fixa (lendário/inicial) é a própria espécie; pra
+        // selvagem "qualquer" (species 0) mostramos a espécie do ÚLTIMO encontro —
+        // assim o painel exibe quem apareceu (e, ao parar, o shiny achado).
         ui.separator();
         let ctx = ui.ctx().clone();
-        let normal_tex = self.target_sprite(&ctx, target.species, false);
-        let shiny_tex = self.target_sprite(&ctx, target.species, true);
+        let display_species = if target.species != 0 {
+            target.species
+        } else {
+            self.hunter.last_species
+        };
+        let normal_tex = self.target_sprite(&ctx, display_species, false);
+        let shiny_tex = self.target_sprite(&ctx, display_species, true);
         let found = self.hunter.found;
         ui.horizontal(|ui| {
             // Distribui as duas colunas igualmente na largura do painel.
