@@ -23,6 +23,13 @@ pub enum HuntMethod {
     /// Inicial no laboratório: amassa A pra chegar na bag e (se preciso) segura
     /// uma direção pra mover o cursor até o inicial certo.
     Starter,
+    /// Selvagem na grama: sem reset. O personagem fica na mesma moita e o Hunter
+    /// cicla as direções (cada uma segurada o bastante pra virar **passo**, não só
+    /// rotação) — o ciclo ►/▲/◄/▼ volta à origem, então a caça é auto-contida
+    /// (não precisa saber qual tile vizinho está livre). Cada passo na grama rola
+    /// o sorteio de encontro; quando um selvagem carrega no `gEnemyParty`, checa o
+    /// shiny. (A fuga pra encadear tentativas vem no Marco 2.)
+    WildSpin,
 }
 
 /// No menu de seleção do inicial (3 Poké Balls em linha), de que lado fica o
@@ -105,6 +112,11 @@ pub struct GameProfile {
     /// Endereços do menu do inicial, pra forçar a seleção em malha fechada.
     /// `None` = jogo sem método Starter mapeado (a direção é ignorada).
     pub starter_menu: Option<StarterMenu>,
+    /// Flag "em batalha" (ex.: `gMain.inBattle`): `(endereço, máscara do bit)`. A
+    /// caça de selvagem ([`HuntMethod::WildSpin`]) usa pra saber quando a batalha
+    /// acabou (o `gEnemyParty` fica sujo após a fuga, então não serve). `None` =
+    /// não mapeado ⇒ a caça com fuga não funciona nesse jogo.
+    pub battle_flag: Option<(u32, u8)>,
     /// Alvos de caça suportados neste jogo.
     pub targets: &'static [TargetDef],
 }
@@ -141,6 +153,9 @@ const EMERALD: GameProfile = GameProfile {
         cursor_addr: 0x0300_5E08,
         input_funcs: &[0x0813_425D],
     }),
+    // gMain.inBattle (gMain 0x030022C0 + 0x439): 0x00 no overworld, 0x02 na
+    // batalha. Confirmado na ROM real com o localizador de flag de batalha.
+    battle_flag: Some((0x0300_26F9, 0x02)),
     targets: &[
         // Lendários estáticos (soft-reset na frente). Índices INTERNOS do Gen 3
         // (≠ dex nacional): a cauda de Hoenn é REORDENADA — não é um offset fixo.
@@ -217,6 +232,18 @@ const EMERALD: GameProfile = GameProfile {
             slot: Slot::Player,
             method: HuntMethod::Starter,
             cursor: StarterCursor::Right,
+        },
+        // Selvagem na grama (qualquer espécie). `species: 0` = não filtra: a caça
+        // para no PRIMEIRO selvagem que carregar, qualquer que seja. Use deixando
+        // o personagem parado EM CIMA da grama; o Hunter cicla as direções pra dar
+        // passos. Pra mirar uma espécie específica, troque `species` pelo índice
+        // interno Gen 3 do alvo (no Marco 2, os não-alvo são fugidos e ignorados).
+        TargetDef {
+            name: "Selvagem (qualquer)",
+            species: 0,
+            slot: Slot::Enemy,
+            method: HuntMethod::WildSpin,
+            cursor: StarterCursor::Center,
         },
     ],
 };
@@ -297,6 +324,8 @@ const RUBY: GameProfile = GameProfile {
     enemy_party: 0x0300_45C0,
     rng_addr: Some(0x0300_4818),
     starter_menu: Some(RS_STARTER_MENU),
+    // Flag de batalha do R/S ainda não mapeado (sem caça de selvagem aqui por ora).
+    battle_flag: None,
     targets: &[
         TargetDef {
             name: "Groudon",
@@ -322,6 +351,7 @@ const SAPPHIRE: GameProfile = GameProfile {
     enemy_party: 0x0300_45C0,
     rng_addr: Some(0x0300_4818),
     starter_menu: Some(RS_STARTER_MENU),
+    battle_flag: None,
     targets: &[
         TargetDef {
             name: "Kyogre",

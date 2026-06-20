@@ -197,6 +197,15 @@ pub struct Hunter {
     /// faz vários emuladores abertos juntos gerarem PIDs diferentes em vez de
     /// rodarem a mesma sequência determinística.
     rng_state: u64,
+    /// Fase do loop de selvagem (só usada por [`HuntMethod::WildSpin`]).
+    wild_phase: WildPhase,
+    /// Contador de giro **persistente** (não zera entre tentativas). Dirige a
+    /// direção do `drive_spin`; ao resumir depois da fuga ele é avançado pra
+    /// próxima direção, garantindo que o 1º tap pós-batalha seja um giro (≠ a
+    /// direção que o personagem ficou encarando) e não um passo.
+    spin_frames: u32,
+    /// Frames decorridos na fuga em andamento (dirige o `drive_flee`).
+    flee_frames: u32,
 }
 
 /// Frame (contado desde o reset) em que injetamos a seed do RNG do jogo. Tem que
@@ -208,6 +217,71 @@ const SEED_INJECT_FRAME: u32 = 200;
 /// Largura de cada meio-ciclo do tap de A (8 pressionado / 8 solto). Cadência
 /// fixa: a entropia agora vem da seed injetada, não mais do timing.
 const MASH_PERIOD: u32 = 8;
+
+/// No [`HuntMethod::WildSpin`] a caça **não anda** — só muda a direção que o
+/// personagem encara (gira no lugar). Confirmado na ROM real: cada mudança de
+/// direção já conta pro sorteio de encontro, sem sair do tile da grama.
+///
+/// Por isso damos **taps curtos** (`WILD_TAP_FRAMES`, 1 frame) seguidos de um
+/// respiro (`WILD_GAP_FRAMES`), ciclando as direções. O segredo de só girar (e
+/// nunca dar o passo): o jogo gira o personagem no 1º frame em que a direção
+/// difere da que ele encara, e só **anda** se a direção seguir segurada *depois*
+/// do giro. Tap de 1 frame ⇒ vira e solta antes disso ⇒ fica no mesmo tile.
+/// (Segurar demais foi o que antes fazia ele andar e sair da moita.) Valores de
+/// partida — ajuste se algum giro não registrar (suba o tap) ou se ele andar
+/// (baixe o tap).
+const WILD_TAP_FRAMES: u32 = 1;
+/// Frames com o D-pad solto entre um tap e o próximo (o respiro).
+const WILD_GAP_FRAMES: u32 = 3;
+/// Janela total por direção (tap + respiro).
+const WILD_TURN_FRAMES: u32 = WILD_TAP_FRAMES + WILD_GAP_FRAMES;
+
+/// Ordem do ciclo de direções no [`HuntMethod::WildSpin`]: ►/▲/◄/▼. Como são taps
+/// curtos, é giro puro — o personagem nunca sai do tile da grama.
+const WILD_DIRS: [Button; 4] = [Button::Right, Button::Up, Button::Left, Button::Down];
+
+/// Inputs da fuga (Marco 2), em ciclo: **B** (sai de um eventual submenu / avança
+/// texto) → **▼ ►** (leva o cursor pro CORRER, canto inferior-direito) → **A**
+/// (confirma CORRER / avança texto). O B antes do A é o seguro: se um A errado
+/// tiver aberto o menu de golpes, o B volta pro menu de ação antes do próximo A —
+/// então a fuga nunca acaba atacando.
+const FLEE_INPUTS: [Button; 4] = [Button::B, Button::Down, Button::Right, Button::A];
+/// Frames de tap dentro de cada passo da fuga.
+const FLEE_TAP_FRAMES: u32 = 2;
+/// Frames com tudo solto entre um passo da fuga e o próximo.
+const FLEE_GAP_FRAMES: u32 = 4;
+/// Janela total por passo da fuga (tap + respiro).
+const FLEE_STEP_FRAMES: u32 = FLEE_TAP_FRAMES + FLEE_GAP_FRAMES;
+
+/// Todos os botões que a caça de selvagem dirige (pra soltar de uma vez).
+const WILD_ALL_BUTTONS: [Button; 6] = [
+    Button::A,
+    Button::B,
+    Button::Up,
+    Button::Down,
+    Button::Left,
+    Button::Right,
+];
+
+/// Fase do loop de selvagem ([`HuntMethod::WildSpin`], Marco 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum WildPhase {
+    /// Girando no overworld à espera do encontro.
+    #[default]
+    Spinning,
+    /// Em batalha, fugindo (não-shiny ou espécie errada) pra voltar a girar.
+    Fleeing,
+}
+
+/// O jogo está em batalha agora? Lê o flag mapeado no perfil (ex.: `gMain.inBattle`
+/// no Emerald). Sem flag mapeado ⇒ assume `false` (a caça de selvagem com fuga não
+/// funciona nesse jogo).
+fn in_battle(gba: &mut Gba, profile: &GameProfile) -> bool {
+    match profile.battle_flag {
+        Some((addr, mask)) => gba.bus.read_u8(addr) & mask != 0,
+        None => false,
+    }
+}
 
 impl Hunter {
     pub fn new() -> Self {
@@ -223,6 +297,9 @@ impl Hunter {
             pending_seed: 0,
             seed_injected: false,
             rng_state: Self::host_seed(),
+            wild_phase: WildPhase::Spinning,
+            spin_frames: 0,
+            flee_frames: 0,
         };
         // Sorteia a seed da 1ª tentativa já no boot (a 1ª caça não passa por
         // soft_reset antes do primeiro encontro).
@@ -388,6 +465,9 @@ impl Hunter {
         if self.found {
             return CheckResult::Shiny;
         }
+        if target.method == HuntMethod::WildSpin {
+            return self.wild_tick(gba, profile, target, batch);
+        }
         let base = profile.target_base(target);
 
         for _ in 0..batch {
@@ -422,6 +502,129 @@ impl Hunter {
             }
         }
         CheckResult::NotReady
+    }
+
+    /// Passo da caça de **selvagem** ([`HuntMethod::WildSpin`]): sem reset, loop
+    /// automático (Marco 2). Máquina de estados em duas fases:
+    ///
+    /// - **Spinning** (overworld): injeta a seed da tentativa e gira no lugar (ver
+    ///   [`Hunter::drive_spin`]). Quando `gMain.inBattle` liga, o selvagem carregou:
+    ///   se for a espécie-alvo (ou alvo "qualquer"), checa o shiny — shiny ⇒ para;
+    ///   senão entra em **Fleeing**. Espécie errada também vai pra **Fleeing** (sem
+    ///   contar tentativa).
+    /// - **Fleeing** (batalha): toca a sequência de fuga (ver [`Hunter::drive_flee`])
+    ///   até `inBattle` desligar; aí resume o giro na **próxima** direção do ciclo
+    ///   (ver [`Hunter::resume_spin`]) — o personagem volta encarando a direção em
+    ///   que entrou na batalha, então pular pra próxima evita um passo acidental.
+    fn wild_tick(
+        &mut self,
+        gba: &mut Gba,
+        profile: &GameProfile,
+        target: &TargetDef,
+        batch: u32,
+    ) -> CheckResult {
+        let base = profile.target_base(target);
+
+        for _ in 0..batch {
+            match self.wild_phase {
+                WildPhase::Spinning => {
+                    if in_battle(gba, profile) {
+                        // Batalha começou: para de girar e decide pelo selvagem.
+                        self.clear_inputs(gba);
+                        let mon = read_mon(gba, base);
+                        if !mon.valid {
+                            // Dados do selvagem ainda assentando — espera um frame.
+                            gba.run_frame();
+                            continue;
+                        }
+                        // Numa caça de selvagem NUNCA filtramos por espécie: qualquer
+                        // shiny vale. Filtrar faria a gente fugir de um shiny "errado"
+                        // — um shiny perdido pra sempre. Então checa todo encontro.
+                        if self.check(gba, profile, target) == CheckResult::Shiny {
+                            return CheckResult::Shiny;
+                        }
+                        // Não-shiny: foge pra próxima tentativa.
+                        self.enter_flee(gba);
+                        continue;
+                    }
+                    // Overworld: injeta a seed da tentativa (uma vez) e gira.
+                    if !self.seed_injected {
+                        if let Some(addr) = profile.rng_addr {
+                            gba.bus.write_u32(addr, self.pending_seed);
+                        }
+                        self.seed_injected = true;
+                    }
+                    self.drive_spin(gba);
+                    gba.run_frame();
+                    self.spin_frames += 1;
+                }
+                WildPhase::Fleeing => {
+                    if !in_battle(gba, profile) {
+                        // Voltou ao overworld: religa o giro na próxima direção.
+                        self.resume_spin(gba);
+                        continue;
+                    }
+                    self.drive_flee(gba);
+                    gba.run_frame();
+                    self.flee_frames += 1;
+                }
+            }
+        }
+        CheckResult::NotReady
+    }
+
+    /// Cicla as direções (uma de cada vez) na ordem [`WILD_DIRS`], dando um **tap
+    /// curto** ([`WILD_TAP_FRAMES`]) seguido de um respiro ([`WILD_GAP_FRAMES`]).
+    /// O tap só **gira** o personagem (muda a direção que ele encara) sem dar o
+    /// passo, então ele fica no mesmo tile da grama — e cada giro já conta pro
+    /// sorteio de encontro. Dirigido por `spin_frames` (persistente). As demais
+    /// direções ficam soltas.
+    fn drive_spin(&self, gba: &mut Gba) {
+        let idx = (self.spin_frames / WILD_TURN_FRAMES) as usize % WILD_DIRS.len();
+        let phase = self.spin_frames % WILD_TURN_FRAMES;
+        let tapping = phase < WILD_TAP_FRAMES;
+        let active = WILD_DIRS[idx];
+        for b in WILD_DIRS {
+            gba.bus.io.joypad.set_button(b, tapping && b == active);
+        }
+    }
+
+    /// Toca a sequência de fuga ([`FLEE_INPUTS`]) em ciclo, um botão por passo de
+    /// [`FLEE_STEP_FRAMES`] (tap curto + respiro). Dirigida por `flee_frames`.
+    fn drive_flee(&self, gba: &mut Gba) {
+        let idx = (self.flee_frames / FLEE_STEP_FRAMES) as usize % FLEE_INPUTS.len();
+        let phase = self.flee_frames % FLEE_STEP_FRAMES;
+        let pressing = phase < FLEE_TAP_FRAMES;
+        let active = FLEE_INPUTS[idx];
+        for b in WILD_ALL_BUTTONS {
+            gba.bus.io.joypad.set_button(b, pressing && b == active);
+        }
+    }
+
+    /// Solta todos os botões dirigidos pela caça (na transição entre fases, pra
+    /// não vazar input).
+    fn clear_inputs(&self, gba: &mut Gba) {
+        for b in WILD_ALL_BUTTONS {
+            gba.bus.io.joypad.set_button(b, false);
+        }
+    }
+
+    /// Entra na fase de fuga: solta tudo e zera o contador da fuga.
+    fn enter_flee(&mut self, gba: &mut Gba) {
+        self.clear_inputs(gba);
+        self.wild_phase = WildPhase::Fleeing;
+        self.flee_frames = 0;
+    }
+
+    /// Volta ao overworld depois da fuga: sorteia a seed da próxima tentativa e
+    /// **avança o giro pra próxima direção** do ciclo. Como o personagem termina a
+    /// batalha encarando a direção em que entrou (a última tapeada), pular pra
+    /// próxima garante que o 1º tap seja um giro de verdade, não um passo.
+    fn resume_spin(&mut self, gba: &mut Gba) {
+        self.clear_inputs(gba);
+        self.wild_phase = WildPhase::Spinning;
+        self.spin_frames = (self.spin_frames / WILD_TURN_FRAMES + 1) * WILD_TURN_FRAMES;
+        self.reroll_seed(); // nova seed + seed_injected=false (injeta no próximo giro)
     }
 
     /// Uma tentativa completa (bloqueante): reset → avança → checa.
@@ -469,6 +672,7 @@ mod tests {
                 cursor_addr,
                 input_funcs: &[0x0813_425D],
             }),
+            battle_flag: None,
             targets: &[],
         };
         let mudkip = TargetDef {
@@ -627,6 +831,7 @@ mod tests {
             enemy_party: 0x0200_1000,
             rng_addr: None,
             starter_menu: None,
+            battle_flag: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -666,6 +871,7 @@ mod tests {
             enemy_party: 0x0200_1000,
             rng_addr: None,
             starter_menu: None,
+            battle_flag: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -701,5 +907,97 @@ mod tests {
             hunter2.check(&mut gba, &profile, &target),
             CheckResult::NotShiny
         );
+    }
+
+    /// O ciclo de direções do [`HuntMethod::WildSpin`]: em cada janela exatamente
+    /// UMA direção (na ordem ►/▲/◄/▼) fica pressionada na fase de **tap**, e no
+    /// **respiro** todas ficam soltas (tap curto ⇒ só gira, não anda). Após as 4,
+    /// o ciclo reinicia na direita.
+    #[test]
+    fn wild_drive_spin_cycles_one_direction_per_turn() {
+        let mut gba = Gba::new();
+        let mut h = Hunter::new();
+        let pressed =
+            |gba: &Gba, b: Button| (gba.bus.io.joypad.keyinput() & (1 << (b as u16))) == 0;
+
+        for (turn, &dir) in WILD_DIRS.iter().enumerate() {
+            // Início da janela (tap): só `dir` pressionada.
+            h.spin_frames = turn as u32 * WILD_TURN_FRAMES;
+            h.drive_spin(&mut gba);
+            for b in WILD_DIRS {
+                assert_eq!(
+                    pressed(&gba, b),
+                    b == dir,
+                    "giro {turn} (tap): {b:?} deveria estar {}",
+                    if b == dir { "pressionado" } else { "solto" }
+                );
+            }
+
+            // Respiro: D-pad todo solto.
+            h.spin_frames = turn as u32 * WILD_TURN_FRAMES + WILD_TAP_FRAMES;
+            h.drive_spin(&mut gba);
+            for b in WILD_DIRS {
+                assert!(
+                    !pressed(&gba, b),
+                    "giro {turn} (respiro): {b:?} deveria estar solto"
+                );
+            }
+        }
+
+        // 5ª janela → volta pra direita (ciclo reinicia).
+        h.spin_frames = WILD_DIRS.len() as u32 * WILD_TURN_FRAMES;
+        h.drive_spin(&mut gba);
+        assert!(
+            pressed(&gba, Button::Right),
+            "o ciclo deveria reiniciar na direita"
+        );
+    }
+
+    /// `resume_spin` avança o giro pra PRÓXIMA direção do ciclo — garante que o 1º
+    /// tap pós-batalha gire (≠ a direção encarada no fim da luta) em vez de andar.
+    #[test]
+    fn wild_resume_spin_advances_to_next_direction() {
+        let mut gba = Gba::new();
+        let mut h = Hunter::new();
+        let pressed =
+            |gba: &Gba, b: Button| (gba.bus.io.joypad.keyinput() & (1 << (b as u16))) == 0;
+
+        // Entrou em batalha no meio da janela da 1ª direção (►, idx 0).
+        h.spin_frames = WILD_TURN_FRAMES / 2;
+        h.resume_spin(&mut gba);
+        // Avançou pro início da janela da 2ª direção (▲, idx 1).
+        assert_eq!(h.spin_frames, WILD_TURN_FRAMES);
+        assert_eq!(h.wild_phase, WildPhase::Spinning);
+        h.drive_spin(&mut gba);
+        assert!(pressed(&gba, Button::Up), "1º tap pós-fuga deveria ser ▲");
+        assert!(
+            !pressed(&gba, Button::Right),
+            "não deveria repetir a direção encarada (►)"
+        );
+    }
+
+    /// `drive_flee` cicla [`FLEE_INPUTS`] (B → ▼ → ► → A), um por passo, com tap
+    /// curto + respiro.
+    #[test]
+    fn wild_drive_flee_cycles_inputs() {
+        let mut gba = Gba::new();
+        let mut h = Hunter::new();
+        let pressed =
+            |gba: &Gba, b: Button| (gba.bus.io.joypad.keyinput() & (1 << (b as u16))) == 0;
+
+        for (step, &btn) in FLEE_INPUTS.iter().enumerate() {
+            // Tap: só `btn` pressionado.
+            h.flee_frames = step as u32 * FLEE_STEP_FRAMES;
+            h.drive_flee(&mut gba);
+            for b in WILD_ALL_BUTTONS {
+                assert_eq!(pressed(&gba, b), b == btn, "passo {step} (tap): {b:?}");
+            }
+            // Respiro: tudo solto.
+            h.flee_frames = step as u32 * FLEE_STEP_FRAMES + FLEE_TAP_FRAMES;
+            h.drive_flee(&mut gba);
+            for b in WILD_ALL_BUTTONS {
+                assert!(!pressed(&gba, b), "passo {step} (respiro): {b:?}");
+            }
+        }
     }
 }
