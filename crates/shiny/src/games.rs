@@ -30,6 +30,16 @@ pub enum HuntMethod {
     /// o sorteio de encontro; quando um selvagem carrega no `gEnemyParty`, checa o
     /// shiny. (A fuga pra encadear tentativas vem no Marco 2.)
     WildSpin,
+    /// Presente estático recebido por script (ex.: Beldum na casa do Steven pós-E4,
+    /// iniciais de outras regiões pós-National Dex). O jogo roda `CreateMon(Random())`
+    /// no momento em que você pega, então **soft-reset re-rola o PID** — mesma lógica
+    /// do lendário/inicial. A diferença é a leitura: o presente entra no **primeiro
+    /// slot livre de `gPlayerParty`** (não no slot 0, que tem o líder do time), então
+    /// a caça **varre os 6 slots** procurando `species` em vez de ler um slot fixo.
+    /// O roteiro é o A-mash (sem menu de cursor): mashar A pega a Poké Ball e avança
+    /// os diálogos. **Exige um slot de time livre** — com o time cheio o presente vai
+    /// pro PC (outro endereço/formato), e a varredura não o encontra.
+    StaticGift,
 }
 
 /// No menu de seleção do inicial (3 Poké Balls em linha), de que lado fica o
@@ -232,6 +242,19 @@ const EMERALD: GameProfile = GameProfile {
             slot: Slot::Player,
             method: HuntMethod::Starter,
             cursor: StarterCursor::Right,
+        },
+        // Presente estático: Beldum na casa do Steven (Mossdeep), liberado após a
+        // Elite dos Quatro. Soft-reset re-rola o PID. Índice INTERNO Gen 3: pela
+        // ordem do pokeemerald (Bagon 395 / Shelgon 396 / Salamence 397 → Beldum
+        // 398 / Metang 399 / Metagross 400 → Regirock 401). 398 a CONFIRMAR contra
+        // a ROM real pelo sprite no app — como todo índice deste arquivo. O alvo é
+        // lido do time (slot livre): deixe uma vaga no time, senão ele vai pro PC.
+        TargetDef {
+            name: "Beldum (presente)",
+            species: 398,
+            slot: Slot::Player,
+            method: HuntMethod::StaticGift,
+            cursor: StarterCursor::Center,
         },
         // Selvagem na grama (qualquer espécie). `species: 0` = não filtra: a caça
         // para no PRIMEIRO selvagem que carregar, qualquer que seja. Use deixando
