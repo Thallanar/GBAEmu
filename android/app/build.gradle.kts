@@ -11,8 +11,8 @@ android {
         applicationId = "com.auroragba"
         minSdk = 24
         targetSdk = 34
-        versionCode = 56
-        versionName = "0.56.1"
+        versionCode = 57
+        versionName = "0.57.1"
         // ABIs que empacotamos (emulador x86_64 + dispositivos arm64). As `.so`
         // são geradas pelo cargo-ndk em src/main/jniLibs/<abi>/ (ver android/README.md).
         ndk {

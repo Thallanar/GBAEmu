@@ -117,6 +117,27 @@ impl Gen3Mon {
     }
 }
 
+/// Tamanho de um slot de party (`gPlayerParty`/`gEnemyParty`): a `struct Pokemon`
+/// do Gen 3 tem 100 bytes — os 80 primeiros são o formato "boxed" que [`read_mon`]
+/// entende (PID/OTID + 4 sub-structs + checksum); o resto é status/nível/stats de
+/// batalha, que a caça não lê.
+const PARTY_SLOT_SIZE: u32 = 100;
+/// Número de slots numa party.
+const PARTY_SIZE: u32 = 6;
+
+/// Varre os [`PARTY_SIZE`] slots de uma party procurando um Pokémon **válido** da
+/// espécie dada; retorna o endereço-base do primeiro slot que casar. Usado pelo
+/// [`HuntMethod::StaticGift`], em que o presente cai no 1º slot livre do time (não
+/// necessariamente o slot 0, ocupado pelo líder). O reset zera a EWRAM, então não
+/// há presente "fantasma" de uma tentativa anterior — só casa quando o novo é gerado.
+fn find_party_mon(gba: &mut Gba, party_base: u32, species: u16) -> Option<u32> {
+    (0..PARTY_SIZE).find_map(|i| {
+        let base = party_base + i * PARTY_SLOT_SIZE;
+        let mon = read_mon(gba, base);
+        (mon.valid && mon.species == species).then_some(base)
+    })
+}
+
 /// Lê e descriptografa o Pokémon no endereço-base dado.
 ///
 /// PID e OT ID ficam em claro nos primeiros 8 bytes. As 48 bytes seguintes são
@@ -374,7 +395,6 @@ impl Hunter {
         target: &TargetDef,
         max_frames: u32,
     ) -> bool {
-        let base = profile.target_base(target);
         self.frames_this_attempt = 0;
         self.seed_injected = false;
         for _ in 0..max_frames {
@@ -388,7 +408,7 @@ impl Hunter {
             gba.run_frame();
             self.frames_this_attempt += 1;
 
-            if self.encounter_ready(gba, base, target) {
+            if self.ready_base(gba, profile, target).is_some() {
                 gba.bus.io.joypad.set_button(Button::A, false);
                 return true;
             }
@@ -396,11 +416,20 @@ impl Hunter {
         false
     }
 
-    /// O encontro está pronto? Exige checksum válido e, se o alvo especificar
-    /// uma espécie, que ela bata.
-    fn encounter_ready(&self, gba: &mut Gba, base: u32, target: &TargetDef) -> bool {
+    /// Resolve o endereço-base do Pokémon-alvo **se** o encontro está pronto,
+    /// senão `None`. É também o teste de "encontro pronto" (`.is_some()`):
+    ///
+    /// - [`HuntMethod::StaticGift`]: varre `gPlayerParty` pela espécie — o presente
+    ///   cai num slot livre qualquer, então o endereço não é fixo.
+    /// - Demais métodos: lê o slot fixo (player/enemy slot 0) e exige checksum
+    ///   válido e, se o alvo especificar espécie, que ela bata.
+    fn ready_base(&self, gba: &mut Gba, profile: &GameProfile, target: &TargetDef) -> Option<u32> {
+        if target.method == HuntMethod::StaticGift {
+            return find_party_mon(gba, profile.player_party, target.species);
+        }
+        let base = profile.target_base(target);
         let mon = read_mon(gba, base);
-        mon.valid && (target.species == 0 || mon.species == target.species)
+        (mon.valid && (target.species == 0 || mon.species == target.species)).then_some(base)
     }
 
     /// Checa o slot do alvo contra a fórmula shiny, usando o TID/SID do líder do
@@ -410,8 +439,8 @@ impl Hunter {
         gba: &mut Gba,
         profile: &GameProfile,
         target: &TargetDef,
+        base: u32,
     ) -> CheckResult {
-        let base = profile.target_base(target);
         let target_mon = read_mon(gba, base);
         if !target_mon.valid {
             return CheckResult::NotReady;
@@ -468,7 +497,6 @@ impl Hunter {
         if target.method == HuntMethod::WildSpin {
             return self.wild_tick(gba, profile, target, batch);
         }
-        let base = profile.target_base(target);
 
         for _ in 0..batch {
             // No frame certo, injeta a seed do RNG do jogo (a entropia da caça).
@@ -487,9 +515,9 @@ impl Hunter {
             gba.run_frame();
             self.frames_this_attempt += 1;
 
-            if self.encounter_ready(gba, base, target) {
+            if let Some(base) = self.ready_base(gba, profile, target) {
                 gba.bus.io.joypad.set_button(Button::A, false);
-                let result = self.check(gba, profile, target);
+                let result = self.check(gba, profile, target, base);
                 if result != CheckResult::Shiny {
                     self.soft_reset(gba);
                 }
@@ -540,7 +568,7 @@ impl Hunter {
                         // Numa caça de selvagem NUNCA filtramos por espécie: qualquer
                         // shiny vale. Filtrar faria a gente fugir de um shiny "errado"
                         // — um shiny perdido pra sempre. Então checa todo encontro.
-                        if self.check(gba, profile, target) == CheckResult::Shiny {
+                        if self.check(gba, profile, target, base) == CheckResult::Shiny {
                             return CheckResult::Shiny;
                         }
                         // Não-shiny: foge pra próxima tentativa.
@@ -635,14 +663,21 @@ impl Hunter {
         profile: &GameProfile,
         target: &TargetDef,
     ) -> CheckResult {
-        // Lendários precisam de soft-reset; outros métodos virão depois.
-        if target.method == HuntMethod::SoftResetLegendary {
+        // Lendário e presente estático re-rolam o PID via soft-reset; o selvagem
+        // (WildSpin) não usa try_once, e o inicial parte do estado já carregado.
+        if matches!(
+            target.method,
+            HuntMethod::SoftResetLegendary | HuntMethod::StaticGift
+        ) {
             self.soft_reset(gba);
         }
         if !self.advance_to_encounter(gba, profile, target, 60 * 60) {
             return CheckResult::NotReady;
         }
-        self.check(gba, profile, target)
+        let Some(base) = self.ready_base(gba, profile, target) else {
+            return CheckResult::NotReady;
+        };
+        self.check(gba, profile, target, base)
     }
 }
 
@@ -852,7 +887,7 @@ mod tests {
             (0x0000_3363, 80),
         ] {
             write_synthetic_mon(&mut gba, profile.enemy_party, pid, otid, 100);
-            hunter.check(&mut gba, &profile, &target);
+            hunter.check(&mut gba, &profile, &target, profile.enemy_party);
             assert_eq!(hunter.last_shiny_value, expected_sv);
         }
         // O recorde é o menor (20), fixado na 2ª tentativa.
@@ -894,7 +929,7 @@ mod tests {
 
         let mut hunter = Hunter::new();
         assert_eq!(
-            hunter.check(&mut gba, &profile, &target),
+            hunter.check(&mut gba, &profile, &target, profile.enemy_party),
             CheckResult::Shiny
         );
         assert!(hunter.found);
@@ -904,9 +939,75 @@ mod tests {
         write_synthetic_mon(&mut gba, profile.enemy_party, 0x1234_5678, otid, 100);
         let mut hunter2 = Hunter::new();
         assert_eq!(
-            hunter2.check(&mut gba, &profile, &target),
+            hunter2.check(&mut gba, &profile, &target, profile.enemy_party),
             CheckResult::NotShiny
         );
+    }
+
+    /// [`find_party_mon`] acha a espécie em QUALQUER slot do time (o presente cai
+    /// num slot livre, não no 0), e ignora slots zerados/sem a espécie.
+    #[test]
+    fn find_party_mon_scans_for_species_in_any_slot() {
+        let mut gba = Gba::new();
+        let party = 0x0200_0000;
+        // slot 0 = líder (espécie 1); slot 1 = "presente" (espécie 398).
+        write_synthetic_mon(&mut gba, party, 0xAAAA_0001, 0x2222_1111, 1);
+        let slot1 = party + PARTY_SLOT_SIZE;
+        write_synthetic_mon(&mut gba, slot1, 0xBBBB_0002, 0x2222_1111, 398);
+
+        // Acha 398 no slot 1, pulando o líder no slot 0.
+        assert_eq!(find_party_mon(&mut gba, party, 398), Some(slot1));
+        // Espécie ausente no time → None.
+        assert_eq!(find_party_mon(&mut gba, party, 999), None);
+        // Time todo zerado (slots inválidos) → None.
+        assert_eq!(find_party_mon(&mut gba, 0x0200_2000, 1), None);
+    }
+
+    /// O [`HuntMethod::StaticGift`] só fica "pronto" quando o presente aparece num
+    /// slot do time; `ready_base` resolve esse slot e `check` lê o PID de lá usando
+    /// o TID/SID do líder (slot 0).
+    #[test]
+    fn static_gift_resolves_party_slot_and_checks_shiny() {
+        let mut gba = Gba::new();
+        let profile = GameProfile {
+            code: "TEST",
+            name: "test",
+            player_party: 0x0200_0000,
+            enemy_party: 0x0200_1000,
+            rng_addr: None,
+            starter_menu: None,
+            battle_flag: None,
+            targets: &[],
+        };
+        let target = TargetDef {
+            name: "Beldum",
+            species: 398,
+            slot: Slot::Player,
+            method: HuntMethod::StaticGift,
+            cursor: StarterCursor::Center,
+        };
+
+        // Líder do time (slot 0) dá o TID/SID do jogador (TID^SID = 0x3333).
+        let otid = 0x2222_1111;
+        write_synthetic_mon(&mut gba, profile.player_party, 0xAAAA_BBBB, otid, 1);
+
+        let mut hunter = Hunter::new();
+        // Sem o presente ainda: encontro não está pronto.
+        assert_eq!(hunter.ready_base(&mut gba, &profile, &target), None);
+
+        // Presente shiny cai no slot 1: PIDhi^PIDlo = 0x3333 → valor 0 (< 8).
+        let gift_base = profile.player_party + PARTY_SLOT_SIZE;
+        write_synthetic_mon(&mut gba, gift_base, 0x0000_3333, otid, 398);
+
+        assert_eq!(
+            hunter.ready_base(&mut gba, &profile, &target),
+            Some(gift_base)
+        );
+        assert_eq!(
+            hunter.check(&mut gba, &profile, &target, gift_base),
+            CheckResult::Shiny
+        );
+        assert_eq!(hunter.last_species, 398);
     }
 
     /// O ciclo de direções do [`HuntMethod::WildSpin`]: em cada janela exatamente
