@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use auroragba_core::joypad::Button as GbaButton;
@@ -19,6 +20,9 @@ mod discovery;
 mod library;
 mod link;
 mod png;
+mod shader;
+
+use shader::{ShaderKind, ShaderRenderer};
 
 /// Quantidade de slots de save state em disco (`<rom>.ss1`..`.ss8`).
 const SAVE_SLOTS: usize = 8;
@@ -445,6 +449,13 @@ struct AuroraApp {
     texture: egui::TextureHandle,
     running: bool,
     scale: f32,
+    /// Renderizador de shader (glow). `None` se o backend GL não estiver
+    /// disponível — nesse caso caímos no desenho via textura egui.
+    shader: Option<Arc<Mutex<ShaderRenderer>>>,
+    /// Efeito de shader selecionado (persistido).
+    shader_kind: ShaderKind,
+    /// Janela de configurações de vídeo (escala + shader) aberta?
+    show_video: bool,
     /// Contador de frames, usado pra limitar a frequência de gravação do save.
     frame_count: u64,
     /// Perfil do jogo detectado pelo header (None = não reconhecido / sem ROM).
@@ -549,12 +560,33 @@ impl AuroraApp {
             .and_then(|s| s.get_string("library_dir"))
             .map(PathBuf::from);
 
+        // Renderizador de shader (glow). Só existe se o backend GL estiver
+        // disponível; senão o desenho cai na textura egui.
+        let shader = cc
+            .gl
+            .as_ref()
+            .map(|gl| Arc::new(Mutex::new(ShaderRenderer::new(gl))));
+        let shader_kind = cc
+            .storage
+            .and_then(|s| s.get_string("video_shader"))
+            .map(|k| ShaderKind::from_key(&k))
+            .unwrap_or_default();
+        let scale = cc
+            .storage
+            .and_then(|s| s.get_string("video_scale"))
+            .and_then(|s| s.parse::<f32>().ok())
+            .filter(|s| (1.0..=6.0).contains(s))
+            .unwrap_or(3.0);
+
         let mut app = Self {
             gba: Gba::new(),
             rom_path: None,
             texture,
             running: false,
-            scale: 3.0,
+            scale,
+            shader,
+            shader_kind,
+            show_video: false,
             frame_count: 0,
             profile: None,
             selected_target: 0,
@@ -1569,6 +1601,47 @@ impl AuroraApp {
         }
     }
 
+    /// Janela de vídeo: escala (inteira) + efeito de shader.
+    fn video_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_video;
+        egui::Window::new("🎨 Vídeo")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Escala:");
+                    ui.add(
+                        egui::Slider::new(&mut self.scale, 1.0..=6.0)
+                            .step_by(1.0)
+                            .suffix("×"),
+                    );
+                });
+                ui.label(
+                    egui::RichText::new("Escala inteira mantém os pixels nítidos e o aspecto 3:2.")
+                        .weak()
+                        .small(),
+                );
+                ui.separator();
+                if self.shader.is_some() {
+                    egui::ComboBox::from_label("Shader")
+                        .selected_text(self.shader_kind.label())
+                        .show_ui(ui, |ui| {
+                            for kind in ShaderKind::ALL {
+                                ui.selectable_value(&mut self.shader_kind, kind, kind.label());
+                            }
+                        });
+                } else {
+                    ui.label(
+                        egui::RichText::new("Shaders indisponíveis (backend sem OpenGL).")
+                            .weak()
+                            .small(),
+                    );
+                }
+            });
+        self.show_video = open;
+    }
+
     /// Copia o framebuffer da PPU (RGBA8) para a textura egui.
     fn refresh_texture(&mut self) {
         let pixels: &[u8] = &*self.gba.bus.ppu.framebuffer;
@@ -1588,7 +1661,11 @@ impl AuroraApp {
 }
 
 impl eframe::App for AuroraApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Contexto GL do backend glow (pra subir o framebuffer e desenhar com
+        // shader). `None` em backends sem glow — aí caímos na textura egui.
+        let gl = frame.gl().cloned();
+
         // Bombeia o gamepad (mantém `is_pressed` atualizado) e, se estamos
         // remapeando um botão, captura a próxima tecla/botão pressionado. Enquanto
         // `configuring`, não repassamos input ao jogo nem disparamos hotkeys (pra
@@ -1638,7 +1715,9 @@ impl eframe::App for AuroraApp {
             // Modo caça: o Hunter dirige a emulação (amassa A/Start, reseta entre
             // tentativas). Roda um lote de frames por update pra não travar a UI.
             self.hunt_step();
-            self.refresh_texture();
+            if self.shader.is_none() {
+                self.refresh_texture();
+            }
             ctx.request_repaint();
         } else if self.running {
             if configuring {
@@ -1674,7 +1753,9 @@ impl eframe::App for AuroraApp {
                 self.cursor_finder.observe(&self.gba.bus.iwram[..]);
             }
 
-            self.refresh_texture();
+            if self.shader.is_none() {
+                self.refresh_texture();
+            }
             ctx.request_repaint();
 
             // Persiste o save no máximo ~1×/s (um save no jogo gera milhares de
@@ -1778,14 +1859,21 @@ impl eframe::App for AuroraApp {
                         self.show_input_config = true;
                         ui.close_menu();
                     }
+                    if ui.button("🎨 Vídeo…").clicked() {
+                        self.show_video = true;
+                        ui.close_menu();
+                    }
                     if ui.button("🔗 Link…").clicked() {
                         self.show_link = true;
                         ui.close_menu();
                     }
                 });
                 ui.separator();
-                ui.label(format!("Scale: {:.0}x", self.scale));
-                ui.add(egui::Slider::new(&mut self.scale, 1.0..=6.0).show_value(false));
+                ui.label(format!(
+                    "Escala: {:.0}× · Shader: {}",
+                    self.scale,
+                    self.shader_kind.label()
+                ));
             });
         });
 
@@ -1823,6 +1911,10 @@ impl eframe::App for AuroraApp {
         if self.show_input_config {
             self.input_config_window(ctx);
         }
+        // Janela de vídeo (escala + shader).
+        if self.show_video {
+            self.video_window(ctx);
+        }
         // Janela da biblioteca de ROMs (quando aberta).
         if self.show_library {
             self.library_window(ctx);
@@ -1848,11 +1940,31 @@ impl eframe::App for AuroraApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                let size = egui::vec2(
-                    SCREEN_WIDTH as f32 * self.scale,
-                    SCREEN_HEIGHT as f32 * self.scale,
-                );
-                ui.add(egui::Image::new(&self.texture).fit_to_exact_size(size));
+                // Escala inteira: aspecto 3:2 travado por construção (240k × 160k).
+                let k = self.scale.round().max(1.0);
+                let size = egui::vec2(SCREEN_WIDTH as f32 * k, SCREEN_HEIGHT as f32 * k);
+
+                match (&self.shader, gl.as_ref()) {
+                    (Some(renderer), Some(gl)) => {
+                        // Caminho glow: sobe o framebuffer e desenha com o shader.
+                        renderer
+                            .lock()
+                            .unwrap()
+                            .upload(gl, &self.gba.bus.ppu.framebuffer[..]);
+                        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                        let cb = shader::callback(
+                            rect,
+                            renderer.clone(),
+                            self.shader_kind,
+                            self.frame_count as i32,
+                        );
+                        ui.painter().add(cb);
+                    }
+                    _ => {
+                        // Fallback: textura egui (backend sem glow).
+                        ui.add(egui::Image::new(&self.texture).fit_to_exact_size(size));
+                    }
+                }
 
                 if let Some(p) = &self.rom_path {
                     ui.label(format!("ROM: {}", p.display()));
@@ -1875,6 +1987,8 @@ impl eframe::App for AuroraApp {
     /// periodicamente e ao fechar).
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("input_config", self.input.serialize());
+        storage.set_string("video_scale", format!("{:.0}", self.scale));
+        storage.set_string("video_shader", self.shader_kind.key().to_string());
         if let Some(dir) = &self.library.dir {
             storage.set_string("library_dir", dir.display().to_string());
         }
