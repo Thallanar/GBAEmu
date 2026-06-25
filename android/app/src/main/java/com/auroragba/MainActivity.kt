@@ -73,6 +73,12 @@ class MainActivity : Activity() {
         const val KEY_ROM_FOLDER = "rom_folder_uri"
         const val KEY_PAD_MAP = "pad_map"
         const val KEY_LINK_ADDR = "link_addr"
+        const val KEY_SHADER = "shader"
+
+        // Efeitos de shader (formato próprio single-pass; fontes em assets/shaders/,
+        // espelhadas de assets/shaders/ na raiz do repo). `key` casa com o arquivo
+        // `<key>.frag`; `label` é o rótulo na UI.
+        val SHADERS = arrayOf("none" to "Nenhum", "scanlines" to "Scanlines")
         // Porta TCP padrão do link (igual ao desktop: `link::DEFAULT_PORT`).
         const val LINK_PORT = 7777
 
@@ -118,6 +124,11 @@ class MainActivity : Activity() {
     // (☰ menu), lido pela thread GL a cada draw. Não persiste: o app sempre
     // abre em velocidade normal.
     @Volatile private var ffSpeed = 1
+
+    // Efeito de shader atual (key de SHADERS). Escrito pela UI, lido pela thread
+    // GL ao (re)compilar o programa. Persiste nas prefs.
+    @Volatile private var currentShader = "none"
+    private lateinit var renderer: GbaRenderer
 
     // Bytes da última ROM carregada, pro 🔄 Resetar (re-entrega pro pendingRom).
     // Só tocado na thread de UI.
@@ -228,11 +239,13 @@ class MainActivity : Activity() {
         logRefresh("onCreate")
         loadPadMap()
         loadLinkAddr()
+        loadShader()
 
         glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(2)
             preserveEGLContextOnPause = true
-            setRenderer(GbaRenderer())
+            renderer = GbaRenderer()
+            setRenderer(renderer)
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
 
@@ -295,6 +308,33 @@ class MainActivity : Activity() {
     private fun savePadMap() {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
             .putString(KEY_PAD_MAP, padKeycodes.joinToString(",")).apply()
+    }
+
+    private fun loadShader() {
+        val s = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_SHADER, null) ?: return
+        if (SHADERS.any { it.first == s }) currentShader = s
+    }
+
+    private fun saveShader() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putString(KEY_SHADER, currentShader).apply()
+    }
+
+    /** Menu de seleção de shader: troca o efeito, persiste e recompila na thread GL. */
+    private fun shaderMenu() {
+        val labels = SHADERS.map { it.second }.toTypedArray()
+        val cur = SHADERS.indexOfFirst { it.first == currentShader }.coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Shader")
+            .setSingleChoiceItems(labels, cur) { dialog, which ->
+                currentShader = SHADERS[which].first
+                saveShader()
+                glView.queueEvent { renderer.rebuildProgram() }
+                toast("Shader: ${SHADERS[which].second}")
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
     }
 
     /** Nome curto de um keycode pra UI: "BUTTON_X" (sem o prefixo KEYCODE_). */
@@ -811,9 +851,10 @@ class MainActivity : Activity() {
             return
         }
         val speedItem = "⏩ Velocidade (${ffSpeed}x)"
+        val shaderItem = "🎨 Shader (${SHADERS.firstOrNull { it.first == currentShader }?.second ?: "Nenhum"})"
         val items = mutableListOf(
             "Carregar ROM", "🔄 Resetar", "Salvar estado", "Carregar estado",
-            "📸 Captura de tela", speedItem, "🎮 Remapear controle", "🔗 Link",
+            "📸 Captura de tela", speedItem, shaderItem, "🎮 Remapear controle", "🔗 Link",
         )
         if (huntSupported) items.add("✨ Shiny Hunter")
         AlertDialog.Builder(this)
@@ -826,6 +867,7 @@ class MainActivity : Activity() {
                     "Carregar estado" -> loadStateFromMenu()
                     "📸 Captura de tela" -> takeScreenshot()
                     speedItem -> speedMenu()
+                    shaderItem -> shaderMenu()
                     "🎮 Remapear controle" -> remapMenu()
                     "🔗 Link" -> linkMenu()
                     "✨ Shiny Hunter" -> startShinyHunter()
@@ -1388,6 +1430,14 @@ class MainActivity : Activity() {
         private var texId = 0
         private var posLoc = 0
         private var texLoc = 0
+        // Locations dos uniforms do contrato (ver assets/shaders/README.md).
+        // -1 quando o efeito não usa o uniform (glUniform vira no-op, sem erro).
+        private var inputLoc = -1
+        private var outputLoc = -1
+        private var frameLoc = -1
+        // Retângulo do letterbox (integer scaling), calculado em onSurfaceChanged.
+        private var vw = 0
+        private var vh = 0
         private var frames = 0
         private val audioBuf = ShortArray(8192)
         private val frameNanos = (1_000_000_000.0 / 59.7275).toLong()
@@ -1410,18 +1460,17 @@ class MainActivity : Activity() {
                 .asFloatBuffer()
                 .apply { put(verts); position(0) }
 
-            program = buildProgram()
-            posLoc = GLES20.glGetAttribLocation(program, "aPos")
-            texLoc = GLES20.glGetAttribLocation(program, "aTex")
+            rebuildProgram()
             texId = createTexture()
             GLES20.glClearColor(0f, 0f, 0f, 1f)
         }
 
         override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
-            // Letterbox: maior retângulo 240:160 centralizado.
-            val scale = minOf(width.toFloat() / W, height.toFloat() / H)
-            val vw = (W * scale).toInt()
-            val vh = (H * scale).toInt()
+            // Integer scaling: maior múltiplo inteiro de 240×160 que cabe,
+            // centralizado (letterbox). Mantém os pixels nítidos e o aspecto 3:2.
+            val s = maxOf(1, minOf(width / W, height / H))
+            vw = W * s
+            vh = H * s
             GLES20.glViewport((width - vw) / 2, (height - vh) / 2, vw, vh)
 
             // Sinal preciso de cadência: avisa o compositor que esta surface
@@ -1546,6 +1595,10 @@ class MainActivity : Activity() {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             if (romLoaded) {
                 GLES20.glUseProgram(program)
+                // Uniforms do contrato (no-op se o efeito não os declara).
+                GLES20.glUniform2f(inputLoc, W.toFloat(), H.toFloat())
+                GLES20.glUniform2f(outputLoc, vw.toFloat(), vh.toFloat())
+                GLES20.glUniform1i(frameLoc, frames)
                 quad.position(0)
                 GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 16, quad)
                 GLES20.glEnableVertexAttribArray(posLoc)
@@ -1588,7 +1641,31 @@ class MainActivity : Activity() {
             return ids[0]
         }
 
-        private fun buildProgram(): Int {
+        /** (Re)compila o programa do shader atual e recaptura attrib/uniform locations. */
+        fun rebuildProgram() {
+            if (program != 0) GLES20.glDeleteProgram(program)
+            program = buildProgram(currentShader)
+            posLoc = GLES20.glGetAttribLocation(program, "aPos")
+            texLoc = GLES20.glGetAttribLocation(program, "aTex")
+            inputLoc = GLES20.glGetUniformLocation(program, "uInputSize")
+            outputLoc = GLES20.glGetUniformLocation(program, "uOutputSize")
+            frameLoc = GLES20.glGetUniformLocation(program, "uFrameCount")
+        }
+
+        /**
+         * Corpo do efeito de `<key>.frag` nos assets (a pasta canônica
+         * `assets/shaders/` da raiz do repo é registrada como assets srcDir no
+         * build.gradle.kts, então os `.frag` ficam na raiz dos assets do APK).
+         * Cai no passthrough se falhar.
+         */
+        private fun loadShaderBody(key: String): String = try {
+            assets.open("$key.frag").bufferedReader().use { it.readText() }
+        } catch (e: Exception) {
+            Log.e(TAG, "shader '$key' não encontrado: $e")
+            "vec4 effect(vec2 uv) { return SAMPLE(uTex, uv); }"
+        }
+
+        private fun buildProgram(shaderKey: String): Int {
             val vs = compileShader(
                 GLES20.GL_VERTEX_SHADER,
                 """
@@ -1601,16 +1678,20 @@ class MainActivity : Activity() {
                 }
                 """.trimIndent(),
             )
-            val fs = compileShader(
-                GLES20.GL_FRAGMENT_SHADER,
-                """
+            // Preâmbulo GLES (contrato em assets/shaders/README.md) + corpo + main.
+            val fsHeader = """
                 precision mediump float;
                 uniform sampler2D uTex;
+                uniform vec2 uInputSize;
+                uniform vec2 uOutputSize;
+                uniform int uFrameCount;
                 varying vec2 vTex;
-                void main() {
-                    gl_FragColor = texture2D(uTex, vTex);
-                }
-                """.trimIndent(),
+                #define SAMPLE texture2D
+            """.trimIndent()
+            val fsFooter = "\nvoid main() { gl_FragColor = effect(vTex); }\n"
+            val fs = compileShader(
+                GLES20.GL_FRAGMENT_SHADER,
+                "$fsHeader\n${loadShaderBody(shaderKey)}$fsFooter",
             )
             val prog = GLES20.glCreateProgram()
             GLES20.glAttachShader(prog, vs)

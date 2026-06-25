@@ -2,6 +2,12 @@
 
 > Emulador de Game Boy Advance multiplataforma (Windows, Linux, Android) com modo diferencial **Shiny Hunter** para automação de caça a Pokémon shiny.
 
+_Última atualização: 2026-06-25_
+
+> O estado atual do projeto vive na seção **8. Status atual**; o trabalho não
+> segue ordem linear — pegue a fase/etapa que fizer sentido. Mantenha este
+> arquivo (e a data acima) atualizado conforme as fases avançam.
+
 ---
 
 ## 1. Identidade do projeto
@@ -157,7 +163,23 @@ auroragba/
       Rayquaza + Regis + 3 iniciais.
 - [ ] FireRed/LeafGreen (BPRE/BPGE): RAM + gRngValue + endereços do menu do
       inicial por versão (mapear com `rng_scan`/símbolos do decomp pokefirered)
-- [ ] Método: random encounters (detecção de tela de batalha de selvagem)
+- [X] Método: random encounters selvagem (`HuntMethod::WildSpin`) — sem reset.
+      O boneco fica na mesma moita e o Hunter cicla as 4 direções (cada uma
+      segurada o bastante pra virar **passo**, não só rotação; mudar a direção
+      encarada já dispara o sorteio de encontro). Quando um selvagem carrega no
+      `gEnemyParty`, checa o shiny. Falta o Marco 2: fugir pra encadear tentativas.
+- [X] Método: presente estático (`HuntMethod::StaticGift`) — presentes dados por
+      script onde pegar roda `CreateMon(Random())`, então soft-reset re-rola o
+      PID. Diferença-chave: o presente cai no **primeiro slot livre** de
+      `gPlayerParty` (não no slot 0), então a caça **varre os 6 slots** pela
+      espécie. Roteiro é A-mash puro (sem cursor) e **exige um slot de time
+      livre** (com time cheio o presente vai pro PC e a varredura não acha).
+      Cobre o **Beldum** na casa do Steven pós-E4 e os **iniciais de Johto**
+      (presente do Birch pós-National Dex).
+- [~] Método: pesca (rod) — tentativa estacionada. A ideia é o mesmo selvagem
+      sem reset, mas disparado por usar a vara em vez de andar; faltou mapear a
+      máquina de estados do minigame de fisgada (mordida → A no tempo certo) e a
+      leitura confiável do encontro. Parado; retomar depois do WildSpin Marco 2.
 - [ ] (Opcional avançado) RNG manipulation
 
 ### Fase 7 — Port Android (4–6 semanas)
@@ -179,11 +201,18 @@ auroragba/
 ### Fase 8 — ✨ Polimento & features extras (contínuo)
 
 Recursos de qualidade de vida e apresentação, sem ordem fixa — entram conforme
-fazem sentido. Nenhum entregue ainda.
+fazem sentido.
 
 **Vídeo / apresentação:**
 
-- [ ] Shaders (LCD grid, scanlines, CRT, integer scaling, aspect lock)
+- [X] **Integer scaling + aspect lock** nas duas frentes — desktop com escala
+      inteira persistida; Android com letterbox em múltiplo inteiro de 240×160.
+- [~] **Shaders** (formato próprio single-pass, "shader-como-dado"): pipeline +
+      **scanlines** entregue ponta a ponta. Fonte canônica única em
+      `assets/shaders/` (contrato de uniforms documentado no README); desktop via
+      callback `egui_glow` (glow), Android via GLES20; seletor persistido nas duas
+      frentes. **Falta**: importar `.frag` de arquivo, mais embutidos (LCD-grid,
+      CRT). _Stretch goal_: compat de presets RetroArch (`.glslp`/multipass).
 - [ ] Filtros de upscale (xBRZ / HQ2x) como alternativa aos shaders
 - [ ] Bordas / molduras (skins de GBA ao redor da tela)
 
@@ -337,10 +366,11 @@ Otimizações estruturais do interpretador, medidas em release headless.
   persistência `.sav` + **save states** (serde+bincode). Fase completa.
 - [~] Fase 6 — Shiny Hunter: perfis data-driven + leitura/descripto Gen 3 + loop
   de soft-reset + **injeção de seed no RNG** + UI + painel com sprite normal/shiny
-  da ROM, **validado na ROM real do Emerald**. Os 3 iniciais de Hoenn
-  (Torchic/Treecko/Mudkip) caçam via controle do cursor do menu em **malha
-  fechada** (endereços achados com o detector de RAM do desktop). Ruby/Sapphire
-  também fechados. Faltam FireRed/LeafGreen e o método de random encounters.
+  da ROM, **validado na ROM real do Emerald**. Métodos: **starter** (3 iniciais de
+  Hoenn via cursor em malha fechada), **selvagem** (`WildSpin`, sem reset),
+  **presente estático** (`StaticGift` — Beldum pós-E4 + iniciais de Johto pós-Dex,
+  varrendo os 6 slots do party). Ruby/Sapphire também fechados. Faltam
+  FireRed/LeafGreen, a pesca (estacionada) e o Marco 2 do selvagem (fuga encadeada).
 - [~] Fase 7 — Android: ponte JNI + app Kotlin (render GL ES + controles touch +
   **áudio via AudioTrack**), build via cargo-ndk + Gradle, **validado no emulador
   rodando Pokémon Emerald**. Saves (`.sav` + estados, espelho SAF), biblioteca de
@@ -369,6 +399,46 @@ Otimizações estruturais do interpretador, medidas em release headless.
   HLE não foram formatados); arquivos novos/reescritos já estão fmt-clean.
 - **Timing de ciclos**: hoje cada instrução conta como 1 ciclo (placeholder);
   falta wait states por região de memória (afeta precisão fina e pitch de áudio).
-- **Faltam**: Fase 6 (FireRed/LeafGreen + método de random encounters no Shiny
-  Hunter), mosaic afim (só BG texto + OBJ implementados), APK Android assinado,
-  link Android↔PC sobre Wi-Fi (latência) e o relay de internet (Fase Link L4).
+- **Faltam**: Fase 6 (FireRed/LeafGreen + método de pesca, estacionado + Marco 2
+  do selvagem no Shiny Hunter), mosaic afim (só BG texto + OBJ implementados),
+  APK Android assinado, link Android↔PC sobre Wi-Fi (latência) e o relay de
+  internet (Fase Link L4).
+
+---
+
+## 9. Ferramentas de desenvolvimento & debug
+
+> Build oficial (Desktop + Android) e checks de CI ficam no `CLAUDE.md`. Aqui só
+> ferramentas de inspeção e atalhos do dia a dia.
+
+- **Smoke test com dump de tela**: roda uma ROM e salva o framebuffer.
+  ```bash
+  AURORA_DUMP=/tmp/frame.ppm cargo run --release --bin smoke -- <rom.gba> 12000000
+  ```
+  Depois converter o PPM para PNG para inspecionar (foi assim que mapeamos os
+  "Failed test N" do jsmolka). O smoke também imprime nº de cores distintas.
+- **Mapear "Failed test N"** dos ROMs jsmolka: o nº do teste mapeia para um
+  arquivo `.asm` em `github.com/jsmolka/gba-tests` (ex.: arm tests 450–499 =
+  `data_swap.asm`). Útil para achar bugs de CPU.
+- **Detector de RAM (Shiny Hunter)**: no desktop, oculto atrás da flag
+  `SHOW_RAM_FINDER` — acha endereços por versão (estilo Cheat Engine). Para
+  `gRngValue`/espécies de jogos novos, usar `rng_scan` (scan da IWRAM pela
+  assinatura do LCG; `--sprites` para confirmar pelo oráculo de sprite).
+- **Trace do Cable Link**: variável `AURORAGBA_LINK_TRACE` liga o trace do link.
+
+### Comandos rápidos
+
+```bash
+cargo test                                  # todos os testes
+cargo clippy --all-targets -- -D warnings   # lint estrito (CI)
+cargo run --release -p auroragba-desktop    # abre a GUI
+./scripts/fetch-test-roms.sh                # baixa os ROMs de teste do jsmolka
+```
+
+### Atalhos do desktop
+
+Padrão (remapeáveis em Configurações → Controles): Z=A, X=B, Enter=Start,
+Backspace=Select, setas=direcional, A=L, S=R. **Gamepad** (gilrs) suportado e
+persistido. **F5** salva / **F9** carrega o slot de save state, **F12**
+screenshot (PNG em `<rom>/screenshots/`), **Espaço** (segurar) fast-forward,
+**R** (segurar) rewind. Menu "Estado" escolhe o slot (1–8).

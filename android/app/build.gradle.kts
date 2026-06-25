@@ -11,12 +11,21 @@ android {
         applicationId = "com.auroragba"
         minSdk = 24
         targetSdk = 34
-        versionCode = 58
-        versionName = "0.58.1"
+        versionCode = 59
+        versionName = "0.59.3"
         // ABIs que empacotamos (emulador x86_64 + dispositivos arm64). As `.so`
         // são geradas pelo cargo-ndk em src/main/jniLibs/<abi>/ (ver android/README.md).
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+    }
+
+    // Empacota os shaders compartilhados (fonte canônica única na raiz do repo,
+    // a mesma que o desktop embute via include_str!). Os `.frag` ficam na raiz
+    // dos assets do APK; ver GbaRenderer.loadShaderBody.
+    sourceSets {
+        getByName("main") {
+            assets.srcDir("../../assets/shaders")
         }
     }
 
