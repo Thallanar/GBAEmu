@@ -47,3 +47,6 @@ Uniforms disponíveis:
 - `none.frag` — passthrough (sem efeito).
 - `scanlines.frag` — scanlines suaves (perfil cosseno por linha da fonte), com
   vale ~55% de brilho; sensação CRT/"dark".
+- `lcd-grid.frag` — grade de LCD (escurece nas bordas de cada pixel da fonte, em
+  x e y); imita a matriz de pontos do LCD do GBA.
+- `crt.frag` — scanlines + leve aperture grille nas colunas + vinheta nas bordas.

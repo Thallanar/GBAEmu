@@ -16,16 +16,25 @@ pub enum ShaderKind {
     #[default]
     None,
     Scanlines,
+    LcdGrid,
+    Crt,
 }
 
 impl ShaderKind {
-    pub const ALL: [ShaderKind; 2] = [ShaderKind::None, ShaderKind::Scanlines];
+    pub const ALL: [ShaderKind; 4] = [
+        ShaderKind::None,
+        ShaderKind::Scanlines,
+        ShaderKind::LcdGrid,
+        ShaderKind::Crt,
+    ];
 
     /// Rótulo amigável (UI).
     pub fn label(self) -> &'static str {
         match self {
             ShaderKind::None => "Nenhum",
             ShaderKind::Scanlines => "Scanlines",
+            ShaderKind::LcdGrid => "LCD grid",
+            ShaderKind::Crt => "CRT",
         }
     }
 
@@ -34,6 +43,8 @@ impl ShaderKind {
         match self {
             ShaderKind::None => "none",
             ShaderKind::Scanlines => "scanlines",
+            ShaderKind::LcdGrid => "lcd-grid",
+            ShaderKind::Crt => "crt",
         }
     }
 
@@ -49,6 +60,8 @@ impl ShaderKind {
         match self {
             ShaderKind::None => include_str!("../../../assets/shaders/none.frag"),
             ShaderKind::Scanlines => include_str!("../../../assets/shaders/scanlines.frag"),
+            ShaderKind::LcdGrid => include_str!("../../../assets/shaders/lcd-grid.frag"),
+            ShaderKind::Crt => include_str!("../../../assets/shaders/crt.frag"),
         }
     }
 }

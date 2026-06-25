@@ -78,7 +78,12 @@ class MainActivity : Activity() {
         // Efeitos de shader (formato próprio single-pass; fontes em assets/shaders/,
         // espelhadas de assets/shaders/ na raiz do repo). `key` casa com o arquivo
         // `<key>.frag`; `label` é o rótulo na UI.
-        val SHADERS = arrayOf("none" to "Nenhum", "scanlines" to "Scanlines")
+        val SHADERS = arrayOf(
+            "none" to "Nenhum",
+            "scanlines" to "Scanlines",
+            "lcd-grid" to "LCD grid",
+            "crt" to "CRT",
+        )
         // Porta TCP padrão do link (igual ao desktop: `link::DEFAULT_PORT`).
         const val LINK_PORT = 7777
 
