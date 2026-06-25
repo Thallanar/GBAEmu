@@ -256,6 +256,37 @@ const EMERALD: GameProfile = GameProfile {
             method: HuntMethod::StaticGift,
             cursor: StarterCursor::Center,
         },
+        // Iniciais de Johto: presente do Birch (laboratório de Littleroot) após
+        // completar a Dex de Hoenn / pegar a Nacional. NÃO é um menu de escolha —
+        // são TRÊS Poké Balls na mesa, você anda até a que quer e o diálogo é só
+        // "YES" (A-mash resolve, igual ao Beldum). Salve EM FRENTE à Ball do alvo:
+        // o soft-reset devolve o personagem ao mesmo ponto, então cada reset
+        // re-pega a MESMA espécie com PID re-rolado. Índices INTERNOS Gen 3: tudo
+        // ≤251 NÃO é reordenado (a tabela só embaralha a cauda de Hoenn 252+), logo
+        // o índice interno = nº da Dex nacional. Chikorita=152, Cyndaquil=155,
+        // Totodile=158. Como todo índice deste arquivo, confirme pelo sprite no app.
+        // Exige vaga no time (senão o presente vai pro PC e a varredura não acha).
+        TargetDef {
+            name: "Chikorita (presente)",
+            species: 152,
+            slot: Slot::Player,
+            method: HuntMethod::StaticGift,
+            cursor: StarterCursor::Center,
+        },
+        TargetDef {
+            name: "Cyndaquil (presente)",
+            species: 155,
+            slot: Slot::Player,
+            method: HuntMethod::StaticGift,
+            cursor: StarterCursor::Center,
+        },
+        TargetDef {
+            name: "Totodile (presente)",
+            species: 158,
+            slot: Slot::Player,
+            method: HuntMethod::StaticGift,
+            cursor: StarterCursor::Center,
+        },
         // Selvagem na grama (qualquer espécie). `species: 0` = não filtra: a caça
         // para no PRIMEIRO selvagem que carregar, qualquer que seja. Use deixando
         // o personagem parado EM CIMA da grama; o Hunter cicla as direções pra dar
@@ -422,6 +453,35 @@ mod tests {
         // Caça de inicial em malha fechada disponível nos dois.
         assert!(r.starter_menu.is_some() && s.starter_menu.is_some());
         assert!(r.rng_addr.is_some() && s.rng_addr.is_some());
+    }
+
+    #[test]
+    fn emerald_has_johto_starter_gifts() {
+        let p = detect("BPEE").unwrap();
+        // Os 3 iniciais de Johto (presente do Birch pós-Dex): StaticGift, lidos do
+        // time, índice interno = nº da Dex nacional (≤251 não é reordenado).
+        for (name, species) in [
+            ("Chikorita (presente)", 152u16),
+            ("Cyndaquil (presente)", 155),
+            ("Totodile (presente)", 158),
+        ] {
+            let t = p
+                .targets
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} deveria existir no Emerald"));
+            assert_eq!(t.species, species, "{name}: índice interno errado");
+            assert_eq!(
+                t.method,
+                HuntMethod::StaticGift,
+                "{name}: deveria ser presente"
+            );
+            assert_eq!(
+                t.slot,
+                Slot::Player,
+                "{name}: presente cai no time do jogador"
+            );
+        }
     }
 
     #[test]
