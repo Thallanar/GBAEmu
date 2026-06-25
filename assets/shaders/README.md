@@ -45,4 +45,5 @@ Uniforms disponíveis:
 ## Efeitos atuais
 
 - `none.frag` — passthrough (sem efeito).
-- `scanlines.frag` — escurece linhas ímpares conforme `uInputSize.y`.
+- `scanlines.frag` — scanlines suaves (perfil cosseno por linha da fonte), com
+  vale ~55% de brilho; sensação CRT/"dark".
