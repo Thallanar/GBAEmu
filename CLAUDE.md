@@ -2,6 +2,18 @@
 
 Emulador de Game Boy Advance em Rust com modo **Shiny Hunter**, frontends desktop (CLI) e Android, e suporte a Cable Link.
 
+## Roadmap — SEMPRE revisar e manter atualizado
+
+> **Regra:** ao começar e ao terminar uma tarefa, revise o estado do roadmap e
+> mantenha-o atualizado. O roadmap é único: [`ROADMAP.md`](./ROADMAP.md) na raiz.
+>
+> - A seção **8. Status atual** é o snapshot de "onde paramos" (por fase).
+> - O trabalho **não** segue ordem linear — pegue a fase/etapa que fizer sentido.
+> - Há um campo `Última atualização` no topo — ajuste a data ao mexer.
+>
+> Sempre que uma fase/etapa avançar, for concluída ou mudar de rumo, atualize o
+> `ROADMAP.md` no mesmo PR para que não fique defasado.
+
 ## Convenção de versão (`0.PR.commits`)
 
 Enquanto **nada foi lançado**, a versão demonstra o esforço de desenvolvimento e segue o formato `MAJOR.MINOR.PATCH` assim:
