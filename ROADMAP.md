@@ -208,11 +208,11 @@ fazem sentido.
 - [X] **Integer scaling + aspect lock** nas duas frentes — desktop com escala
       inteira persistida; Android com letterbox em múltiplo inteiro de 240×160.
 - [~] **Shaders** (formato próprio single-pass, "shader-como-dado"): pipeline +
-      **scanlines** entregue ponta a ponta. Fonte canônica única em
-      `assets/shaders/` (contrato de uniforms documentado no README); desktop via
-      callback `egui_glow` (glow), Android via GLES20; seletor persistido nas duas
-      frentes. **Falta**: importar `.frag` de arquivo, mais embutidos (LCD-grid,
-      CRT). _Stretch goal_: compat de presets RetroArch (`.glslp`/multipass).
+      embutidos **scanlines / LCD-grid / CRT** entregues ponta a ponta. Fonte
+      canônica única em `assets/shaders/` (contrato de uniforms documentado no
+      README); desktop via callback `egui_glow` (glow), Android via GLES20;
+      seletor persistido nas duas frentes. **Falta**: importar `.frag` de arquivo.
+      _Stretch goal_: compat de presets RetroArch (`.glslp`/multipass).
 - [ ] Filtros de upscale (xBRZ / HQ2x) como alternativa aos shaders
 - [ ] Bordas / molduras (skins de GBA ao redor da tela)
 
