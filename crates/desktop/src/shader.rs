@@ -20,6 +20,20 @@ pub enum ShaderKind {
     Crt,
 }
 
+/// Seleção ativa de efeito: um dos embutidos ou o shader importado de arquivo.
+/// `Copy` de propósito — vai por valor pro callback de pintura.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Active {
+    Builtin(ShaderKind),
+    Custom,
+}
+
+impl Default for Active {
+    fn default() -> Self {
+        Active::Builtin(ShaderKind::None)
+    }
+}
+
 impl ShaderKind {
     pub const ALL: [ShaderKind; 4] = [
         ShaderKind::None,
@@ -98,6 +112,8 @@ pub struct ShaderRenderer {
     tex: glow::Texture,
     vao: glow::VertexArray,
     programs: Vec<(ShaderKind, Program)>,
+    /// Programa do shader importado de arquivo (`None` até o usuário carregar um).
+    custom: Option<Program>,
 }
 
 impl ShaderRenderer {
@@ -172,8 +188,25 @@ impl ShaderRenderer {
                 }
             }
 
-            Self { tex, vao, programs }
+            Self {
+                tex,
+                vao,
+                programs,
+                custom: None,
+            }
         }
+    }
+
+    /// Compila um shader importado de arquivo (apenas o corpo `effect(...)`, mesmo
+    /// contrato dos embutidos — ver `assets/shaders/README.md`) e o guarda como o
+    /// efeito "custom". Em erro de compilação/link devolve o log e mantém o custom
+    /// anterior intacto.
+    pub fn load_custom(&mut self, gl: &glow::Context, body: &str) -> Result<(), String> {
+        let prog = build_program_from_body(gl, body)?;
+        if let Some(old) = self.custom.replace(prog) {
+            unsafe { gl.delete_program(old.program) };
+        }
+        Ok(())
     }
 
     /// Sobe os pixels do framebuffer (RGBA8 240×160) para a textura.
@@ -199,19 +232,22 @@ impl ShaderRenderer {
     pub fn paint(
         &self,
         gl: &glow::Context,
-        kind: ShaderKind,
+        active: Active,
         input_size: [f32; 2],
         output_size: [f32; 2],
         frame_count: i32,
     ) {
-        // Programa do efeito pedido; cai no passthrough (primeiro disponível) se
-        // o efeito não compilou.
-        let prog = self
-            .programs
-            .iter()
-            .find(|(k, _)| *k == kind)
-            .or_else(|| self.programs.first())
-            .map(|(_, p)| p);
+        // Programa do efeito pedido; cai no passthrough (primeiro embutido
+        // disponível) se o efeito não compilou ou o custom não foi carregado.
+        let prog = match active {
+            Active::Custom => self.custom.as_ref(),
+            Active::Builtin(kind) => self
+                .programs
+                .iter()
+                .find(|(k, _)| *k == kind)
+                .map(|(_, p)| p),
+        };
+        let prog = prog.or_else(|| self.programs.first().map(|(_, p)| p));
         let Some(prog) = prog else { return };
 
         unsafe {
@@ -229,9 +265,15 @@ impl ShaderRenderer {
     }
 }
 
-/// Compila VS+FS de um efeito e captura as locations dos uniforms.
+/// Compila VS+FS de um embutido e captura as locations dos uniforms.
 fn build_program(gl: &glow::Context, kind: ShaderKind) -> Result<Program, String> {
-    let fs_src = format!("{FS_HEADER}{}{FS_FOOTER}", kind.body());
+    build_program_from_body(gl, kind.body())
+}
+
+/// Compila VS+FS a partir do corpo `effect(...)` (embutido ou importado),
+/// prependendo o preâmbulo do contrato, e captura as locations dos uniforms.
+fn build_program_from_body(gl: &glow::Context, body: &str) -> Result<Program, String> {
+    let fs_src = format!("{FS_HEADER}{body}{FS_FOOTER}");
     unsafe {
         let vs = compile(gl, glow::VERTEX_SHADER, VS_SOURCE)?;
         let fs = compile(gl, glow::FRAGMENT_SHADER, &fs_src)?;
@@ -278,7 +320,7 @@ unsafe fn compile(gl: &glow::Context, ty: u32, src: &str) -> Result<glow::Shader
 pub fn callback(
     rect: egui::Rect,
     renderer: std::sync::Arc<std::sync::Mutex<ShaderRenderer>>,
-    kind: ShaderKind,
+    active: Active,
     frame_count: i32,
 ) -> egui::PaintCallback {
     let input = [SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32];
@@ -286,7 +328,7 @@ pub fn callback(
         let vp = info.viewport_in_pixels();
         let output = [vp.width_px as f32, vp.height_px as f32];
         if let Ok(r) = renderer.lock() {
-            r.paint(painter.gl(), kind, input, output, frame_count);
+            r.paint(painter.gl(), active, input, output, frame_count);
         }
     });
     egui::PaintCallback {

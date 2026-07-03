@@ -69,11 +69,16 @@ class MainActivity : Activity() {
         const val OPEN_ROM = 1
         // Escolha da pasta de ROMs (SAF tree, persistida).
         const val OPEN_TREE = 2
+        // Importação de um `.frag` de shader customizado.
+        const val OPEN_SHADER = 3
         const val PREFS = "auroragba"
         const val KEY_ROM_FOLDER = "rom_folder_uri"
         const val KEY_PAD_MAP = "pad_map"
         const val KEY_LINK_ADDR = "link_addr"
         const val KEY_SHADER = "shader"
+        // Fonte + nome do `.frag` importado (persistidos p/ sobreviver ao restart).
+        const val KEY_SHADER_SRC = "shader_src"
+        const val KEY_SHADER_NAME = "shader_name"
 
         // Efeitos de shader (formato próprio single-pass; fontes em assets/shaders/,
         // espelhadas de assets/shaders/ na raiz do repo). `key` casa com o arquivo
@@ -130,9 +135,14 @@ class MainActivity : Activity() {
     // abre em velocidade normal.
     @Volatile private var ffSpeed = 1
 
-    // Efeito de shader atual (key de SHADERS). Escrito pela UI, lido pela thread
-    // GL ao (re)compilar o programa. Persiste nas prefs.
+    // Efeito de shader atual (key de SHADERS, ou "custom"). Escrito pela UI, lido
+    // pela thread GL ao (re)compilar o programa. Persiste nas prefs.
     @Volatile private var currentShader = "none"
+
+    // Fonte do shader importado de arquivo (corpo `effect(...)`, mesmo contrato dos
+    // embutidos) e nome do arquivo pra rótulo na UI. `null` = nenhum importado.
+    @Volatile private var customShaderSrc: String? = null
+    private var customShaderName = "arquivo"
     private lateinit var renderer: GbaRenderer
 
     // Bytes da última ROM carregada, pro 🔄 Resetar (re-entrega pro pendingRom).
@@ -316,30 +326,79 @@ class MainActivity : Activity() {
     }
 
     private fun loadShader() {
-        val s = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_SHADER, null) ?: return
-        if (SHADERS.any { it.first == s }) currentShader = s
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        customShaderSrc = prefs.getString(KEY_SHADER_SRC, null)
+        customShaderName = prefs.getString(KEY_SHADER_NAME, "arquivo") ?: "arquivo"
+        val s = prefs.getString(KEY_SHADER, null) ?: return
+        when {
+            s == "custom" -> if (customShaderSrc != null) currentShader = "custom"
+            SHADERS.any { it.first == s } -> currentShader = s
+        }
     }
 
     private fun saveShader() {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-            .putString(KEY_SHADER, currentShader).apply()
+            .putString(KEY_SHADER, currentShader)
+            .putString(KEY_SHADER_SRC, customShaderSrc)
+            .putString(KEY_SHADER_NAME, customShaderName)
+            .apply()
     }
 
     /** Menu de seleção de shader: troca o efeito, persiste e recompila na thread GL. */
     private fun shaderMenu() {
-        val labels = SHADERS.map { it.second }.toTypedArray()
-        val cur = SHADERS.indexOfFirst { it.first == currentShader }.coerceAtLeast(0)
+        // Embutidos + (se importado) a entrada "Custom".
+        val entries = SHADERS.toMutableList()
+        if (customShaderSrc != null) entries.add("custom" to "Custom: $customShaderName")
+        val labels = entries.map { it.second }.toTypedArray()
+        val cur = entries.indexOfFirst { it.first == currentShader }.coerceAtLeast(0)
         AlertDialog.Builder(this)
             .setTitle("Shader")
             .setSingleChoiceItems(labels, cur) { dialog, which ->
-                currentShader = SHADERS[which].first
+                currentShader = entries[which].first
                 saveShader()
                 glView.queueEvent { renderer.rebuildProgram() }
-                toast("Shader: ${SHADERS[which].second}")
+                toast("Shader: ${entries[which].second}")
                 dialog.dismiss()
             }
+            .setNeutralButton("Importar .frag…") { _, _ -> openShaderPicker() }
             .setNegativeButton("Cancelar", null)
             .show()
+    }
+
+    /** Seletor de um `.frag` de shader customizado (lido como texto). */
+    private fun openShaderPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        startActivityForResult(intent, OPEN_SHADER)
+    }
+
+    /** Lê o `.frag` importado, persiste a fonte e aplica como shader "custom". */
+    private fun loadCustomShader(uri: Uri) {
+        val src = try {
+            contentResolver.openInputStream(uri)?.use { it.reader().readText() }
+        } catch (e: Exception) {
+            Log.w(TAG, "falha ao ler .frag: $e"); null
+        }
+        if (src.isNullOrBlank()) {
+            toast("Não consegui ler o shader"); return
+        }
+        customShaderSrc = src
+        customShaderName = displayName(uri) ?: "arquivo"
+        currentShader = "custom"
+        saveShader()
+        glView.queueEvent { renderer.rebuildProgram() }
+        toast("Shader: $customShaderName")
+    }
+
+    /** Nome de exibição de um documento SAF (coluna _display_name), ou `null`. */
+    private fun displayName(uri: Uri): String? = try {
+        contentResolver.query(
+            uri, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null,
+        )?.use { if (it.moveToFirst()) it.getString(0) else null }
+    } catch (e: Exception) {
+        null
     }
 
     /** Nome curto de um keycode pra UI: "BUTTON_X" (sem o prefixo KEYCODE_). */
@@ -856,7 +915,12 @@ class MainActivity : Activity() {
             return
         }
         val speedItem = "⏩ Velocidade (${ffSpeed}x)"
-        val shaderItem = "🎨 Shader (${SHADERS.firstOrNull { it.first == currentShader }?.second ?: "Nenhum"})"
+        val shaderLabel = if (currentShader == "custom") {
+            "Custom"
+        } else {
+            SHADERS.firstOrNull { it.first == currentShader }?.second ?: "Nenhum"
+        }
+        val shaderItem = "🎨 Shader ($shaderLabel)"
         val items = mutableListOf(
             "Carregar ROM", "🔄 Resetar", "Salvar estado", "Carregar estado",
             "📸 Captura de tela", speedItem, shaderItem, "🎮 Remapear controle", "🔗 Link",
@@ -1222,6 +1286,7 @@ class MainActivity : Activity() {
         val uri = data?.data ?: return
         when (requestCode) {
             OPEN_ROM -> loadRomFromUri(uri)
+            OPEN_SHADER -> loadCustomShader(uri)
             OPEN_TREE -> {
                 // Persiste o acesso à pasta (sobrevive a reboot/reabertura).
                 val flags = data.flags and
@@ -1663,11 +1728,17 @@ class MainActivity : Activity() {
          * build.gradle.kts, então os `.frag` ficam na raiz dos assets do APK).
          * Cai no passthrough se falhar.
          */
-        private fun loadShaderBody(key: String): String = try {
-            assets.open("$key.frag").bufferedReader().use { it.readText() }
-        } catch (e: Exception) {
-            Log.e(TAG, "shader '$key' não encontrado: $e")
-            "vec4 effect(vec2 uv) { return SAMPLE(uTex, uv); }"
+        private fun loadShaderBody(key: String): String {
+            // Shader importado: usa a fonte guardada (cai no passthrough se ausente).
+            if (key == "custom") {
+                return customShaderSrc ?: "vec4 effect(vec2 uv) { return SAMPLE(uTex, uv); }"
+            }
+            return try {
+                assets.open("$key.frag").bufferedReader().use { it.readText() }
+            } catch (e: Exception) {
+                Log.e(TAG, "shader '$key' não encontrado: $e")
+                "vec4 effect(vec2 uv) { return SAMPLE(uTex, uv); }"
+            }
         }
 
         private fun buildProgram(shaderKey: String): Int {
