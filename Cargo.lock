@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "auroragba-android"
-version = "0.60.1"
+version = "0.61.1"
 dependencies = [
  "android_logger",
  "auroragba-core",
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "auroragba-core"
-version = "0.60.1"
+version = "0.61.1"
 dependencies = [
  "bincode",
  "bitflags 2.11.1",
@@ -628,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "auroragba-desktop"
-version = "0.60.1"
+version = "0.61.1"
 dependencies = [
  "anyhow",
  "auroragba-core",
@@ -648,14 +648,14 @@ dependencies = [
 
 [[package]]
 name = "auroragba-link"
-version = "0.60.1"
+version = "0.61.1"
 dependencies = [
  "auroragba-core",
 ]
 
 [[package]]
 name = "auroragba-shiny"
-version = "0.60.1"
+version = "0.61.1"
 dependencies = [
  "auroragba-core",
  "log",

@@ -22,7 +22,7 @@ mod link;
 mod png;
 mod shader;
 
-use shader::{ShaderKind, ShaderRenderer};
+use shader::{Active, ShaderKind, ShaderRenderer};
 
 /// Quantidade de slots de save state em disco (`<rom>.ss1`..`.ss8`).
 const SAVE_SLOTS: usize = 8;
@@ -452,8 +452,16 @@ struct AuroraApp {
     /// Renderizador de shader (glow). `None` se o backend GL não estiver
     /// disponível — nesse caso caímos no desenho via textura egui.
     shader: Option<Arc<Mutex<ShaderRenderer>>>,
-    /// Efeito de shader selecionado (persistido).
+    /// Efeito embutido selecionado (persistido). Ignorado enquanto `use_custom`.
     shader_kind: ShaderKind,
+    /// Usar o shader importado de arquivo em vez do embutido `shader_kind`.
+    use_custom: bool,
+    /// Caminho do `.frag` importado (persistido pra recompilar no próximo boot).
+    custom_path: Option<PathBuf>,
+    /// Nome do arquivo importado, pra rótulo na UI (vazio = nenhum carregado).
+    custom_label: String,
+    /// Último erro de compilação do shader importado, exibido na janela de vídeo.
+    shader_error: Option<String>,
     /// Janela de configurações de vídeo (escala + shader) aberta?
     show_video: bool,
     /// Contador de frames, usado pra limitar a frequência de gravação do save.
@@ -543,6 +551,13 @@ fn host_name() -> String {
         .unwrap_or_else(|| "AuroraGBA".to_string())
 }
 
+/// Nome do arquivo (sem diretório) para rótulo na UI; cai no caminho completo.
+fn file_label(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 impl AuroraApp {
     fn new(cc: &eframe::CreationContext<'_>, link_session: Option<link::LinkSession>) -> Self {
         let image = egui::ColorImage::new([SCREEN_WIDTH, SCREEN_HEIGHT], egui::Color32::BLACK);
@@ -566,11 +581,37 @@ impl AuroraApp {
             .gl
             .as_ref()
             .map(|gl| Arc::new(Mutex::new(ShaderRenderer::new(gl))));
-        let shader_kind = cc
+        let stored_shader = cc
             .storage
             .and_then(|s| s.get_string("video_shader"))
-            .map(|k| ShaderKind::from_key(&k))
             .unwrap_or_default();
+        let shader_kind = ShaderKind::from_key(&stored_shader);
+
+        // Se o último shader era um importado, tenta recompilá-lo do arquivo
+        // persistido. Se o arquivo sumiu ou não compila, cai no embutido.
+        let mut use_custom = false;
+        let mut custom_path: Option<PathBuf> = None;
+        let mut custom_label = String::new();
+        if stored_shader == "custom" {
+            let path = cc
+                .storage
+                .and_then(|s| s.get_string("video_shader_path"))
+                .map(PathBuf::from);
+            if let (Some(renderer), Some(gl), Some(path)) = (shader.as_ref(), cc.gl.as_ref(), path)
+            {
+                match std::fs::read_to_string(&path) {
+                    Ok(src) => match renderer.lock().unwrap().load_custom(gl, &src) {
+                        Ok(()) => {
+                            use_custom = true;
+                            custom_label = file_label(&path);
+                            custom_path = Some(path);
+                        }
+                        Err(e) => log::warn!("shader importado não compilou: {e}"),
+                    },
+                    Err(e) => log::warn!("shader importado não pôde ser lido: {e}"),
+                }
+            }
+        }
         let scale = cc
             .storage
             .and_then(|s| s.get_string("video_scale"))
@@ -586,6 +627,10 @@ impl AuroraApp {
             scale,
             shader,
             shader_kind,
+            use_custom,
+            custom_path,
+            custom_label,
+            shader_error: None,
             show_video: false,
             frame_count: 0,
             profile: None,
@@ -1601,8 +1646,47 @@ impl AuroraApp {
         }
     }
 
+    /// Abre um seletor de arquivo, lê o `.frag` e o compila como shader custom.
+    /// Sucesso passa a seleção pra custom; falha guarda o log em `shader_error`.
+    fn import_shader(&mut self, gl: Option<&Arc<eframe::glow::Context>>) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Fragment shader", &["frag", "fsh", "glsl"])
+            .pick_file()
+        else {
+            return;
+        };
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                self.shader_error = Some(format!("não consegui ler o arquivo: {e}"));
+                return;
+            }
+        };
+        let Some((renderer, gl)) = self.shader.as_ref().zip(gl) else {
+            return;
+        };
+        match renderer.lock().unwrap().load_custom(gl, &src) {
+            Ok(()) => {
+                self.custom_label = file_label(&path);
+                self.custom_path = Some(path);
+                self.use_custom = true;
+                self.shader_error = None;
+            }
+            Err(e) => self.shader_error = Some(e),
+        }
+    }
+
+    /// Seleção de shader ativa (embutido ou importado) para pintura/persistência.
+    fn shader_active(&self) -> Active {
+        if self.use_custom {
+            Active::Custom
+        } else {
+            Active::Builtin(self.shader_kind)
+        }
+    }
+
     /// Janela de vídeo: escala (inteira) + efeito de shader.
-    fn video_window(&mut self, ctx: &egui::Context) {
+    fn video_window(&mut self, ctx: &egui::Context, gl: Option<&Arc<eframe::glow::Context>>) {
         let mut open = self.show_video;
         egui::Window::new("🎨 Vídeo")
             .open(&mut open)
@@ -1624,13 +1708,42 @@ impl AuroraApp {
                 );
                 ui.separator();
                 if self.shader.is_some() {
+                    let active_label = if self.use_custom {
+                        self.custom_label.as_str()
+                    } else {
+                        self.shader_kind.label()
+                    };
                     egui::ComboBox::from_label("Shader")
-                        .selected_text(self.shader_kind.label())
+                        .selected_text(active_label)
                         .show_ui(ui, |ui| {
                             for kind in ShaderKind::ALL {
-                                ui.selectable_value(&mut self.shader_kind, kind, kind.label());
+                                let sel = !self.use_custom && self.shader_kind == kind;
+                                if ui.selectable_label(sel, kind.label()).clicked() {
+                                    self.shader_kind = kind;
+                                    self.use_custom = false;
+                                }
+                            }
+                            if !self.custom_label.is_empty()
+                                && ui
+                                    .selectable_label(
+                                        self.use_custom,
+                                        format!("Custom: {}", self.custom_label),
+                                    )
+                                    .clicked()
+                            {
+                                self.use_custom = true;
                             }
                         });
+                    if ui.button("Importar .frag…").clicked() {
+                        self.import_shader(gl);
+                    }
+                    if let Some(err) = &self.shader_error {
+                        ui.label(
+                            egui::RichText::new(format!("Falhou: {err}"))
+                                .color(egui::Color32::LIGHT_RED)
+                                .small(),
+                        );
+                    }
                 } else {
                     ui.label(
                         egui::RichText::new("Shaders indisponíveis (backend sem OpenGL).")
@@ -1911,9 +2024,10 @@ impl eframe::App for AuroraApp {
         if self.show_input_config {
             self.input_config_window(ctx);
         }
-        // Janela de vídeo (escala + shader).
+        // Janela de vídeo (escala + shader). Passa o contexto GL pra compilar
+        // shaders importados na hora do clique em "Importar".
         if self.show_video {
-            self.video_window(ctx);
+            self.video_window(ctx, gl.as_ref());
         }
         // Janela da biblioteca de ROMs (quando aberta).
         if self.show_library {
@@ -1955,7 +2069,7 @@ impl eframe::App for AuroraApp {
                         let cb = shader::callback(
                             rect,
                             renderer.clone(),
-                            self.shader_kind,
+                            self.shader_active(),
                             self.frame_count as i32,
                         );
                         ui.painter().add(cb);
@@ -1988,7 +2102,14 @@ impl eframe::App for AuroraApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("input_config", self.input.serialize());
         storage.set_string("video_scale", format!("{:.0}", self.scale));
-        storage.set_string("video_shader", self.shader_kind.key().to_string());
+        if self.use_custom {
+            storage.set_string("video_shader", "custom".to_string());
+            if let Some(p) = &self.custom_path {
+                storage.set_string("video_shader_path", p.display().to_string());
+            }
+        } else {
+            storage.set_string("video_shader", self.shader_kind.key().to_string());
+        }
         if let Some(dir) = &self.library.dir {
             storage.set_string("library_dir", dir.display().to_string());
         }

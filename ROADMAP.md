@@ -2,7 +2,7 @@
 
 > Emulador de Game Boy Advance multiplataforma (Windows, Linux, Android) com modo diferencial **Shiny Hunter** para automação de caça a Pokémon shiny.
 
-_Última atualização: 2026-06-25_
+_Última atualização: 2026-07-03_
 
 > O estado atual do projeto vive na seção **8. Status atual**; o trabalho não
 > segue ordem linear — pegue a fase/etapa que fizer sentido. Mantenha este
@@ -207,12 +207,13 @@ fazem sentido.
 
 - [X] **Integer scaling + aspect lock** nas duas frentes — desktop com escala
       inteira persistida; Android com letterbox em múltiplo inteiro de 240×160.
-- [~] **Shaders** (formato próprio single-pass, "shader-como-dado"): pipeline +
-      embutidos **scanlines / LCD-grid / CRT** entregues ponta a ponta. Fonte
-      canônica única em `assets/shaders/` (contrato de uniforms documentado no
-      README); desktop via callback `egui_glow` (glow), Android via GLES20;
-      seletor persistido nas duas frentes. **Falta**: importar `.frag` de arquivo.
-      _Stretch goal_: compat de presets RetroArch (`.glslp`/multipass).
+- [X] **Shaders** (formato próprio single-pass, "shader-como-dado"): pipeline +
+      embutidos **scanlines / LCD-grid / CRT** entregues ponta a ponta, mais
+      **importar `.frag` de arquivo** (efeito "Custom"). Fonte canônica única em
+      `assets/shaders/` (contrato de uniforms documentado no README); desktop via
+      callback `egui_glow` (glow), Android via GLES20; seletor + custom persistidos
+      nas duas frentes. _Stretch goal_: compat de presets RetroArch
+      (`.glslp`/multipass).
 - [ ] Filtros de upscale (xBRZ / HQ2x) como alternativa aos shaders
 - [ ] Bordas / molduras (skins de GBA ao redor da tela)
 
@@ -376,6 +377,10 @@ Otimizações estruturais do interpretador, medidas em release headless.
   rodando Pokémon Emerald**. Saves (`.sav` + estados, espelho SAF), biblioteca de
   ROMs persistente, gamepad físico remapeável, fast-forward, screenshot, reset e
   Shiny Hunter em retrato — tudo entregue. Falta só APK assinado / distribuição.
+- [~] Fase 8 — Polimento/apresentação: integer scaling + aspect lock nas duas
+  frentes; **shaders** (pipeline "shader-como-dado" single-pass, embutidos
+  scanlines/LCD-grid/CRT + importar `.frag` "Custom", seletor persistido) fechados
+  ponta a ponta. Próximos: filtros de upscale, cheats, i18n.
 - [X] Fase 9 — Performance: batch da PPU + fast-path do bus (×1,43) + batch dos
   timers ciclo-exato. Pacing uniforme no desktop tentado e **estacionado**
   (baseline mantido); fast-forward por menu no Android.

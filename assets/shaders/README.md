@@ -42,6 +42,18 @@ Uniforms disponíveis:
 - Single-pass apenas. Multipass / presets `.glslp` do RetroArch são um stretch
   goal futuro e não fazem parte deste formato.
 
+## Importar um `.frag` próprio
+
+As duas frentes deixam carregar um efeito de fora dos embutidos, seguindo este
+mesmo contrato (só a função `effect`, sem `#version`/`precision`/`main`):
+
+- **Desktop:** janela _🎨 Vídeo_ → **Importar .frag…**. O caminho é lembrado e o
+  shader é recompilado no próximo boot (some se o arquivo for movido/apagado).
+- **Android:** menu ☰ → _🎨 Shader_ → **Importar .frag…**. O texto do shader é
+  copiado para as preferências (sobrevive a restart mesmo sem acesso ao arquivo).
+
+Um shader importado aparece como **Custom** no seletor, ao lado dos embutidos.
+
 ## Efeitos atuais
 
 - `none.frag` — passthrough (sem efeito).
