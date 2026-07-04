@@ -11,8 +11,9 @@
 #[cfg(target_os = "android")]
 mod android_impl {
     use auroragba_core::joypad::Button;
-    use auroragba_core::{apu, Gba};
+    use auroragba_core::{apu, Gba, SCREEN_HEIGHT, SCREEN_WIDTH};
     use auroragba_link::LinkSession;
+    use auroragba_scale::{Scaler, Upscale};
     use auroragba_shiny::games::{self, GameProfile};
     use auroragba_shiny::gfx::RomGfx;
     use auroragba_shiny::{CheckResult, Hunter};
@@ -48,6 +49,12 @@ mod android_impl {
         /// Última falha de conexão (mensagem do SO), pra UI mostrar. Consumida
         /// por `linkTakeError`. `None` = nada novo a reportar.
         link_error: Option<String>,
+        /// Filtro de upscale (HQx) aplicado ao framebuffer antes de entregar pro
+        /// Kotlin. `Off` = framebuffer cru 240×160. Ajustado por `setUpscale`.
+        upscale: Upscale,
+        /// Scaler (buffers reutilizáveis) + buffer de saída RGBA8 ampliado.
+        scaler: Scaler,
+        scale_buf: Vec<u8>,
     }
 
     impl Emu {
@@ -63,6 +70,9 @@ mod android_impl {
                 link_pending: None,
                 link_cancel: None,
                 link_error: None,
+                upscale: Upscale::Off,
+                scaler: Scaler::new(),
+                scale_buf: Vec::new(),
             }
         }
     }
@@ -163,27 +173,47 @@ mod android_impl {
         );
     }
 
-    /// Copia o framebuffer (RGBA8, 240×160 = 153600 bytes) pro `ByteBuffer`
-    /// direto. Não avança a emulação — usado pelo render normal (após `run_frame`)
-    /// e pelo Shiny Hunter (que roda os frames por dentro de `huntStep`).
-    ///
-    /// # Safety
-    /// `buffer` precisa ser um ByteBuffer direto com capacidade ≥ ao framebuffer.
-    unsafe fn write_framebuffer(env: &JNIEnv, gba: &Gba, buffer: &JByteBuffer) {
-        let fb = &gba.bus.ppu.framebuffer[..];
-        let dst = match env.get_direct_buffer_address(buffer) {
-            Ok(p) if !p.is_null() => p,
-            _ => {
-                log::error!("write_framebuffer: ByteBuffer não é direto");
+    impl Emu {
+        /// Copia o frame pro `ByteBuffer` direto. Sem filtro, é o framebuffer cru
+        /// (RGBA8 240×160 = 153600 bytes); com um filtro HQx ativo, é o buffer
+        /// ampliado (`W·f × H·f × 4`). Não avança a emulação — usado pelo render
+        /// normal (após `run_frame`) e pelo Shiny Hunter (frames rodados por
+        /// dentro de `huntStep`). O Kotlin dimensiona a textura pelo fator.
+        ///
+        /// # Safety
+        /// `buffer` precisa ser um ByteBuffer direto com capacidade ≥ ao frame
+        /// ampliado (o Kotlin aloca pro fator máximo).
+        unsafe fn write_framebuffer(&mut self, env: &JNIEnv, buffer: &JByteBuffer) {
+            let bytes: &[u8] = if self.upscale == Upscale::Off {
+                &self.gba.bus.ppu.framebuffer[..]
+            } else {
+                let fb = &self.gba.bus.ppu.framebuffer[..];
+                let (ow, oh) = self.scaler.scale(
+                    self.upscale,
+                    fb,
+                    SCREEN_WIDTH,
+                    SCREEN_HEIGHT,
+                    &mut self.scale_buf,
+                );
+                &self.scale_buf[..ow * oh * 4]
+            };
+            let dst = match env.get_direct_buffer_address(buffer) {
+                Ok(p) if !p.is_null() => p,
+                _ => {
+                    log::error!("write_framebuffer: ByteBuffer não é direto");
+                    return;
+                }
+            };
+            let cap = env.get_direct_buffer_capacity(buffer).unwrap_or(0);
+            if cap < bytes.len() {
+                log::error!(
+                    "write_framebuffer: buffer pequeno ({cap} < {})",
+                    bytes.len()
+                );
                 return;
             }
-        };
-        let cap = env.get_direct_buffer_capacity(buffer).unwrap_or(0);
-        if cap < fb.len() {
-            log::error!("write_framebuffer: buffer pequeno ({cap} < {})", fb.len());
-            return;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
         }
-        std::ptr::copy_nonoverlapping(fb.as_ptr(), dst, fb.len());
     }
 
     /// Roda um frame e copia o framebuffer (RGBA8, 240×160 = 153600 bytes) pro
@@ -226,7 +256,7 @@ mod android_impl {
             buf.drain(..buf.len() - cap);
         }
 
-        write_framebuffer(&env, &emu.gba, &buffer);
+        emu.write_framebuffer(&env, &buffer);
     }
 
     /// Copia o framebuffer atual pro `ByteBuffer` sem avançar a emulação. O Shiny
@@ -242,8 +272,26 @@ mod android_impl {
         handle: jlong,
         buffer: JByteBuffer,
     ) {
-        if let Some(gba) = gba(handle) {
-            write_framebuffer(&env, gba, &buffer);
+        if let Some(emu) = emu(handle) {
+            emu.write_framebuffer(&env, &buffer);
+        }
+    }
+
+    /// Define o filtro de upscale: 1 = nenhum, 2/3/4 = HQ2x/HQ3x/HQ4x. A partir
+    /// do próximo frame, `write_framebuffer` entrega o buffer ampliado; o Kotlin
+    /// dimensiona a textura por `240·f × 160·f`.
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_setUpscale(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        factor: jint,
+    ) {
+        if let Some(emu) = emu(handle) {
+            emu.upscale = Upscale::from_factor(factor);
         }
     }
 

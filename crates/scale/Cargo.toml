@@ -1,0 +1,11 @@
+[package]
+name = "auroragba-scale"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Filtros de upscale de pixel-art (HQx) para o AuroraGBA"
+
+[dependencies]
+hqx = "0.1"

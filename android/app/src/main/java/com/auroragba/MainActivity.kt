@@ -79,6 +79,12 @@ class MainActivity : Activity() {
         // Fonte + nome do `.frag` importado (persistidos p/ sobreviver ao restart).
         const val KEY_SHADER_SRC = "shader_src"
         const val KEY_SHADER_NAME = "shader_name"
+        const val KEY_UPSCALE = "upscale"
+
+        // Filtros de upscale (HQx). `first` = fator inteiro (casa com o nativo);
+        // `second` = rótulo na UI. `MAX_UPSCALE` dimensiona o ByteBuffer/textura.
+        val UPSCALES = arrayOf(1 to "Nenhum", 2 to "HQ2x", 3 to "HQ3x", 4 to "HQ4x")
+        const val MAX_UPSCALE = 4
 
         // Efeitos de shader (formato próprio single-pass; fontes em assets/shaders/,
         // espelhadas de assets/shaders/ na raiz do repo). `key` casa com o arquivo
@@ -143,6 +149,10 @@ class MainActivity : Activity() {
     // embutidos) e nome do arquivo pra rótulo na UI. `null` = nenhum importado.
     @Volatile private var customShaderSrc: String? = null
     private var customShaderName = "arquivo"
+
+    // Fator de upscale HQx atual (1/2/3/4). Escrito pela UI, lido pela thread GL
+    // pra dimensionar a textura; o algoritmo em si roda no nativo. Persiste.
+    @Volatile private var upscaleFactor = 1
     private lateinit var renderer: GbaRenderer
 
     // Bytes da última ROM carregada, pro 🔄 Resetar (re-entrega pro pendingRom).
@@ -255,6 +265,7 @@ class MainActivity : Activity() {
         loadPadMap()
         loadLinkAddr()
         loadShader()
+        loadUpscale()
 
         glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(2)
@@ -399,6 +410,32 @@ class MainActivity : Activity() {
         )?.use { if (it.moveToFirst()) it.getString(0) else null }
     } catch (e: Exception) {
         null
+    }
+
+    private fun loadUpscale() {
+        val f = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_UPSCALE, 1)
+        if (UPSCALES.any { it.first == f }) upscaleFactor = f
+    }
+
+    private fun saveUpscale() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_UPSCALE, upscaleFactor).apply()
+    }
+
+    /** Menu do filtro de upscale (HQx): troca o fator, persiste e avisa o nativo. */
+    private fun upscaleMenu() {
+        val labels = UPSCALES.map { it.second }.toTypedArray()
+        val cur = UPSCALES.indexOfFirst { it.first == upscaleFactor }.coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Upscale (HQx)")
+            .setSingleChoiceItems(labels, cur) { dialog, which ->
+                upscaleFactor = UPSCALES[which].first
+                saveUpscale()
+                glView.queueEvent { NativeBridge.setUpscale(handle, upscaleFactor) }
+                toast("Upscale: ${UPSCALES[which].second}")
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
     }
 
     /** Nome curto de um keycode pra UI: "BUTTON_X" (sem o prefixo KEYCODE_). */
@@ -921,9 +958,12 @@ class MainActivity : Activity() {
             SHADERS.firstOrNull { it.first == currentShader }?.second ?: "Nenhum"
         }
         val shaderItem = "🎨 Shader ($shaderLabel)"
+        val upscaleLabel = UPSCALES.firstOrNull { it.first == upscaleFactor }?.second ?: "Nenhum"
+        val upscaleItem = "🔍 Upscale ($upscaleLabel)"
         val items = mutableListOf(
             "Carregar ROM", "🔄 Resetar", "Salvar estado", "Carregar estado",
-            "📸 Captura de tela", speedItem, shaderItem, "🎮 Remapear controle", "🔗 Link",
+            "📸 Captura de tela", speedItem, shaderItem, upscaleItem,
+            "🎮 Remapear controle", "🔗 Link",
         )
         if (huntSupported) items.add("✨ Shiny Hunter")
         AlertDialog.Builder(this)
@@ -937,6 +977,7 @@ class MainActivity : Activity() {
                     "📸 Captura de tela" -> takeScreenshot()
                     speedItem -> speedMenu()
                     shaderItem -> shaderMenu()
+                    upscaleItem -> upscaleMenu()
                     "🎮 Remapear controle" -> remapMenu()
                     "🔗 Link" -> linkMenu()
                     "✨ Shiny Hunter" -> startShinyHunter()
@@ -1234,11 +1275,11 @@ class MainActivity : Activity() {
      * antigas, na pasta externa do app. Roda numa thread à parte — encode + I/O
      * não podem travar o render.
      */
-    private fun saveScreenshot(px: ByteArray) {
+    private fun saveScreenshot(px: ByteArray, w: Int = W, h: Int = H) {
         val code = currentGameCode ?: "rom"
         Thread {
             try {
-                val bmp = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888)
+                val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                 bmp.copyPixelsFromBuffer(ByteBuffer.wrap(px))
                 val name = "auroragba_${code}_${System.currentTimeMillis() / 1000}.png"
                 val where = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -1508,6 +1549,9 @@ class MainActivity : Activity() {
         // Retângulo do letterbox (integer scaling), calculado em onSurfaceChanged.
         private var vw = 0
         private var vh = 0
+        // Fator de upscale com que a textura está alocada. Quando difere de
+        // `upscaleFactor`, a textura é realocada com as dimensões novas.
+        private var texFactor = 1
         private var frames = 0
         private val audioBuf = ShortArray(8192)
         private val frameNanos = (1_000_000_000.0 / 59.7275).toLong()
@@ -1515,7 +1559,11 @@ class MainActivity : Activity() {
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             if (handle == 0L) handle = NativeBridge.create()
             if (audio == null) audio = createAudioTrack()
-            buf = ByteBuffer.allocateDirect(W * H * 4).order(ByteOrder.nativeOrder())
+            // Dimensionado pro fator máximo (HQ4x): o nativo escreve o frame já
+            // ampliado aqui; a textura acompanha o fator atual.
+            buf = ByteBuffer.allocateDirect(W * H * 4 * MAX_UPSCALE * MAX_UPSCALE)
+                .order(ByteOrder.nativeOrder())
+            NativeBridge.setUpscale(handle, upscaleFactor)
 
             // Triangle strip: pos.xy + tex.uv por vértice. tex v=0 no topo casa
             // com a linha 0 do framebuffer (topo da imagem GBA).
@@ -1648,25 +1696,39 @@ class MainActivity : Activity() {
                     // "Cruzou um múltiplo": com speed > 1 o == 0 podia nunca bater.
                     if (frames % FLUSH_EVERY_FRAMES < speed) flushBackup()
                 }
+                // Dimensões do frame conforme o fator de upscale (nativo já
+                // entregou o buffer ampliado). Realoca a textura quando muda.
+                val f = upscaleFactor
+                val ow = W * f
+                val oh = H * f
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
-                GLES20.glTexSubImage2D(
-                    GLES20.GL_TEXTURE_2D, 0, 0, 0, W, H,
-                    GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf,
-                )
-                // Captura: copia o framebuffer atual (rápido) e delega o encode.
+                if (f != texFactor) {
+                    GLES20.glTexImage2D(
+                        GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, ow, oh, 0,
+                        GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf,
+                    )
+                    texFactor = f
+                } else {
+                    GLES20.glTexSubImage2D(
+                        GLES20.GL_TEXTURE_2D, 0, 0, 0, ow, oh,
+                        GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf,
+                    )
+                }
+                // Captura: copia o frame atual (já ampliado) e delega o encode.
                 if (pendingScreenshot.getAndSet(false)) {
-                    val px = ByteArray(W * H * 4)
+                    val px = ByteArray(ow * oh * 4)
                     buf.rewind()
                     buf.get(px)
-                    saveScreenshot(px)
+                    saveScreenshot(px, ow, oh)
                 }
             }
 
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             if (romLoaded) {
                 GLES20.glUseProgram(program)
-                // Uniforms do contrato (no-op se o efeito não os declara).
-                GLES20.glUniform2f(inputLoc, W.toFloat(), H.toFloat())
+                // Uniforms do contrato (no-op se o efeito não os declara). O input
+                // é o tamanho da textura, que cresce com o fator de upscale.
+                GLES20.glUniform2f(inputLoc, (W * texFactor).toFloat(), (H * texFactor).toFloat())
                 GLES20.glUniform2f(outputLoc, vw.toFloat(), vh.toFloat())
                 GLES20.glUniform1i(frameLoc, frames)
                 quad.position(0)

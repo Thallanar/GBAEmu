@@ -114,6 +114,10 @@ pub struct ShaderRenderer {
     programs: Vec<(ShaderKind, Program)>,
     /// Programa do shader importado de arquivo (`None` até o usuário carregar um).
     custom: Option<Program>,
+    /// Dimensões atualmente alocadas na textura. Mudam quando um filtro de
+    /// upscale entra/sai (o buffer de entrada passa a ser maior que 240×160).
+    tex_w: i32,
+    tex_h: i32,
 }
 
 impl ShaderRenderer {
@@ -193,6 +197,8 @@ impl ShaderRenderer {
                 vao,
                 programs,
                 custom: None,
+                tex_w: SCREEN_WIDTH as i32,
+                tex_h: SCREEN_HEIGHT as i32,
             }
         }
     }
@@ -209,21 +215,39 @@ impl ShaderRenderer {
         Ok(())
     }
 
-    /// Sobe os pixels do framebuffer (RGBA8 240×160) para a textura.
-    pub fn upload(&self, gl: &glow::Context, pixels: &[u8]) {
+    /// Sobe os pixels (RGBA8, `w`×`h`) para a textura. Se as dimensões mudaram
+    /// desde o último upload (entrou/saiu um filtro de upscale), realoca a
+    /// textura com `tex_image_2d`; senão faz o caminho rápido `tex_sub_image_2d`.
+    pub fn upload(&mut self, gl: &glow::Context, w: i32, h: i32, pixels: &[u8]) {
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.tex));
-            gl.tex_sub_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                0,
-                0,
-                SCREEN_WIDTH as i32,
-                SCREEN_HEIGHT as i32,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(pixels),
-            );
+            if w != self.tex_w || h != self.tex_h {
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA as i32,
+                    w,
+                    h,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    Some(pixels),
+                );
+                self.tex_w = w;
+                self.tex_h = h;
+            } else {
+                gl.tex_sub_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    w,
+                    h,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(pixels),
+                );
+            }
         }
     }
 
@@ -321,9 +345,9 @@ pub fn callback(
     rect: egui::Rect,
     renderer: std::sync::Arc<std::sync::Mutex<ShaderRenderer>>,
     active: Active,
+    input: [f32; 2],
     frame_count: i32,
 ) -> egui::PaintCallback {
-    let input = [SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32];
     let cb = eframe::egui_glow::CallbackFn::new(move |info, painter| {
         let vp = info.viewport_in_pixels();
         let output = [vp.width_px as f32, vp.height_px as f32];

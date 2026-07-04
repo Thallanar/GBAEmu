@@ -19,6 +19,7 @@ path = "src/bin/smoke.rs"
 auroragba-core = { path = "../core", features = ["save-states"] }
 auroragba-link = { path = "../link" }
 auroragba-shiny = { path = "../shiny" }
+auroragba-scale = { path = "../scale" }
 
 log.workspace = true
 env_logger.workspace = true

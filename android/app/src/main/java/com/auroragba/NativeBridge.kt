@@ -70,6 +70,9 @@ object NativeBridge {
     /** Copia o framebuffer atual pro [buffer] direto SEM avançar a emulação. */
     external fun copyFramebuffer(handle: Long, buffer: ByteBuffer)
 
+    /** Filtro de upscale HQx: 1 = nenhum, 2/3/4 = HQ2x/HQ3x/HQ4x. */
+    external fun setUpscale(handle: Long, factor: Int)
+
     /** O jogo carregado é suportado pelo Shiny Hunter? */
     external fun huntSupported(handle: Long): Boolean
 
