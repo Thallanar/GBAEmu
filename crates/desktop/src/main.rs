@@ -22,6 +22,7 @@ mod link;
 mod png;
 mod shader;
 
+use auroragba_scale::{Scaler, Upscale};
 use shader::{Active, ShaderKind, ShaderRenderer};
 
 /// Quantidade de slots de save state em disco (`<rom>.ss1`..`.ss8`).
@@ -462,6 +463,11 @@ struct AuroraApp {
     custom_label: String,
     /// Último erro de compilação do shader importado, exibido na janela de vídeo.
     shader_error: Option<String>,
+    /// Filtro de upscale (HQx) aplicado ao framebuffer antes do shader (persistido).
+    upscale: Upscale,
+    /// Scaler com buffers reutilizáveis + o buffer de saída (RGBA8 ampliado).
+    scaler: Scaler,
+    scaled: Vec<u8>,
     /// Janela de configurações de vídeo (escala + shader) aberta?
     show_video: bool,
     /// Contador de frames, usado pra limitar a frequência de gravação do save.
@@ -618,6 +624,11 @@ impl AuroraApp {
             .and_then(|s| s.parse::<f32>().ok())
             .filter(|s| (1.0..=6.0).contains(s))
             .unwrap_or(3.0);
+        let upscale = cc
+            .storage
+            .and_then(|s| s.get_string("video_upscale"))
+            .map(|k| Upscale::from_key(&k))
+            .unwrap_or_default();
 
         let mut app = Self {
             gba: Gba::new(),
@@ -631,6 +642,9 @@ impl AuroraApp {
             custom_path,
             custom_label,
             shader_error: None,
+            upscale,
+            scaler: Scaler::new(),
+            scaled: Vec::new(),
             show_video: false,
             frame_count: 0,
             profile: None,
@@ -1744,6 +1758,21 @@ impl AuroraApp {
                                 .small(),
                         );
                     }
+                    ui.separator();
+                    egui::ComboBox::from_label("Upscale")
+                        .selected_text(self.upscale.label())
+                        .show_ui(ui, |ui| {
+                            for u in Upscale::ALL {
+                                ui.selectable_value(&mut self.upscale, u, u.label());
+                            }
+                        });
+                    ui.label(
+                        egui::RichText::new(
+                            "Filtro HQx de pixel-art (CPU), aplicado antes do shader.",
+                        )
+                        .weak()
+                        .small(),
+                    );
                 } else {
                     ui.label(
                         egui::RichText::new("Shaders indisponíveis (backend sem OpenGL).")
@@ -2060,16 +2089,27 @@ impl eframe::App for AuroraApp {
 
                 match (&self.shader, gl.as_ref()) {
                     (Some(renderer), Some(gl)) => {
-                        // Caminho glow: sobe o framebuffer e desenha com o shader.
+                        // Filtro de upscale (HQx) antes do shader: amplia o
+                        // framebuffer na CPU; sem filtro, `scale` só copia.
+                        let (iw, ih) = self.scaler.scale(
+                            self.upscale,
+                            &self.gba.bus.ppu.framebuffer[..],
+                            SCREEN_WIDTH,
+                            SCREEN_HEIGHT,
+                            &mut self.scaled,
+                        );
+                        // Caminho glow: sobe o buffer (já ampliado) e desenha com
+                        // o shader por cima.
                         renderer
                             .lock()
                             .unwrap()
-                            .upload(gl, &self.gba.bus.ppu.framebuffer[..]);
+                            .upload(gl, iw as i32, ih as i32, &self.scaled);
                         let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                         let cb = shader::callback(
                             rect,
                             renderer.clone(),
                             self.shader_active(),
+                            [iw as f32, ih as f32],
                             self.frame_count as i32,
                         );
                         ui.painter().add(cb);
@@ -2110,6 +2150,7 @@ impl eframe::App for AuroraApp {
         } else {
             storage.set_string("video_shader", self.shader_kind.key().to_string());
         }
+        storage.set_string("video_upscale", self.upscale.key().to_string());
         if let Some(dir) = &self.library.dir {
             storage.set_string("library_dir", dir.display().to_string());
         }

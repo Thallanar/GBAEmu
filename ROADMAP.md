@@ -42,6 +42,7 @@ auroragba/
 │   ├── desktop/     # frontend egui
 │   ├── android/     # bindings JNI
 │   ├── shiny/       # módulo Shiny Hunter
+│   ├── scale/       # filtros de upscale de pixel-art (HQx)
 │   └── link/        # protocolo de link cable portátil (transporte + sync)
 ├── assets/
 └── tests/
@@ -214,7 +215,11 @@ fazem sentido.
       callback `egui_glow` (glow), Android via GLES20; seletor + custom persistidos
       nas duas frentes. _Stretch goal_: compat de presets RetroArch
       (`.glslp`/multipass).
-- [ ] Filtros de upscale (xBRZ / HQ2x) como alternativa aos shaders
+- [~] Filtros de upscale como alternativa aos shaders: **HQ2x/3x/4x** entregues
+      ponta a ponta (crate `auroragba-scale` sobre `hqx`; desktop amplia na CPU e
+      sobe numa textura de tamanho variável; Android amplia no nativo e o Kotlin
+      redimensiona a textura pelo fator; seletor persistido nas duas frentes).
+      **Falta**: xBRZ (PR separado).
 - [ ] Bordas / molduras (skins de GBA ao redor da tela)
 
 **Cheats:**
@@ -379,8 +384,9 @@ Otimizações estruturais do interpretador, medidas em release headless.
   Shiny Hunter em retrato — tudo entregue. Falta só APK assinado / distribuição.
 - [~] Fase 8 — Polimento/apresentação: integer scaling + aspect lock nas duas
   frentes; **shaders** (pipeline "shader-como-dado" single-pass, embutidos
-  scanlines/LCD-grid/CRT + importar `.frag` "Custom", seletor persistido) fechados
-  ponta a ponta. Próximos: filtros de upscale, cheats, i18n.
+  scanlines/LCD-grid/CRT + importar `.frag` "Custom", seletor persistido) e
+  **filtros de upscale HQ2x/3x/4x** (crate `auroragba-scale` sobre `hqx`) fechados
+  ponta a ponta. Próximos: xBRZ, cheats, i18n.
 - [X] Fase 9 — Performance: batch da PPU + fast-path do bus (×1,43) + batch dos
   timers ciclo-exato. Pacing uniforme no desktop tentado e **estacionado**
   (baseline mantido); fast-forward por menu no Android.
