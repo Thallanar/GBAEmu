@@ -213,16 +213,18 @@ fazem sentido.
       **importar `.frag` de arquivo** (efeito "Custom"). Fonte canônica única em
       `assets/shaders/` (contrato de uniforms documentado no README); desktop via
       callback `egui_glow` (glow), Android via GLES20; seletor + custom persistidos
-      nas duas frentes. _Stretch goal_: compat de presets RetroArch
-      (`.glslp`/multipass).
+      nas duas frentes. **Motor multipass** (ping-pong de FBO nas duas frentes,
+      manifesto `.mpass` encadeando vários `.frag`) entregue e exercitado pelo efeito
+      `blur` (2 passes); destrava ScaleFX/Anime4K (próximo). _Stretch goal_ restante:
+      compat de presets `.glslp` do RetroArch.
 - [X] Filtros de upscale como alternativa aos shaders: **HQ2x/3x/4x** e
       **xBRZ2x/3x/4x** entregues ponta a ponta (crate `auroragba-scale` sobre
       `hqx` + `xbrz-rs`; desktop amplia na CPU e sobe numa textura de tamanho
       variável; Android amplia no nativo e o Kotlin redimensiona a textura pelo
       fator; seletor persistido nas duas frentes). O contrato de seleção Android
       passou de fator-inteiro para **chave do algoritmo** (JNI `setUpscale(String)`),
-      pra HQ e xBRZ do mesmo fator coexistirem. _Futuro_: ScaleFX/Anime4K exigem
-      uma **engine de shader multipass** (ping-pong de framebuffer nas duas frentes).
+      pra HQ e xBRZ do mesmo fator coexistirem. _Futuro_: ScaleFX/Anime4K sobre o
+      **motor multipass** (já entregue).
 - [ ] Bordas / molduras (skins de GBA ao redor da tela)
 
 **Cheats:**

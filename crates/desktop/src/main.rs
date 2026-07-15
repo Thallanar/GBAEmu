@@ -23,7 +23,7 @@ mod png;
 mod shader;
 
 use auroragba_scale::{Scaler, Upscale};
-use shader::{Active, ShaderKind, ShaderRenderer};
+use shader::{Active, MultipassKind, ShaderKind, ShaderRenderer};
 
 /// Quantidade de slots de save state em disco (`<rom>.ss1`..`.ss8`).
 const SAVE_SLOTS: usize = 8;
@@ -453,8 +453,11 @@ struct AuroraApp {
     /// Renderizador de shader (glow). `None` se o backend GL não estiver
     /// disponível — nesse caso caímos no desenho via textura egui.
     shader: Option<Arc<Mutex<ShaderRenderer>>>,
-    /// Efeito embutido selecionado (persistido). Ignorado enquanto `use_custom`.
+    /// Efeito embutido selecionado (persistido). Ignorado enquanto `use_custom`
+    /// ou `shader_multipass` estiver ativo.
     shader_kind: ShaderKind,
+    /// Efeito multipass selecionado (tem prioridade sobre `shader_kind`/custom).
+    shader_multipass: Option<MultipassKind>,
     /// Usar o shader importado de arquivo em vez do embutido `shader_kind`.
     use_custom: bool,
     /// Caminho do `.frag` importado (persistido pra recompilar no próximo boot).
@@ -592,6 +595,8 @@ impl AuroraApp {
             .and_then(|s| s.get_string("video_shader"))
             .unwrap_or_default();
         let shader_kind = ShaderKind::from_key(&stored_shader);
+        // Um efeito multipass persistido (ex.: "blur") tem prioridade na seleção.
+        let shader_multipass = MultipassKind::from_key(&stored_shader);
 
         // Se o último shader era um importado, tenta recompilá-lo do arquivo
         // persistido. Se o arquivo sumiu ou não compila, cai no embutido.
@@ -638,6 +643,7 @@ impl AuroraApp {
             scale,
             shader,
             shader_kind,
+            shader_multipass,
             use_custom,
             custom_path,
             custom_label,
@@ -1692,7 +1698,9 @@ impl AuroraApp {
 
     /// Seleção de shader ativa (embutido ou importado) para pintura/persistência.
     fn shader_active(&self) -> Active {
-        if self.use_custom {
+        if let Some(mp) = self.shader_multipass {
+            Active::Multipass(mp)
+        } else if self.use_custom {
             Active::Custom
         } else {
             Active::Builtin(self.shader_kind)
@@ -1722,7 +1730,9 @@ impl AuroraApp {
                 );
                 ui.separator();
                 if self.shader.is_some() {
-                    let active_label = if self.use_custom {
+                    let active_label = if let Some(mp) = self.shader_multipass {
+                        mp.label()
+                    } else if self.use_custom {
                         self.custom_label.as_str()
                     } else {
                         self.shader_kind.label()
@@ -1731,9 +1741,19 @@ impl AuroraApp {
                         .selected_text(active_label)
                         .show_ui(ui, |ui| {
                             for kind in ShaderKind::ALL {
-                                let sel = !self.use_custom && self.shader_kind == kind;
+                                let sel = self.shader_multipass.is_none()
+                                    && !self.use_custom
+                                    && self.shader_kind == kind;
                                 if ui.selectable_label(sel, kind.label()).clicked() {
                                     self.shader_kind = kind;
+                                    self.use_custom = false;
+                                    self.shader_multipass = None;
+                                }
+                            }
+                            for mp in MultipassKind::ALL {
+                                let sel = self.shader_multipass == Some(mp);
+                                if ui.selectable_label(sel, mp.label()).clicked() {
+                                    self.shader_multipass = Some(mp);
                                     self.use_custom = false;
                                 }
                             }
@@ -1746,6 +1766,7 @@ impl AuroraApp {
                                     .clicked()
                             {
                                 self.use_custom = true;
+                                self.shader_multipass = None;
                             }
                         });
                     if ui.button("Importar .frag…").clicked() {
@@ -2142,7 +2163,9 @@ impl eframe::App for AuroraApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("input_config", self.input.serialize());
         storage.set_string("video_scale", format!("{:.0}", self.scale));
-        if self.use_custom {
+        if let Some(mp) = self.shader_multipass {
+            storage.set_string("video_shader", mp.key().to_string());
+        } else if self.use_custom {
             storage.set_string("video_shader", "custom".to_string());
             if let Some(p) = &self.custom_path {
                 storage.set_string("video_shader_path", p.display().to_string());
