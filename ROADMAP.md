@@ -2,7 +2,7 @@
 
 > Emulador de Game Boy Advance multiplataforma (Windows, Linux, Android) com modo diferencial **Shiny Hunter** para automação de caça a Pokémon shiny.
 
-_Última atualização: 2026-07-03_
+_Última atualização: 2026-07-15_
 
 > O estado atual do projeto vive na seção **8. Status atual**; o trabalho não
 > segue ordem linear — pegue a fase/etapa que fizer sentido. Mantenha este
@@ -209,7 +209,7 @@ fazem sentido.
 - [X] **Integer scaling + aspect lock** nas duas frentes — desktop com escala
       inteira persistida; Android com letterbox em múltiplo inteiro de 240×160.
 - [X] **Shaders** (formato próprio single-pass, "shader-como-dado"): pipeline +
-      embutidos **scanlines / LCD-grid / CRT** entregues ponta a ponta, mais
+      embutidos **scanlines / LCD-grid / LCD3x / CRT** entregues ponta a ponta, mais
       **importar `.frag` de arquivo** (efeito "Custom"). Fonte canônica única em
       `assets/shaders/` (contrato de uniforms documentado no README); desktop via
       callback `egui_glow` (glow), Android via GLES20; seletor + custom persistidos
@@ -384,7 +384,7 @@ Otimizações estruturais do interpretador, medidas em release headless.
   Shiny Hunter em retrato — tudo entregue. Falta só APK assinado / distribuição.
 - [~] Fase 8 — Polimento/apresentação: integer scaling + aspect lock nas duas
   frentes; **shaders** (pipeline "shader-como-dado" single-pass, embutidos
-  scanlines/LCD-grid/CRT + importar `.frag` "Custom", seletor persistido) e
+  scanlines/LCD-grid/LCD3x/CRT + importar `.frag` "Custom", seletor persistido) e
   **filtros de upscale HQ2x/3x/4x** (crate `auroragba-scale` sobre `hqx`) fechados
   ponta a ponta. Próximos: xBRZ, cheats, i18n.
 - [X] Fase 9 — Performance: batch da PPU + fast-path do bus (×1,43) + batch dos

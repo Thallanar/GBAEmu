@@ -61,4 +61,6 @@ Um shader importado aparece como **Custom** no seletor, ao lado dos embutidos.
   vale ~55% de brilho; sensação CRT/"dark".
 - `lcd-grid.frag` — grade de LCD (escurece nas bordas de cada pixel da fonte, em
   x e y); imita a matriz de pontos do LCD do GBA.
+- `lcd3x.frag` — porte single-pass do `lcd3x` do libretro: faixas de subpixel RGB
+  por coluna (senoide defasada por canal) + leve modulação por linha.
 - `crt.frag` — scanlines + leve aperture grille nas colunas + vinheta nas bordas.
