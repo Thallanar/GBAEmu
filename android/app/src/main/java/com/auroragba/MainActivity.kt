@@ -93,6 +93,7 @@ class MainActivity : Activity() {
             "none" to "Nenhum",
             "scanlines" to "Scanlines",
             "lcd-grid" to "LCD grid",
+            "lcd3x" to "LCD3x",
             "crt" to "CRT",
         )
         // Porta TCP padrão do link (igual ao desktop: `link::DEFAULT_PORT`).

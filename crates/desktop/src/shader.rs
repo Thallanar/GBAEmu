@@ -17,6 +17,7 @@ pub enum ShaderKind {
     None,
     Scanlines,
     LcdGrid,
+    Lcd3x,
     Crt,
 }
 
@@ -35,10 +36,11 @@ impl Default for Active {
 }
 
 impl ShaderKind {
-    pub const ALL: [ShaderKind; 4] = [
+    pub const ALL: [ShaderKind; 5] = [
         ShaderKind::None,
         ShaderKind::Scanlines,
         ShaderKind::LcdGrid,
+        ShaderKind::Lcd3x,
         ShaderKind::Crt,
     ];
 
@@ -48,6 +50,7 @@ impl ShaderKind {
             ShaderKind::None => "Nenhum",
             ShaderKind::Scanlines => "Scanlines",
             ShaderKind::LcdGrid => "LCD grid",
+            ShaderKind::Lcd3x => "LCD3x",
             ShaderKind::Crt => "CRT",
         }
     }
@@ -58,6 +61,7 @@ impl ShaderKind {
             ShaderKind::None => "none",
             ShaderKind::Scanlines => "scanlines",
             ShaderKind::LcdGrid => "lcd-grid",
+            ShaderKind::Lcd3x => "lcd3x",
             ShaderKind::Crt => "crt",
         }
     }
@@ -75,6 +79,7 @@ impl ShaderKind {
             ShaderKind::None => include_str!("../../../assets/shaders/none.frag"),
             ShaderKind::Scanlines => include_str!("../../../assets/shaders/scanlines.frag"),
             ShaderKind::LcdGrid => include_str!("../../../assets/shaders/lcd-grid.frag"),
+            ShaderKind::Lcd3x => include_str!("../../../assets/shaders/lcd3x.frag"),
             ShaderKind::Crt => include_str!("../../../assets/shaders/crt.frag"),
         }
     }
