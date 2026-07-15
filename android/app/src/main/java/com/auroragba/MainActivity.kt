@@ -107,6 +107,11 @@ class MainActivity : Activity() {
             "lcd3x" to "LCD3x",
             "crt" to "CRT",
         )
+
+        // Efeitos multipass: `key` casa com o manifesto `<key>.mpass` nos assets
+        // (encadeia vários `.frag`; ver assets/shaders/README.md). Aparecem no mesmo
+        // seletor de shader e persistem pela mesma chave (`currentShader`).
+        val MULTIPASS = arrayOf("blur" to "Blur")
         // Porta TCP padrão do link (igual ao desktop: `link::DEFAULT_PORT`).
         const val LINK_PORT = 7777
 
@@ -359,6 +364,7 @@ class MainActivity : Activity() {
         when {
             s == "custom" -> if (customShaderSrc != null) currentShader = "custom"
             SHADERS.any { it.first == s } -> currentShader = s
+            MULTIPASS.any { it.first == s } -> currentShader = s
         }
     }
 
@@ -372,8 +378,9 @@ class MainActivity : Activity() {
 
     /** Menu de seleção de shader: troca o efeito, persiste e recompila na thread GL. */
     private fun shaderMenu() {
-        // Embutidos + (se importado) a entrada "Custom".
+        // Embutidos single-pass + multipass + (se importado) a entrada "Custom".
         val entries = SHADERS.toMutableList()
+        entries.addAll(MULTIPASS)
         if (customShaderSrc != null) entries.add("custom" to "Custom: $customShaderName")
         val labels = entries.map { it.second }.toTypedArray()
         val cur = entries.indexOfFirst { it.first == currentShader }.coerceAtLeast(0)
@@ -988,7 +995,7 @@ class MainActivity : Activity() {
         val shaderLabel = if (currentShader == "custom") {
             "Custom"
         } else {
-            SHADERS.firstOrNull { it.first == currentShader }?.second ?: "Nenhum"
+            (SHADERS + MULTIPASS).firstOrNull { it.first == currentShader }?.second ?: "Nenhum"
         }
         val shaderItem = "🎨 Shader ($shaderLabel)"
         val upscaleLabel = UPSCALES.firstOrNull { it.first == currentUpscale }?.third ?: "Nenhum"
@@ -1560,6 +1567,28 @@ class MainActivity : Activity() {
         null
     }
 
+    /** Um passe compilado de um efeito multipass + como sua saída é amostrada. */
+    private class MpPass(
+        val program: Int,
+        val posLoc: Int,
+        val texLoc: Int,
+        val inputLoc: Int,
+        val outputLoc: Int,
+        val frameLoc: Int,
+        val scale: Int,
+        val filter: Int,
+    )
+
+    /** Textura intermediária (destino de um passe não-final): FBO + textura + tamanho. */
+    private class MpTarget(val fbo: Int, val tex: Int, val w: Int, val h: Int)
+
+    /** Efeito multipass: N passes + (N-1) alvos intermediários (o último vai à tela). */
+    private class Multipass(val passes: List<MpPass>) {
+        var targets: List<MpTarget> = emptyList()
+        var srcW = -1
+        var srcH = -1
+    }
+
     /**
      * Renderer GL: roda o loop de emulação em `onDrawFrame` (thread GL). Envia o
      * framebuffer do core como textura 240×160 (`GL_NEAREST`, pixel art nítido) e
@@ -1582,6 +1611,11 @@ class MainActivity : Activity() {
         // Retângulo do letterbox (integer scaling), calculado em onSurfaceChanged.
         private var vw = 0
         private var vh = 0
+        // Tamanho da surface (pra restaurar o viewport de letterbox após os passes).
+        private var surfaceW = 0
+        private var surfaceH = 0
+        // Efeito multipass ativo (não-nulo quando currentShader é chave de MULTIPASS).
+        private var multipass: Multipass? = null
         // Fator de upscale com que a textura está alocada. Quando difere de
         // `upscaleFactor`, a textura é realocada com as dimensões novas.
         private var texFactor = 1
@@ -1622,6 +1656,8 @@ class MainActivity : Activity() {
             val s = maxOf(1, minOf(width / W, height / H))
             vw = W * s
             vh = H * s
+            surfaceW = width
+            surfaceH = height
             GLES20.glViewport((width - vw) / 2, (height - vh) / 2, vw, vh)
 
             // Sinal preciso de cadência: avisa o compositor que esta surface
@@ -1758,21 +1794,27 @@ class MainActivity : Activity() {
 
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             if (romLoaded) {
-                GLES20.glUseProgram(program)
-                // Uniforms do contrato (no-op se o efeito não os declara). O input
-                // é o tamanho da textura, que cresce com o fator de upscale.
-                GLES20.glUniform2f(inputLoc, (W * texFactor).toFloat(), (H * texFactor).toFloat())
-                GLES20.glUniform2f(outputLoc, vw.toFloat(), vh.toFloat())
-                GLES20.glUniform1i(frameLoc, frames)
-                quad.position(0)
-                GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 16, quad)
-                GLES20.glEnableVertexAttribArray(posLoc)
-                quad.position(2)
-                GLES20.glVertexAttribPointer(texLoc, 2, GLES20.GL_FLOAT, false, 16, quad)
-                GLES20.glEnableVertexAttribArray(texLoc)
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
-                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                val mp = multipass
+                if (mp != null) {
+                    // Multipass: fonte = textura já carregada (240·f × 160·f).
+                    drawMultipass(mp, texId, W * texFactor, H * texFactor)
+                } else {
+                    GLES20.glUseProgram(program)
+                    // Uniforms do contrato (no-op se o efeito não os declara). O input
+                    // é o tamanho da textura, que cresce com o fator de upscale.
+                    GLES20.glUniform2f(inputLoc, (W * texFactor).toFloat(), (H * texFactor).toFloat())
+                    GLES20.glUniform2f(outputLoc, vw.toFloat(), vh.toFloat())
+                    GLES20.glUniform1i(frameLoc, frames)
+                    quad.position(0)
+                    GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 16, quad)
+                    GLES20.glEnableVertexAttribArray(posLoc)
+                    quad.position(2)
+                    GLES20.glVertexAttribPointer(texLoc, 2, GLES20.GL_FLOAT, false, 16, quad)
+                    GLES20.glEnableVertexAttribArray(texLoc)
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                }
             }
 
             // Pacing: durante a caça, sem áudio e sem sleep — o vsync do
@@ -1806,8 +1848,15 @@ class MainActivity : Activity() {
             return ids[0]
         }
 
-        /** (Re)compila o programa do shader atual e recaptura attrib/uniform locations. */
+        /** (Re)compila o efeito atual (single-pass ou multipass) e recaptura locations. */
         fun rebuildProgram() {
+            releaseMultipass()
+            // Efeito multipass: compila a cadeia e para por aqui (o single-pass
+            // `program` fica ocioso). Se falhar, cai no passthrough single-pass.
+            if (MULTIPASS.any { it.first == currentShader }) {
+                multipass = buildMultipass(currentShader)
+                if (multipass != null) return
+            }
             if (program != 0) GLES20.glDeleteProgram(program)
             program = buildProgram(currentShader)
             posLoc = GLES20.glGetAttribLocation(program, "aPos")
@@ -1836,7 +1885,11 @@ class MainActivity : Activity() {
             }
         }
 
-        private fun buildProgram(shaderKey: String): Int {
+        private fun buildProgram(shaderKey: String): Int =
+            buildProgramFromBody(loadShaderBody(shaderKey))
+
+        /** Compila VS + (preâmbulo GLES + corpo `effect` + main) e devolve o programa. */
+        private fun buildProgramFromBody(body: String): Int {
             val vs = compileShader(
                 GLES20.GL_VERTEX_SHADER,
                 """
@@ -1862,7 +1915,7 @@ class MainActivity : Activity() {
             val fsFooter = "\nvoid main() { gl_FragColor = effect(vTex); }\n"
             val fs = compileShader(
                 GLES20.GL_FRAGMENT_SHADER,
-                "$fsHeader\n${loadShaderBody(shaderKey)}$fsFooter",
+                "$fsHeader\n$body$fsFooter",
             )
             val prog = GLES20.glCreateProgram()
             GLES20.glAttachShader(prog, vs)
@@ -1876,6 +1929,179 @@ class MainActivity : Activity() {
             GLES20.glDeleteShader(vs)
             GLES20.glDeleteShader(fs)
             return prog
+        }
+
+        /** Lê o corpo `effect` de um `.frag` dos assets pelo nome exato ("blur-h.frag"). */
+        private fun loadFragFile(name: String): String =
+            try {
+                assets.open(name).bufferedReader().use { it.readText() }
+            } catch (e: Exception) {
+                Log.e(TAG, "frag '$name' (multipass) não encontrado: $e")
+                "vec4 effect(vec2 uv) { return SAMPLE(uTex, uv); }"
+            }
+
+        /** Parse do manifesto `.mpass` em passes ordenados (frag, scale, filter). */
+        private fun parseManifest(src: String): List<Triple<String, Int, Int>> {
+            val out = ArrayList<Pair<Int, Triple<String, Int, Int>>>()
+            for (raw in src.lines()) {
+                val line = raw.trim()
+                if (line.isEmpty() || line.startsWith("#")) continue
+                val eq = line.indexOf('=')
+                if (eq < 0) continue
+                val idx = line.substring(0, eq).trim().removePrefix("pass").toIntOrNull() ?: continue
+                val parts = line.substring(eq + 1).split(';').map { it.trim() }
+                val frag = parts.getOrNull(0).orEmpty()
+                if (frag.isEmpty()) continue
+                var scale = 1
+                var filter = GLES20.GL_NEAREST
+                for (p in parts.drop(1)) {
+                    val kv = p.split('=')
+                    if (kv.size < 2) continue
+                    when (kv[0].trim()) {
+                        "scale" -> scale = kv[1].trim().toIntOrNull()?.coerceAtLeast(1) ?: 1
+                        "filter" ->
+                            filter = if (kv[1].trim() == "linear") GLES20.GL_LINEAR else GLES20.GL_NEAREST
+                    }
+                }
+                out.add(idx to Triple(frag, scale, filter))
+            }
+            return out.sortedBy { it.first }.map { it.second }
+        }
+
+        /** Compila um efeito multipass a partir do manifesto `<key>.mpass`. */
+        private fun buildMultipass(key: String): Multipass? {
+            val manifest = try {
+                assets.open("$key.mpass").bufferedReader().use { it.readText() }
+            } catch (e: Exception) {
+                Log.e(TAG, "mpass '$key' não encontrado: $e")
+                return null
+            }
+            val specs = parseManifest(manifest)
+            if (specs.isEmpty()) {
+                Log.e(TAG, "mpass '$key' sem passes")
+                return null
+            }
+            val passes = specs.map { (frag, scale, filter) ->
+                val prog = buildProgramFromBody(loadFragFile(frag))
+                MpPass(
+                    prog,
+                    GLES20.glGetAttribLocation(prog, "aPos"),
+                    GLES20.glGetAttribLocation(prog, "aTex"),
+                    GLES20.glGetUniformLocation(prog, "uInputSize"),
+                    GLES20.glGetUniformLocation(prog, "uOutputSize"),
+                    GLES20.glGetUniformLocation(prog, "uFrameCount"),
+                    scale,
+                    filter,
+                )
+            }
+            return Multipass(passes)
+        }
+
+        /** Cria uma textura RGBA8 `w`×`h` + FBO. `null` se o FBO não ficar completo. */
+        private fun createTarget(w: Int, h: Int, filter: Int): MpTarget? {
+            val tex = IntArray(1)
+            GLES20.glGenTextures(1, tex, 0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex[0])
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, filter)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, filter)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexImage2D(
+                GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0,
+                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null,
+            )
+            val fbo = IntArray(1)
+            GLES20.glGenFramebuffers(1, fbo, 0)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo[0])
+            GLES20.glFramebufferTexture2D(
+                GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, tex[0], 0,
+            )
+            val complete =
+                GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) == GLES20.GL_FRAMEBUFFER_COMPLETE
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            if (!complete) {
+                Log.e(TAG, "FBO multipass incompleto ${w}x$h")
+                GLES20.glDeleteFramebuffers(1, fbo, 0)
+                GLES20.glDeleteTextures(1, tex, 0)
+                return null
+            }
+            return MpTarget(fbo[0], tex[0], w, h)
+        }
+
+        /** (Re)aloca os N-1 alvos intermediários quando o tamanho da fonte muda. */
+        private fun ensureTargets(mp: Multipass, srcW: Int, srcH: Int) {
+            if (mp.srcW == srcW && mp.srcH == srcH && mp.targets.size == mp.passes.size - 1) return
+            for (t in mp.targets) {
+                GLES20.glDeleteFramebuffers(1, intArrayOf(t.fbo), 0)
+                GLES20.glDeleteTextures(1, intArrayOf(t.tex), 0)
+            }
+            val list = ArrayList<MpTarget>()
+            for (i in 0 until mp.passes.size - 1) {
+                val s = mp.passes[i].scale
+                val t = createTarget(srcW * s, srcH * s, mp.passes[i].filter) ?: break
+                list.add(t)
+            }
+            mp.targets = list
+            mp.srcW = srcW
+            mp.srcH = srcH
+        }
+
+        /** Desenha um efeito multipass: passes 0..n-2 em FBOs, o último na tela. */
+        private fun drawMultipass(mp: Multipass, srcTex: Int, srcW: Int, srcH: Int) {
+            ensureTargets(mp, srcW, srcH)
+            if (mp.targets.size != mp.passes.size - 1) return // falha ao alocar FBOs
+            val n = mp.passes.size
+            var inTex = srcTex
+            var inW = srcW
+            var inH = srcH
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            for (i in 0 until n) {
+                val isLast = i == n - 1
+                val pass = mp.passes[i]
+                val outW: Int
+                val outH: Int
+                if (isLast) {
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+                    GLES20.glViewport((surfaceW - vw) / 2, (surfaceH - vh) / 2, vw, vh)
+                    outW = vw
+                    outH = vh
+                } else {
+                    val t = mp.targets[i]
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, t.fbo)
+                    GLES20.glViewport(0, 0, t.w, t.h)
+                    outW = t.w
+                    outH = t.h
+                }
+                GLES20.glUseProgram(pass.program)
+                GLES20.glUniform2f(pass.inputLoc, inW.toFloat(), inH.toFloat())
+                GLES20.glUniform2f(pass.outputLoc, outW.toFloat(), outH.toFloat())
+                GLES20.glUniform1i(pass.frameLoc, frames)
+                quad.position(0)
+                GLES20.glVertexAttribPointer(pass.posLoc, 2, GLES20.GL_FLOAT, false, 16, quad)
+                GLES20.glEnableVertexAttribArray(pass.posLoc)
+                quad.position(2)
+                GLES20.glVertexAttribPointer(pass.texLoc, 2, GLES20.GL_FLOAT, false, 16, quad)
+                GLES20.glEnableVertexAttribArray(pass.texLoc)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inTex)
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                if (!isLast) {
+                    val t = mp.targets[i]
+                    inTex = t.tex
+                    inW = t.w
+                    inH = t.h
+                }
+            }
+        }
+
+        /** Libera programas e FBOs do multipass atual (troca de shader / recriação). */
+        private fun releaseMultipass() {
+            val mp = multipass ?: return
+            for (p in mp.passes) GLES20.glDeleteProgram(p.program)
+            for (t in mp.targets) {
+                GLES20.glDeleteFramebuffers(1, intArrayOf(t.fbo), 0)
+                GLES20.glDeleteTextures(1, intArrayOf(t.tex), 0)
+            }
+            multipass = null
         }
 
         private fun compileShader(type: Int, src: String): Int {

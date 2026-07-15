@@ -1,0 +1,5 @@
+# blur — gaussiano separável de 2 passes (horizontal, depois vertical).
+# Efeito multipass de exemplo/prova do motor. Formato do manifesto no README.md.
+passes = 2
+pass0 = blur-h.frag ; scale = 1 ; filter = linear
+pass1 = blur-v.frag ; scale = 1 ; filter = linear

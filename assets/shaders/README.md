@@ -39,8 +39,9 @@ Uniforms disponíveis:
 - Use `SAMPLE(uTex, uv)` para ler a imagem; não chame `texture2D`/`texture`
   direto (muda entre as duas frentes).
 - Mantenha precisão `mediump`-amigável (o Android roda em `mediump`).
-- Single-pass apenas. Multipass / presets `.glslp` do RetroArch são um stretch
-  goal futuro e não fazem parte deste formato.
+- Um `.frag` é sempre **single-pass**. Efeitos de **múltiplos passes** existem
+  via um manifesto `.mpass` que encadeia vários `.frag` (ver abaixo); presets
+  `.glslp` do RetroArch continuam fora deste formato.
 
 ## Importar um `.frag` próprio
 
@@ -54,6 +55,33 @@ mesmo contrato (só a função `effect`, sem `#version`/`precision`/`main`):
 
 Um shader importado aparece como **Custom** no seletor, ao lado dos embutidos.
 
+## Efeitos multipass (`.mpass`)
+
+Um efeito de múltiplos passes é um **manifesto** de texto `.mpass` que encadeia
+vários `.frag` deste mesmo formato. Cada passe renderiza numa textura intermediária
+(ping-pong de framebuffer); o **último passe desenha na tela**. Fonte canônica
+única, igual aos `.frag` (desktop embute; Android lê dos assets).
+
+Formato do manifesto — `key = value` por linha, `#` é comentário:
+
+```
+passes = 2
+pass0 = blur-h.frag ; scale = 1 ; filter = linear
+pass1 = blur-v.frag ; scale = 1 ; filter = linear
+```
+
+- `passes` — quantidade de passes.
+- `passN` — `<arquivo.frag> ; scale = <int> ; filter = nearest|linear`.
+  - `scale` — fator inteiro da textura de **saída** daquele passe (× tamanho da
+    fonte). O passe final ignora `scale` (desenha direto no retângulo da tela).
+  - `filter` — filtro (min/mag) da textura de saída daquele passe, isto é, como o
+    passe seguinte a amostra.
+
+**ABI de um passe** — igual à de um `.frag` single-pass, com uma diferença em
+`uTex`: no **passe 0** ele é o framebuffer da fonte; no **passe k** é a saída do
+passe `k-1`. `uInputSize`/`uOutputSize` valem por-passe (entrada/saída daquele
+passe). `SAMPLE`/`uFrameCount` inalterados.
+
 ## Efeitos atuais
 
 - `none.frag` — passthrough (sem efeito).
@@ -64,3 +92,8 @@ Um shader importado aparece como **Custom** no seletor, ao lado dos embutidos.
 - `lcd3x.frag` — porte single-pass do `lcd3x` do libretro: faixas de subpixel RGB
   por coluna (senoide defasada por canal) + leve modulação por linha.
 - `crt.frag` — scanlines + leve aperture grille nas colunas + vinheta nas bordas.
+
+Multipass:
+
+- `blur.mpass` — blur gaussiano separável de 2 passes (`blur-h.frag` +
+  `blur-v.frag`); efeito de prova do motor multipass.

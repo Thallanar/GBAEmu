@@ -21,11 +21,47 @@ pub enum ShaderKind {
     Crt,
 }
 
-/// Seleção ativa de efeito: um dos embutidos ou o shader importado de arquivo.
+/// Efeitos **multipass** (vários passes encadeados; ver `assets/shaders/*.mpass`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultipassKind {
+    Blur,
+}
+
+impl MultipassKind {
+    pub const ALL: [MultipassKind; 1] = [MultipassKind::Blur];
+
+    /// Rótulo amigável (UI).
+    pub fn label(self) -> &'static str {
+        match self {
+            MultipassKind::Blur => "Blur",
+        }
+    }
+
+    /// Chave estável para persistência (não colide com as de `ShaderKind`).
+    pub fn key(self) -> &'static str {
+        match self {
+            MultipassKind::Blur => "blur",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<Self> {
+        MultipassKind::ALL.into_iter().find(|k| k.key() == s)
+    }
+
+    /// Manifesto `.mpass` (fonte canônica em `assets/shaders/<key>.mpass`).
+    fn manifest(self) -> &'static str {
+        match self {
+            MultipassKind::Blur => include_str!("../../../assets/shaders/blur.mpass"),
+        }
+    }
+}
+
+/// Seleção ativa de efeito: um embutido single-pass, um multipass ou o importado.
 /// `Copy` de propósito — vai por valor pro callback de pintura.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Active {
     Builtin(ShaderKind),
+    Multipass(MultipassKind),
     Custom,
 }
 
@@ -112,11 +148,113 @@ struct Program {
     u_frame: Option<glow::UniformLocation>,
 }
 
+/// Um passe compilado de um efeito multipass + como sua saída é amostrada.
+struct Pass {
+    program: Program,
+    /// Fator inteiro da textura de saída (× tamanho da fonte). Ignorado no último.
+    scale: i32,
+    /// Filtro (min/mag) da textura de saída deste passe: `NEAREST` ou `LINEAR`.
+    filter: i32,
+}
+
+/// Textura intermediária (destino de um passe não-final): FBO + textura + tamanho.
+struct Target {
+    fbo: glow::Framebuffer,
+    tex: glow::Texture,
+    w: i32,
+    h: i32,
+}
+
+/// Efeito multipass compilado: N passes + (N-1) alvos intermediários (o último
+/// passe desenha na tela). Os alvos são (re)alocados sob demanda por tamanho.
+struct MultipassEffect {
+    passes: Vec<Pass>,
+    targets: Vec<Target>,
+}
+
+/// Espec de um passe lida do manifesto (`frag`, `scale`, `filter`).
+struct PassSpec {
+    frag: String,
+    scale: i32,
+    filter: i32,
+}
+
+/// Corpo `effect(...)` de um `.frag` referenciado por um manifesto multipass.
+/// Como o desktop embute tudo via `include_str!`, resolvemos o nome do arquivo
+/// para o corpo embutido por um match estático.
+fn multipass_frag_body(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "blur-h.frag" => include_str!("../../../assets/shaders/blur-h.frag"),
+        "blur-v.frag" => include_str!("../../../assets/shaders/blur-v.frag"),
+        _ => return None,
+    })
+}
+
+/// Faz o parse de um manifesto `.mpass` numa lista ordenada de passes. Formato
+/// (ver `assets/shaders/README.md`): linhas `passN = <frag> ; scale = <int> ;
+/// filter = nearest|linear`; `#` é comentário. Ordena por `N`.
+fn parse_manifest(src: &str) -> Result<Vec<PassSpec>, String> {
+    let mut passes: Vec<(usize, PassSpec)> = Vec::new();
+    for line in src.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, val)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, val) = (key.trim(), val.trim());
+        let Some(idx) = key
+            .strip_prefix("pass")
+            .and_then(|n| n.parse::<usize>().ok())
+        else {
+            continue; // ex.: `passes = N` (informativo) e outras chaves são ignoradas.
+        };
+        // val = "blur-h.frag ; scale = 1 ; filter = linear"
+        let mut parts = val.split(';').map(str::trim);
+        let frag = parts.next().unwrap_or("").to_string();
+        if frag.is_empty() {
+            return Err(format!("passe {idx} sem arquivo .frag"));
+        }
+        let (mut scale, mut filter) = (1, glow::NEAREST as i32);
+        for p in parts {
+            if let Some((k, v)) = p.split_once('=') {
+                match k.trim() {
+                    "scale" => scale = v.trim().parse().unwrap_or(1).max(1),
+                    "filter" => {
+                        filter = if v.trim() == "linear" {
+                            glow::LINEAR as i32
+                        } else {
+                            glow::NEAREST as i32
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        passes.push((
+            idx,
+            PassSpec {
+                frag,
+                scale,
+                filter,
+            },
+        ));
+    }
+    if passes.is_empty() {
+        return Err("manifesto sem passes".into());
+    }
+    passes.sort_by_key(|(i, _)| *i);
+    Ok(passes.into_iter().map(|(_, s)| s).collect())
+}
+
 /// Renderizador glow: dono da textura do framebuffer, do quad e dos programas.
 pub struct ShaderRenderer {
     tex: glow::Texture,
     vao: glow::VertexArray,
     programs: Vec<(ShaderKind, Program)>,
+    /// Efeitos multipass compilados (passes + alvos intermediários).
+    multipass: Vec<(MultipassKind, MultipassEffect)>,
     /// Programa do shader importado de arquivo (`None` até o usuário carregar um).
     custom: Option<Program>,
     /// Dimensões atualmente alocadas na textura. Mudam quando um filtro de
@@ -197,10 +335,19 @@ impl ShaderRenderer {
                 }
             }
 
+            let mut multipass = Vec::new();
+            for kind in MultipassKind::ALL {
+                match build_multipass(gl, kind) {
+                    Ok(e) => multipass.push((kind, e)),
+                    Err(e) => log::error!("multipass {:?} falhou: {e}", kind),
+                }
+            }
+
             Self {
                 tex,
                 vao,
                 programs,
+                multipass,
                 custom: None,
                 tex_w: SCREEN_WIDTH as i32,
                 tex_h: SCREEN_HEIGHT as i32,
@@ -256,20 +403,28 @@ impl ShaderRenderer {
         }
     }
 
-    /// Desenha o quad com o efeito `kind`. O `glViewport` já foi setado pelo
-    /// egui_glow para o retângulo do callback; só desenhamos.
+    /// Desenha o efeito `active` no `viewport` (`[x, y, w, h]`, em pixels, que o
+    /// egui_glow já setou pro retângulo do callback). Single-pass desenha direto;
+    /// multipass renderiza os passes intermediários em FBOs e o último aqui.
     pub fn paint(
-        &self,
+        &mut self,
         gl: &glow::Context,
         active: Active,
         input_size: [f32; 2],
-        output_size: [f32; 2],
+        viewport: [i32; 4],
         frame_count: i32,
     ) {
+        if let Active::Multipass(kind) = active {
+            self.paint_multipass(gl, kind, viewport, frame_count);
+            return;
+        }
+
+        let output_size = [viewport[2] as f32, viewport[3] as f32];
         // Programa do efeito pedido; cai no passthrough (primeiro embutido
         // disponível) se o efeito não compilou ou o custom não foi carregado.
         let prog = match active {
             Active::Custom => self.custom.as_ref(),
+            Active::Multipass(_) => unreachable!(),
             Active::Builtin(kind) => self
                 .programs
                 .iter()
@@ -292,6 +447,195 @@ impl ShaderRenderer {
             gl.bind_vertex_array(None);
         }
     }
+
+    /// Renderiza um efeito multipass: passes 0..n-1 vão pra FBOs intermediários
+    /// (ping-pong), o passe final desenha no `viewport`/FBO que o egui setou.
+    /// Salva e restaura o binding de FBO, o viewport e o scissor do egui.
+    fn paint_multipass(
+        &mut self,
+        gl: &glow::Context,
+        kind: MultipassKind,
+        viewport: [i32; 4],
+        frame_count: i32,
+    ) {
+        let (tex, vao) = (self.tex, self.vao);
+        // Fonte = a textura já carregada por `upload` (240×160, ou maior com HQx/xBRZ).
+        let (src_w, src_h) = (self.tex_w, self.tex_h);
+        let Some((_, effect)) = self.multipass.iter_mut().find(|(k, _)| *k == kind) else {
+            return;
+        };
+        let n = effect.passes.len();
+        if n == 0 {
+            return;
+        }
+        if !ensure_targets(gl, effect, src_w, src_h) {
+            return; // falha ao alocar FBOs — não desenha (evita estado inconsistente).
+        }
+
+        unsafe {
+            // Estado do egui a restaurar depois.
+            let prev_fbo =
+                std::num::NonZeroU32::new(gl.get_parameter_i32(glow::FRAMEBUFFER_BINDING) as u32)
+                    .map(glow::NativeFramebuffer);
+            let scissor_was_on = gl.is_enabled(glow::SCISSOR_TEST);
+            gl.disable(glow::SCISSOR_TEST);
+
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_vertex_array(Some(vao));
+
+            let mut in_tex = tex;
+            let (mut in_w, mut in_h) = (src_w, src_h);
+            for i in 0..n {
+                let is_last = i == n - 1;
+                let (out_w, out_h) = if is_last {
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, prev_fbo);
+                    gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+                    (viewport[2], viewport[3])
+                } else {
+                    let t = &effect.targets[i];
+                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(t.fbo));
+                    gl.viewport(0, 0, t.w, t.h);
+                    (t.w, t.h)
+                };
+                let p = &effect.passes[i];
+                gl.use_program(Some(p.program.program));
+                gl.uniform_1_i32(p.program.u_tex.as_ref(), 0);
+                gl.uniform_2_f32(p.program.u_input.as_ref(), in_w as f32, in_h as f32);
+                gl.uniform_2_f32(p.program.u_output.as_ref(), out_w as f32, out_h as f32);
+                gl.uniform_1_i32(p.program.u_frame.as_ref(), frame_count);
+                gl.bind_texture(glow::TEXTURE_2D, Some(in_tex));
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                if !is_last {
+                    let t = &effect.targets[i];
+                    in_tex = t.tex;
+                    in_w = t.w;
+                    in_h = t.h;
+                }
+            }
+
+            gl.bind_vertex_array(None);
+            // Restaura o estado do egui (o último passe já rebindou prev_fbo).
+            gl.bind_framebuffer(glow::FRAMEBUFFER, prev_fbo);
+            gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+            if scissor_was_on {
+                gl.enable(glow::SCISSOR_TEST);
+            }
+        }
+    }
+}
+
+/// Garante que `effect` tem N-1 alvos com o tamanho certo (`fonte × scale` por
+/// passe), realocando se o tamanho da fonte mudou. Devolve `false` se algum FBO
+/// não ficou completo. Chamado a cada frame (no-op quando já está do tamanho).
+fn ensure_targets(
+    gl: &glow::Context,
+    effect: &mut MultipassEffect,
+    src_w: i32,
+    src_h: i32,
+) -> bool {
+    let need = effect.passes.len().saturating_sub(1);
+    let size_of = |i: usize| {
+        let s = effect.passes[i].scale;
+        (src_w * s, src_h * s)
+    };
+    let ok = effect.targets.len() == need
+        && (0..need).all(|i| {
+            let (w, h) = size_of(i);
+            effect.targets[i].w == w && effect.targets[i].h == h
+        });
+    if ok {
+        return true;
+    }
+    unsafe {
+        for t in effect.targets.drain(..) {
+            gl.delete_framebuffer(t.fbo);
+            gl.delete_texture(t.tex);
+        }
+        for i in 0..need {
+            let (w, h) = size_of(i);
+            match create_target(gl, w, h, effect.passes[i].filter) {
+                Some((fbo, tex)) => effect.targets.push(Target { fbo, tex, w, h }),
+                None => {
+                    log::error!("multipass: FBO {i} incompleto ({w}x{h})");
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Cria uma textura RGBA8 `w`×`h` com o `filter` dado + um FBO com ela anexada.
+/// Devolve `None` se o FBO não ficou `FRAMEBUFFER_COMPLETE`.
+unsafe fn create_target(
+    gl: &glow::Context,
+    w: i32,
+    h: i32,
+    filter: i32,
+) -> Option<(glow::Framebuffer, glow::Texture)> {
+    let tex = gl.create_texture().ok()?;
+    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter);
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_WRAP_S,
+        glow::CLAMP_TO_EDGE as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_WRAP_T,
+        glow::CLAMP_TO_EDGE as i32,
+    );
+    gl.tex_image_2d(
+        glow::TEXTURE_2D,
+        0,
+        glow::RGBA as i32,
+        w,
+        h,
+        0,
+        glow::RGBA,
+        glow::UNSIGNED_BYTE,
+        None,
+    );
+    let fbo = gl.create_framebuffer().ok()?;
+    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+    gl.framebuffer_texture_2d(
+        glow::FRAMEBUFFER,
+        glow::COLOR_ATTACHMENT0,
+        glow::TEXTURE_2D,
+        Some(tex),
+        0,
+    );
+    let complete = gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
+    gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+    if complete {
+        Some((fbo, tex))
+    } else {
+        gl.delete_framebuffer(fbo);
+        gl.delete_texture(tex);
+        None
+    }
+}
+
+/// Compila todos os passes de um efeito multipass (reusa `build_program_from_body`).
+fn build_multipass(gl: &glow::Context, kind: MultipassKind) -> Result<MultipassEffect, String> {
+    let specs = parse_manifest(kind.manifest())?;
+    let mut passes = Vec::with_capacity(specs.len());
+    for s in specs {
+        let body = multipass_frag_body(&s.frag)
+            .ok_or_else(|| format!("frag desconhecido no manifesto: {}", s.frag))?;
+        let program = build_program_from_body(gl, body)?;
+        passes.push(Pass {
+            program,
+            scale: s.scale,
+            filter: s.filter,
+        });
+    }
+    Ok(MultipassEffect {
+        passes,
+        targets: Vec::new(),
+    })
 }
 
 /// Compila VS+FS de um embutido e captura as locations dos uniforms.
@@ -355,9 +699,10 @@ pub fn callback(
 ) -> egui::PaintCallback {
     let cb = eframe::egui_glow::CallbackFn::new(move |info, painter| {
         let vp = info.viewport_in_pixels();
-        let output = [vp.width_px as f32, vp.height_px as f32];
-        if let Ok(r) = renderer.lock() {
-            r.paint(painter.gl(), active, input, output, frame_count);
+        // Viewport GL (origem embaixo-à-esquerda): `from_bottom_px` já dá o y certo.
+        let viewport = [vp.left_px, vp.from_bottom_px, vp.width_px, vp.height_px];
+        if let Ok(mut r) = renderer.lock() {
+            r.paint(painter.gl(), active, input, viewport, frame_count);
         }
     });
     egui::PaintCallback {
