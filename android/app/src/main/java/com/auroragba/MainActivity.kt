@@ -81,9 +81,20 @@ class MainActivity : Activity() {
         const val KEY_SHADER_NAME = "shader_name"
         const val KEY_UPSCALE = "upscale"
 
-        // Filtros de upscale (HQx). `first` = fator inteiro (casa com o nativo);
-        // `second` = rótulo na UI. `MAX_UPSCALE` dimensiona o ByteBuffer/textura.
-        val UPSCALES = arrayOf(1 to "Nenhum", 2 to "HQ2x", 3 to "HQ3x", 4 to "HQ4x")
+        // Filtros de upscale. `Triple(key, fator, rótulo)`: `key` casa com
+        // `Upscale::key` do nativo (carrega algoritmo + fator); `fator` dimensiona
+        // a textura no Kotlin; `rótulo` é a UI. HQ2x e xBRZ2x têm o mesmo fator mas
+        // chaves distintas — por isso a seleção é pela chave, não pelo fator.
+        // `MAX_UPSCALE` dimensiona o ByteBuffer/textura pro fator máximo.
+        val UPSCALES = arrayOf(
+            Triple("off", 1, "Nenhum"),
+            Triple("hq2x", 2, "HQ2x"),
+            Triple("hq3x", 3, "HQ3x"),
+            Triple("hq4x", 4, "HQ4x"),
+            Triple("xbrz2x", 2, "xBRZ2x"),
+            Triple("xbrz3x", 3, "xBRZ3x"),
+            Triple("xbrz4x", 4, "xBRZ4x"),
+        )
         const val MAX_UPSCALE = 4
 
         // Efeitos de shader (formato próprio single-pass; fontes em assets/shaders/,
@@ -151,8 +162,11 @@ class MainActivity : Activity() {
     @Volatile private var customShaderSrc: String? = null
     private var customShaderName = "arquivo"
 
-    // Fator de upscale HQx atual (1/2/3/4). Escrito pela UI, lido pela thread GL
-    // pra dimensionar a textura; o algoritmo em si roda no nativo. Persiste.
+    // Chave do filtro de upscale atual ("off"/"hq2x"/"xbrz2x"/…). Estado
+    // primário (carrega algoritmo + fator); é o que vai pro nativo e persiste.
+    @Volatile private var currentUpscale = "off"
+    // Fator geométrico (1/2/3/4) derivado da chave, lido pela thread GL pra
+    // dimensionar a textura. Mantido em sincronia por `applyUpscale`.
     @Volatile private var upscaleFactor = 1
     private lateinit var renderer: GbaRenderer
 
@@ -413,26 +427,44 @@ class MainActivity : Activity() {
         null
     }
 
+    /** Fixa a chave atual e deriva o fator geométrico dela (mantém os dois em sync). */
+    private fun applyUpscale(key: String) {
+        currentUpscale = key
+        upscaleFactor = UPSCALES.firstOrNull { it.first == key }?.second ?: 1
+    }
+
     private fun loadUpscale() {
-        val f = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_UPSCALE, 1)
-        if (UPSCALES.any { it.first == f }) upscaleFactor = f
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        // Migração: versões antigas guardavam o fator como Int. Se for o caso,
+        // mapeia pro HQx equivalente; caso contrário lê a chave nova.
+        val key = try {
+            prefs.getString(KEY_UPSCALE, "off") ?: "off"
+        } catch (e: ClassCastException) {
+            when (prefs.getInt(KEY_UPSCALE, 1)) {
+                2 -> "hq2x"
+                3 -> "hq3x"
+                4 -> "hq4x"
+                else -> "off"
+            }
+        }
+        if (UPSCALES.any { it.first == key }) applyUpscale(key)
     }
 
     private fun saveUpscale() {
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_UPSCALE, upscaleFactor).apply()
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_UPSCALE, currentUpscale).apply()
     }
 
-    /** Menu do filtro de upscale (HQx): troca o fator, persiste e avisa o nativo. */
+    /** Menu do filtro de upscale: troca o algoritmo, persiste e avisa o nativo. */
     private fun upscaleMenu() {
-        val labels = UPSCALES.map { it.second }.toTypedArray()
-        val cur = UPSCALES.indexOfFirst { it.first == upscaleFactor }.coerceAtLeast(0)
+        val labels = UPSCALES.map { it.third }.toTypedArray()
+        val cur = UPSCALES.indexOfFirst { it.first == currentUpscale }.coerceAtLeast(0)
         AlertDialog.Builder(this)
-            .setTitle("Upscale (HQx)")
+            .setTitle("Upscale")
             .setSingleChoiceItems(labels, cur) { dialog, which ->
-                upscaleFactor = UPSCALES[which].first
+                applyUpscale(UPSCALES[which].first)
                 saveUpscale()
-                glView.queueEvent { NativeBridge.setUpscale(handle, upscaleFactor) }
-                toast("Upscale: ${UPSCALES[which].second}")
+                glView.queueEvent { NativeBridge.setUpscale(handle, currentUpscale) }
+                toast("Upscale: ${UPSCALES[which].third}")
                 dialog.dismiss()
             }
             .setNegativeButton("Cancelar", null)
@@ -959,7 +991,7 @@ class MainActivity : Activity() {
             SHADERS.firstOrNull { it.first == currentShader }?.second ?: "Nenhum"
         }
         val shaderItem = "🎨 Shader ($shaderLabel)"
-        val upscaleLabel = UPSCALES.firstOrNull { it.first == upscaleFactor }?.second ?: "Nenhum"
+        val upscaleLabel = UPSCALES.firstOrNull { it.first == currentUpscale }?.third ?: "Nenhum"
         val upscaleItem = "🔍 Upscale ($upscaleLabel)"
         val items = mutableListOf(
             "Carregar ROM", "🔄 Resetar", "Salvar estado", "Carregar estado",
@@ -1564,7 +1596,7 @@ class MainActivity : Activity() {
             // ampliado aqui; a textura acompanha o fator atual.
             buf = ByteBuffer.allocateDirect(W * H * 4 * MAX_UPSCALE * MAX_UPSCALE)
                 .order(ByteOrder.nativeOrder())
-            NativeBridge.setUpscale(handle, upscaleFactor)
+            NativeBridge.setUpscale(handle, currentUpscale)
 
             // Triangle strip: pos.xy + tex.uv por vértice. tex v=0 no topo casa
             // com a linha 0 do framebuffer (topo da imagem GBA).

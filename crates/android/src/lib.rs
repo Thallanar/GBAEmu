@@ -277,21 +277,32 @@ mod android_impl {
         }
     }
 
-    /// Define o filtro de upscale: 1 = nenhum, 2/3/4 = HQ2x/HQ3x/HQ4x. A partir
-    /// do próximo frame, `write_framebuffer` entrega o buffer ampliado; o Kotlin
-    /// dimensiona a textura por `240·f × 160·f`.
+    /// Define o filtro de upscale pela chave do algoritmo (`"off"`, `"hq2x"`,
+    /// `"xbrz3x"`, …; ver [`Upscale::key`]). Chave desconhecida cai em `Off`. A
+    /// partir do próximo frame, `write_framebuffer` entrega o buffer ampliado; o
+    /// Kotlin dimensiona a textura por `240·f × 160·f` (fator derivado da chave).
+    ///
+    /// A chave carrega o algoritmo *e* o fator, então HQ2x e xBRZ2x (mesmo fator,
+    /// filtros diferentes) não colidem — o antigo contrato por `int` não distinguia.
     ///
     /// # Safety
     /// `handle` precisa ser válido.
     #[no_mangle]
     pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_setUpscale(
-        _env: JNIEnv,
+        mut env: JNIEnv,
         _class: JClass,
         handle: jlong,
-        factor: jint,
+        key: JString,
     ) {
+        let key: String = match env.get_string(&key) {
+            Ok(s) => s.into(),
+            Err(e) => {
+                log::error!("setUpscale: chave inválida: {e}");
+                return;
+            }
+        };
         if let Some(emu) = emu(handle) {
-            emu.upscale = Upscale::from_factor(factor);
+            emu.upscale = Upscale::from_key(&key);
         }
     }
 
