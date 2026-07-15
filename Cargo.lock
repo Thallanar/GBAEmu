@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "auroragba-android"
-version = "0.63.1"
+version = "0.64.1"
 dependencies = [
  "android_logger",
  "auroragba-core",
@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "auroragba-core"
-version = "0.63.1"
+version = "0.64.1"
 dependencies = [
  "bincode",
  "bitflags 2.11.1",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "auroragba-desktop"
-version = "0.63.1"
+version = "0.64.1"
 dependencies = [
  "anyhow",
  "auroragba-core",
@@ -650,21 +650,22 @@ dependencies = [
 
 [[package]]
 name = "auroragba-link"
-version = "0.63.1"
+version = "0.64.1"
 dependencies = [
  "auroragba-core",
 ]
 
 [[package]]
 name = "auroragba-scale"
-version = "0.63.1"
+version = "0.64.1"
 dependencies = [
  "hqx",
+ "xbrz-rs",
 ]
 
 [[package]]
 name = "auroragba-shiny"
-version = "0.63.1"
+version = "0.64.1"
 dependencies = [
  "auroragba-core",
  "log",
@@ -1182,6 +1183,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "crossbeam-deque"
+version = "0.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5181e0de7b61eb03a81e347d6dd8797bae9da5146707b51077e2d71a54ec0ceb"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -3307,6 +3327,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5289,6 +5329,17 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "xbrz-rs"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52ecef5cd352fafb429bf4ef0f4f594395bf85bf87523de1b6bc2e3827e0f385"
+dependencies = [
+ "bytemuck",
+ "parking_lot",
+ "rayon",
+]
 
 [[package]]
 name = "xcursor"

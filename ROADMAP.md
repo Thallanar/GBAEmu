@@ -215,11 +215,14 @@ fazem sentido.
       callback `egui_glow` (glow), Android via GLES20; seletor + custom persistidos
       nas duas frentes. _Stretch goal_: compat de presets RetroArch
       (`.glslp`/multipass).
-- [~] Filtros de upscale como alternativa aos shaders: **HQ2x/3x/4x** entregues
-      ponta a ponta (crate `auroragba-scale` sobre `hqx`; desktop amplia na CPU e
-      sobe numa textura de tamanho variável; Android amplia no nativo e o Kotlin
-      redimensiona a textura pelo fator; seletor persistido nas duas frentes).
-      **Falta**: xBRZ (PR separado).
+- [X] Filtros de upscale como alternativa aos shaders: **HQ2x/3x/4x** e
+      **xBRZ2x/3x/4x** entregues ponta a ponta (crate `auroragba-scale` sobre
+      `hqx` + `xbrz-rs`; desktop amplia na CPU e sobe numa textura de tamanho
+      variável; Android amplia no nativo e o Kotlin redimensiona a textura pelo
+      fator; seletor persistido nas duas frentes). O contrato de seleção Android
+      passou de fator-inteiro para **chave do algoritmo** (JNI `setUpscale(String)`),
+      pra HQ e xBRZ do mesmo fator coexistirem. _Futuro_: ScaleFX/Anime4K exigem
+      uma **engine de shader multipass** (ping-pong de framebuffer nas duas frentes).
 - [ ] Bordas / molduras (skins de GBA ao redor da tela)
 
 **Cheats:**
@@ -385,8 +388,9 @@ Otimizações estruturais do interpretador, medidas em release headless.
 - [~] Fase 8 — Polimento/apresentação: integer scaling + aspect lock nas duas
   frentes; **shaders** (pipeline "shader-como-dado" single-pass, embutidos
   scanlines/LCD-grid/LCD3x/CRT + importar `.frag` "Custom", seletor persistido) e
-  **filtros de upscale HQ2x/3x/4x** (crate `auroragba-scale` sobre `hqx`) fechados
-  ponta a ponta. Próximos: xBRZ, cheats, i18n.
+  **filtros de upscale HQ2x/3x/4x + xBRZ2x/3x/4x** (crate `auroragba-scale` sobre
+  `hqx` + `xbrz-rs`; seleção Android por chave de algoritmo no JNI) fechados ponta a
+  ponta. Próximos: engine de shader multipass (destrava ScaleFX/Anime4K), cheats, i18n.
 - [X] Fase 9 — Performance: batch da PPU + fast-path do bus (×1,43) + batch dos
   timers ciclo-exato. Pacing uniforme no desktop tentado e **estacionado**
   (baseline mantido); fast-forward por menu no Android.
