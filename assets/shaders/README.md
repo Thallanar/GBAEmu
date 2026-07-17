@@ -71,16 +71,30 @@ pass1 = blur-v.frag ; scale = 1 ; filter = linear
 ```
 
 - `passes` — quantidade de passes.
-- `passN` — `<arquivo.frag> ; scale = <int> ; filter = nearest|linear`.
+- `passN` — `<arquivo.frag> ; scale = <int> ; filter = nearest|linear ; float =
+  true ; prev = <int>` (só o `.frag` é obrigatório; o resto tem default).
   - `scale` — fator inteiro da textura de **saída** daquele passe (× tamanho da
     fonte). O passe final ignora `scale` (desenha direto no retângulo da tela).
+    Default `1`.
   - `filter` — filtro (min/mag) da textura de saída daquele passe, isto é, como o
-    passe seguinte a amostra.
+    passe seguinte a amostra. Default `nearest`.
+  - `float` — se `true`, a textura de saída é meio-float (RGBA16F) em vez de
+    RGBA8; para passes que guardam **dados** (não cor) sem perder precisão (ex.:
+    métricas do ScaleFX). No Android exige `EXT_color_buffer_half_float` +
+    `OES_texture_half_float`; sem eles o efeito é escondido do menu. Default `false`.
+  - `prev` — índice de um passe **anterior** cuja saída este passe lê em `uPrevTex`
+    (ver ABI abaixo). Default: sem `uPrevTex`.
 
-**ABI de um passe** — igual à de um `.frag` single-pass, com uma diferença em
-`uTex`: no **passe 0** ele é o framebuffer da fonte; no **passe k** é a saída do
-passe `k-1`. `uInputSize`/`uOutputSize` valem por-passe (entrada/saída daquele
-passe). `SAMPLE`/`uFrameCount` inalterados.
+**ABI de um passe** — superset da de um `.frag` single-pass:
+
+- `uTex` — no **passe 0** é o framebuffer da fonte; no **passe k** é a saída do
+  passe `k-1`. `uInputSize` = tamanho dessa entrada.
+- `uOrigTex`/`uOrigSize` — a textura **original** (a fonte da cadeia), disponível
+  em **todos** os passes. Útil pra passes finais que combinam a classificação com a
+  imagem de origem (ex.: reverse-AA do ScaleFX).
+- `uPrevTex`/`uPrevSize` — a saída do passe declarado em `prev = N`. Sem `prev`,
+  `uPrevTex` fica apontando pra fonte (inofensivo; só quem declara deve amostrá-lo).
+- `uOutputSize` = tamanho da saída daquele passe. `SAMPLE`/`uFrameCount` inalterados.
 
 ## Efeitos atuais
 
@@ -97,3 +111,7 @@ Multipass:
 
 - `blur.mpass` — blur gaussiano separável de 2 passes (`blur-h.frag` +
   `blur-v.frag`); efeito de prova do motor multipass.
+- `scalefx.mpass` — ScaleFX (Sp00kyFox, MIT), upscaler de pixel-art de 5 passes
+  (`scalefx-pass0..4.frag`). Preserva texto/curvas melhor que o xBRZ. Usa `float`
+  (pass0/pass1), `prev` (pass2 lê a métrica do pass0) e `uOrigTex` (pass4 mistura
+  com um reverse-AA da imagem original). No Android depende de meio-float.

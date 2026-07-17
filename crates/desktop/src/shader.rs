@@ -25,15 +25,17 @@ pub enum ShaderKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MultipassKind {
     Blur,
+    ScaleFx,
 }
 
 impl MultipassKind {
-    pub const ALL: [MultipassKind; 1] = [MultipassKind::Blur];
+    pub const ALL: [MultipassKind; 2] = [MultipassKind::Blur, MultipassKind::ScaleFx];
 
     /// Rótulo amigável (UI).
     pub fn label(self) -> &'static str {
         match self {
             MultipassKind::Blur => "Blur",
+            MultipassKind::ScaleFx => "ScaleFX",
         }
     }
 
@@ -41,6 +43,7 @@ impl MultipassKind {
     pub fn key(self) -> &'static str {
         match self {
             MultipassKind::Blur => "blur",
+            MultipassKind::ScaleFx => "scalefx",
         }
     }
 
@@ -52,6 +55,7 @@ impl MultipassKind {
     fn manifest(self) -> &'static str {
         match self {
             MultipassKind::Blur => include_str!("../../../assets/shaders/blur.mpass"),
+            MultipassKind::ScaleFx => include_str!("../../../assets/shaders/scalefx.mpass"),
         }
     }
 }
@@ -123,10 +127,17 @@ impl ShaderKind {
 
 /// Preâmbulo do fragment shader no dialeto GL desktop (core 3.30). Resolve os
 /// aliases/uniforms do contrato e fecha com um `main()` que chama `effect`.
+// `uOrigTex`/`uPrevTex` são a extensão multipass da ABI (ver README): a textura
+// original (fonte da cadeia) e a saída de um passe anterior declarado (`prev = N`).
+// Ficam nas units 1 e 2; passes single-pass simplesmente as ignoram.
 const FS_HEADER: &str = "#version 330 core\n\
     uniform sampler2D uTex;\n\
+    uniform sampler2D uOrigTex;\n\
+    uniform sampler2D uPrevTex;\n\
     uniform vec2 uInputSize;\n\
     uniform vec2 uOutputSize;\n\
+    uniform vec2 uOrigSize;\n\
+    uniform vec2 uPrevSize;\n\
     uniform int uFrameCount;\n\
     in vec2 vTex;\n\
     out vec4 fragColor;\n\
@@ -143,8 +154,12 @@ const VS_SOURCE: &str = "#version 330 core\n\
 struct Program {
     program: glow::Program,
     u_tex: Option<glow::UniformLocation>,
+    u_orig: Option<glow::UniformLocation>,
+    u_prev: Option<glow::UniformLocation>,
     u_input: Option<glow::UniformLocation>,
     u_output: Option<glow::UniformLocation>,
+    u_orig_size: Option<glow::UniformLocation>,
+    u_prev_size: Option<glow::UniformLocation>,
     u_frame: Option<glow::UniformLocation>,
 }
 
@@ -155,6 +170,12 @@ struct Pass {
     scale: i32,
     /// Filtro (min/mag) da textura de saída deste passe: `NEAREST` ou `LINEAR`.
     filter: i32,
+    /// Textura de saída em meio-float (RGBA16F) em vez de RGBA8. Necessário pra
+    /// passes que guardam dados (não cor) e não podem perder precisão (ex.: ScaleFX).
+    float_fb: bool,
+    /// Índice de um passe anterior cuja saída este passe lê em `uPrevTex`
+    /// (`prev = N` no manifesto). `None` = `uPrevTex` fica sem bind.
+    prev: Option<usize>,
 }
 
 /// Textura intermediária (destino de um passe não-final): FBO + textura + tamanho.
@@ -172,11 +193,13 @@ struct MultipassEffect {
     targets: Vec<Target>,
 }
 
-/// Espec de um passe lida do manifesto (`frag`, `scale`, `filter`).
+/// Espec de um passe lida do manifesto (`frag`, `scale`, `filter`, `float`).
 struct PassSpec {
     frag: String,
     scale: i32,
     filter: i32,
+    float_fb: bool,
+    prev: Option<usize>,
 }
 
 /// Corpo `effect(...)` de um `.frag` referenciado por um manifesto multipass.
@@ -186,6 +209,11 @@ fn multipass_frag_body(name: &str) -> Option<&'static str> {
     Some(match name {
         "blur-h.frag" => include_str!("../../../assets/shaders/blur-h.frag"),
         "blur-v.frag" => include_str!("../../../assets/shaders/blur-v.frag"),
+        "scalefx-pass0.frag" => include_str!("../../../assets/shaders/scalefx-pass0.frag"),
+        "scalefx-pass1.frag" => include_str!("../../../assets/shaders/scalefx-pass1.frag"),
+        "scalefx-pass2.frag" => include_str!("../../../assets/shaders/scalefx-pass2.frag"),
+        "scalefx-pass3.frag" => include_str!("../../../assets/shaders/scalefx-pass3.frag"),
+        "scalefx-pass4.frag" => include_str!("../../../assets/shaders/scalefx-pass4.frag"),
         _ => return None,
     })
 }
@@ -216,7 +244,8 @@ fn parse_manifest(src: &str) -> Result<Vec<PassSpec>, String> {
         if frag.is_empty() {
             return Err(format!("passe {idx} sem arquivo .frag"));
         }
-        let (mut scale, mut filter) = (1, glow::NEAREST as i32);
+        let (mut scale, mut filter, mut float_fb, mut prev) =
+            (1, glow::NEAREST as i32, false, None);
         for p in parts {
             if let Some((k, v)) = p.split_once('=') {
                 match k.trim() {
@@ -228,6 +257,8 @@ fn parse_manifest(src: &str) -> Result<Vec<PassSpec>, String> {
                             glow::NEAREST as i32
                         }
                     }
+                    "float" => float_fb = v.trim() == "true",
+                    "prev" => prev = v.trim().parse::<usize>().ok(),
                     _ => {}
                 }
             }
@@ -238,6 +269,8 @@ fn parse_manifest(src: &str) -> Result<Vec<PassSpec>, String> {
                 frag,
                 scale,
                 filter,
+                float_fb,
+                prev,
             },
         ));
     }
@@ -480,8 +513,10 @@ impl ShaderRenderer {
             let scissor_was_on = gl.is_enabled(glow::SCISSOR_TEST);
             gl.disable(glow::SCISSOR_TEST);
 
-            gl.active_texture(glow::TEXTURE0);
             gl.bind_vertex_array(Some(vao));
+            // A textura original (fonte da cadeia) fica fixa na unit 1 o tempo todo.
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
 
             let mut in_tex = tex;
             let (mut in_w, mut in_h) = (src_w, src_h);
@@ -500,9 +535,26 @@ impl ShaderRenderer {
                 let p = &effect.passes[i];
                 gl.use_program(Some(p.program.program));
                 gl.uniform_1_i32(p.program.u_tex.as_ref(), 0);
+                gl.uniform_1_i32(p.program.u_orig.as_ref(), 1);
+                gl.uniform_1_i32(p.program.u_prev.as_ref(), 2);
                 gl.uniform_2_f32(p.program.u_input.as_ref(), in_w as f32, in_h as f32);
                 gl.uniform_2_f32(p.program.u_output.as_ref(), out_w as f32, out_h as f32);
+                gl.uniform_2_f32(p.program.u_orig_size.as_ref(), src_w as f32, src_h as f32);
+                // `uPrevTex` (unit 2): saída de um passe anterior declarado (`prev = N`).
+                let (prev_tex, prev_w, prev_h) = match p.prev {
+                    Some(j) if j < effect.targets.len() => {
+                        let t = &effect.targets[j];
+                        (t.tex, t.w, t.h)
+                    }
+                    // Sem `prev` (ou índice inválido): aponta pra fonte — inofensivo,
+                    // já que só shaders que declaram `prev` amostram `uPrevTex`.
+                    _ => (tex, src_w, src_h),
+                };
+                gl.uniform_2_f32(p.program.u_prev_size.as_ref(), prev_w as f32, prev_h as f32);
+                gl.active_texture(glow::TEXTURE2);
+                gl.bind_texture(glow::TEXTURE_2D, Some(prev_tex));
                 gl.uniform_1_i32(p.program.u_frame.as_ref(), frame_count);
+                gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(in_tex));
                 gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 if !is_last {
@@ -553,7 +605,7 @@ fn ensure_targets(
         }
         for i in 0..need {
             let (w, h) = size_of(i);
-            match create_target(gl, w, h, effect.passes[i].filter) {
+            match create_target(gl, w, h, effect.passes[i].filter, effect.passes[i].float_fb) {
                 Some((fbo, tex)) => effect.targets.push(Target { fbo, tex, w, h }),
                 None => {
                     log::error!("multipass: FBO {i} incompleto ({w}x{h})");
@@ -565,13 +617,14 @@ fn ensure_targets(
     true
 }
 
-/// Cria uma textura RGBA8 `w`×`h` com o `filter` dado + um FBO com ela anexada.
-/// Devolve `None` se o FBO não ficou `FRAMEBUFFER_COMPLETE`.
+/// Cria uma textura `w`×`h` (RGBA8 ou, se `float_fb`, RGBA16F) com o `filter`
+/// dado + um FBO com ela anexada. `None` se o FBO não ficou `FRAMEBUFFER_COMPLETE`.
 unsafe fn create_target(
     gl: &glow::Context,
     w: i32,
     h: i32,
     filter: i32,
+    float_fb: bool,
 ) -> Option<(glow::Framebuffer, glow::Texture)> {
     let tex = gl.create_texture().ok()?;
     gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -587,17 +640,14 @@ unsafe fn create_target(
         glow::TEXTURE_WRAP_T,
         glow::CLAMP_TO_EDGE as i32,
     );
-    gl.tex_image_2d(
-        glow::TEXTURE_2D,
-        0,
-        glow::RGBA as i32,
-        w,
-        h,
-        0,
-        glow::RGBA,
-        glow::UNSIGNED_BYTE,
-        None,
-    );
+    // Passes que guardam dados (ScaleFX) usam RGBA16F pra não perder precisão em
+    // 8 bits. Meio-float é filtrável e color-renderável no GL desktop core.
+    let (internal, ty) = if float_fb {
+        (glow::RGBA16F as i32, glow::HALF_FLOAT)
+    } else {
+        (glow::RGBA as i32, glow::UNSIGNED_BYTE)
+    };
+    gl.tex_image_2d(glow::TEXTURE_2D, 0, internal, w, h, 0, glow::RGBA, ty, None);
     let fbo = gl.create_framebuffer().ok()?;
     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
     gl.framebuffer_texture_2d(
@@ -630,6 +680,8 @@ fn build_multipass(gl: &glow::Context, kind: MultipassKind) -> Result<MultipassE
             program,
             scale: s.scale,
             filter: s.filter,
+            float_fb: s.float_fb,
+            prev: s.prev,
         });
     }
     Ok(MultipassEffect {
@@ -667,8 +719,12 @@ fn build_program_from_body(gl: &glow::Context, body: &str) -> Result<Program, St
         }
         Ok(Program {
             u_tex: gl.get_uniform_location(program, "uTex"),
+            u_orig: gl.get_uniform_location(program, "uOrigTex"),
+            u_prev: gl.get_uniform_location(program, "uPrevTex"),
             u_input: gl.get_uniform_location(program, "uInputSize"),
             u_output: gl.get_uniform_location(program, "uOutputSize"),
+            u_orig_size: gl.get_uniform_location(program, "uOrigSize"),
+            u_prev_size: gl.get_uniform_location(program, "uPrevSize"),
             u_frame: gl.get_uniform_location(program, "uFrameCount"),
             program,
         })
