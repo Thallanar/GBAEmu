@@ -1,0 +1,16 @@
+# ScaleFX (Sp00kyFox, MIT) — upscaler de pixel-art de 5 passes, porte fiel do
+# preset "hybrid". Preserva texto/curvas melhor que xBRZ (foco Pokémon).
+#
+# Cadeia de dados: pass0 calcula métricas perceptuais entre vizinhos; pass1
+# deriva a força dos cantos; pass2 resolve junções de dominância (lê a força
+# de pass1 em uTex E a métrica de pass0 em uPrevTex, via `prev = 0`); pass3
+# detecta bordas/subpixels; pass4 escala 3× e mistura com um reverse-AA da
+# imagem original (uOrigTex). pass0/pass1 guardam dados contínuos → `float =
+# true` (RGBA16F); pass2/pass3 empacotam inteiros que decodificam exatos em
+# RGBA8. Todos amostram por texel exato → `filter = nearest`.
+passes = 5
+pass0 = scalefx-pass0.frag ; scale = 1 ; filter = nearest ; float = true
+pass1 = scalefx-pass1.frag ; scale = 1 ; filter = nearest ; float = true
+pass2 = scalefx-pass2.frag ; scale = 1 ; filter = nearest ; prev = 0
+pass3 = scalefx-pass3.frag ; scale = 1 ; filter = nearest
+pass4 = scalefx-pass4.frag ; scale = 3 ; filter = nearest

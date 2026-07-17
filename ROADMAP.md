@@ -2,7 +2,7 @@
 
 > Emulador de Game Boy Advance multiplataforma (Windows, Linux, Android) com modo diferencial **Shiny Hunter** para automação de caça a Pokémon shiny.
 
-_Última atualização: 2026-07-15_
+_Última atualização: 2026-07-17_
 
 > O estado atual do projeto vive na seção **8. Status atual**; o trabalho não
 > segue ordem linear — pegue a fase/etapa que fizer sentido. Mantenha este
@@ -214,17 +214,21 @@ fazem sentido.
       `assets/shaders/` (contrato de uniforms documentado no README); desktop via
       callback `egui_glow` (glow), Android via GLES20; seletor + custom persistidos
       nas duas frentes. **Motor multipass** (ping-pong de FBO nas duas frentes,
-      manifesto `.mpass` encadeando vários `.frag`) entregue e exercitado pelo efeito
-      `blur` (2 passes); destrava ScaleFX/Anime4K (próximo). _Stretch goal_ restante:
-      compat de presets `.glslp` do RetroArch.
+      manifesto `.mpass` encadeando vários `.frag`) entregue, exercitado pelo efeito
+      `blur` (2 passes) e agora pelo **ScaleFX** (Sp00kyFox, MIT; upscaler de
+      pixel-art de 5 passes — melhor em texto/curvas que o xBRZ). ABI multipass
+      expandida com `uOrigTex` (imagem original em todos os passes), `uPrevTex`
+      (`prev = N`) e framebuffers meio-float (RGBA16F; Android gateia por
+      `EXT_color_buffer_half_float`, escondendo o efeito onde falta). _Próximo_:
+      Anime4K. _Stretch goal_ restante: compat de presets `.glslp` do RetroArch.
 - [X] Filtros de upscale como alternativa aos shaders: **HQ2x/3x/4x** e
       **xBRZ2x/3x/4x** entregues ponta a ponta (crate `auroragba-scale` sobre
       `hqx` + `xbrz-rs`; desktop amplia na CPU e sobe numa textura de tamanho
       variável; Android amplia no nativo e o Kotlin redimensiona a textura pelo
       fator; seletor persistido nas duas frentes). O contrato de seleção Android
       passou de fator-inteiro para **chave do algoritmo** (JNI `setUpscale(String)`),
-      pra HQ e xBRZ do mesmo fator coexistirem. _Futuro_: ScaleFX/Anime4K sobre o
-      **motor multipass** (já entregue).
+      pra HQ e xBRZ do mesmo fator coexistirem. **ScaleFX** (GPU, sobre o motor
+      multipass) já entregue; _futuro_: Anime4K.
 - [ ] Bordas / molduras (skins de GBA ao redor da tela)
 
 **Cheats:**
@@ -392,7 +396,8 @@ Otimizações estruturais do interpretador, medidas em release headless.
   scanlines/LCD-grid/LCD3x/CRT + importar `.frag` "Custom", seletor persistido) e
   **filtros de upscale HQ2x/3x/4x + xBRZ2x/3x/4x** (crate `auroragba-scale` sobre
   `hqx` + `xbrz-rs`; seleção Android por chave de algoritmo no JNI) fechados ponta a
-  ponta. Próximos: engine de shader multipass (destrava ScaleFX/Anime4K), cheats, i18n.
+  ponta. **Motor multipass** (`.mpass`, ping-pong de FBO) com **blur** e **ScaleFX**
+  (5 passes, meio-float) entregues. Próximos: Anime4K, cheats, i18n.
 - [X] Fase 9 — Performance: batch da PPU + fast-path do bus (×1,43) + batch dos
   timers ciclo-exato. Pacing uniforme no desktop tentado e **estacionado**
   (baseline mantido); fast-forward por menu no Android.

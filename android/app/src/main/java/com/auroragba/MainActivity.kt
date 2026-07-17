@@ -111,7 +111,10 @@ class MainActivity : Activity() {
         // Efeitos multipass: `key` casa com o manifesto `<key>.mpass` nos assets
         // (encadeia vários `.frag`; ver assets/shaders/README.md). Aparecem no mesmo
         // seletor de shader e persistem pela mesma chave (`currentShader`).
-        val MULTIPASS = arrayOf("blur" to "Blur")
+        val MULTIPASS = arrayOf("blur" to "Blur", "scalefx" to "ScaleFX")
+        // Multipass que exigem framebuffer meio-float (RGBA16F): só aparecem/compilam
+        // se o device tiver EXT_color_buffer_half_float + OES_texture_half_float.
+        val MULTIPASS_NEEDS_FLOAT = setOf("scalefx")
         // Porta TCP padrão do link (igual ao desktop: `link::DEFAULT_PORT`).
         const val LINK_PORT = 7777
 
@@ -125,6 +128,8 @@ class MainActivity : Activity() {
             KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_R1,
         )
         const val TAG = "AuroraGBA"
+        // Tipo de pixel meio-float do OES_texture_half_float (ausente na classe GLES20).
+        const val GL_HALF_FLOAT_OES = 0x8D61
         // Taxa de quadros real do GBA (≈ 16,78 MHz / 280896 ciclos). Anunciada ao
         // compositor pra ele casar a cadência num painel de refresh alto.
         const val GBA_FPS = 59.7275f
@@ -161,6 +166,10 @@ class MainActivity : Activity() {
     // Efeito de shader atual (key de SHADERS, ou "custom"). Escrito pela UI, lido
     // pela thread GL ao (re)compilar o programa. Persiste nas prefs.
     @Volatile private var currentShader = "none"
+
+    // Suporte a framebuffer meio-float (RGBA16F), sondado na criação da surface GL.
+    // Gate dos multipass que precisam guardar dados sem perder precisão (ScaleFX).
+    @Volatile private var halfFloatSupported = false
 
     // Fonte do shader importado de arquivo (corpo `effect(...)`, mesmo contrato dos
     // embutidos) e nome do arquivo pra rótulo na UI. `null` = nenhum importado.
@@ -380,7 +389,8 @@ class MainActivity : Activity() {
     private fun shaderMenu() {
         // Embutidos single-pass + multipass + (se importado) a entrada "Custom".
         val entries = SHADERS.toMutableList()
-        entries.addAll(MULTIPASS)
+        // Esconde os multipass que exigem meio-float quando o device não suporta.
+        entries.addAll(MULTIPASS.filter { it.first !in MULTIPASS_NEEDS_FLOAT || halfFloatSupported })
         if (customShaderSrc != null) entries.add("custom" to "Custom: $customShaderName")
         val labels = entries.map { it.second }.toTypedArray()
         val cur = entries.indexOfFirst { it.first == currentShader }.coerceAtLeast(0)
@@ -1572,11 +1582,26 @@ class MainActivity : Activity() {
         val program: Int,
         val posLoc: Int,
         val texLoc: Int,
+        val origLoc: Int,
+        val prevLoc: Int,
         val inputLoc: Int,
         val outputLoc: Int,
+        val origSizeLoc: Int,
+        val prevSizeLoc: Int,
         val frameLoc: Int,
         val scale: Int,
         val filter: Int,
+        val floatFb: Boolean,
+        val prev: Int,
+    )
+
+    /** Espec de um passe lida do manifesto (`frag`, `scale`, `filter`, `float`, `prev`). */
+    private class MpSpec(
+        val frag: String,
+        val scale: Int,
+        val filter: Int,
+        val floatFb: Boolean,
+        val prev: Int,
     )
 
     /** Textura intermediária (destino de um passe não-final): FBO + textura + tamanho. */
@@ -1644,6 +1669,14 @@ class MainActivity : Activity() {
                 .order(ByteOrder.nativeOrder())
                 .asFloatBuffer()
                 .apply { put(verts); position(0) }
+
+            // Sonda o suporte a framebuffer meio-float (gate do ScaleFX & cia): precisa
+            // criar a textura RGBA16F (OES_texture_half_float) E renderizar nela
+            // (EXT_color_buffer_half_float). GLES2 não garante nenhum dos dois.
+            val ext = GLES20.glGetString(GLES20.GL_EXTENSIONS).orEmpty()
+            halfFloatSupported = ext.contains("GL_OES_texture_half_float") &&
+                ext.contains("GL_EXT_color_buffer_half_float")
+            Log.i(TAG, "meio-float (RGBA16F FBO): ${if (halfFloatSupported) "ok" else "ausente"}")
 
             rebuildProgram()
             texId = createTexture()
@@ -1903,11 +1936,23 @@ class MainActivity : Activity() {
                 """.trimIndent(),
             )
             // Preâmbulo GLES (contrato em assets/shaders/README.md) + corpo + main.
+            // highp onde disponível: ScaleFX empacota inteiros em canais e decodifica
+            // com floor(x*K+.5); mediump (10 bits de mantissa) erra em K grande.
+            // uOrigTex/uPrevTex são a extensão multipass da ABI (ver README): a
+            // textura original e a saída de um passe anterior declarado (`prev = N`).
             val fsHeader = """
+                #ifdef GL_FRAGMENT_PRECISION_HIGH
+                precision highp float;
+                #else
                 precision mediump float;
+                #endif
                 uniform sampler2D uTex;
+                uniform sampler2D uOrigTex;
+                uniform sampler2D uPrevTex;
                 uniform vec2 uInputSize;
                 uniform vec2 uOutputSize;
+                uniform vec2 uOrigSize;
+                uniform vec2 uPrevSize;
                 uniform int uFrameCount;
                 varying vec2 vTex;
                 #define SAMPLE texture2D
@@ -1940,20 +1985,23 @@ class MainActivity : Activity() {
                 "vec4 effect(vec2 uv) { return SAMPLE(uTex, uv); }"
             }
 
-        /** Parse do manifesto `.mpass` em passes ordenados (frag, scale, filter). */
-        private fun parseManifest(src: String): List<Triple<String, Int, Int>> {
-            val out = ArrayList<Pair<Int, Triple<String, Int, Int>>>()
+        /** Parse do manifesto `.mpass` em passes ordenados (ver assets/shaders/README.md). */
+        private fun parseManifest(src: String): List<MpSpec> {
+            val out = ArrayList<Pair<Int, MpSpec>>()
             for (raw in src.lines()) {
                 val line = raw.trim()
                 if (line.isEmpty() || line.startsWith("#")) continue
                 val eq = line.indexOf('=')
                 if (eq < 0) continue
+                // `passes = N` e outras chaves informativas não têm índice → ignoradas.
                 val idx = line.substring(0, eq).trim().removePrefix("pass").toIntOrNull() ?: continue
                 val parts = line.substring(eq + 1).split(';').map { it.trim() }
                 val frag = parts.getOrNull(0).orEmpty()
                 if (frag.isEmpty()) continue
                 var scale = 1
                 var filter = GLES20.GL_NEAREST
+                var floatFb = false
+                var prev = -1
                 for (p in parts.drop(1)) {
                     val kv = p.split('=')
                     if (kv.size < 2) continue
@@ -1961,9 +2009,11 @@ class MainActivity : Activity() {
                         "scale" -> scale = kv[1].trim().toIntOrNull()?.coerceAtLeast(1) ?: 1
                         "filter" ->
                             filter = if (kv[1].trim() == "linear") GLES20.GL_LINEAR else GLES20.GL_NEAREST
+                        "float" -> floatFb = kv[1].trim() == "true"
+                        "prev" -> prev = kv[1].trim().toIntOrNull() ?: -1
                     }
                 }
-                out.add(idx to Triple(frag, scale, filter))
+                out.add(idx to MpSpec(frag, scale, filter, floatFb, prev))
             }
             return out.sortedBy { it.first }.map { it.second }
         }
@@ -1981,24 +2031,39 @@ class MainActivity : Activity() {
                 Log.e(TAG, "mpass '$key' sem passes")
                 return null
             }
-            val passes = specs.map { (frag, scale, filter) ->
-                val prog = buildProgramFromBody(loadFragFile(frag))
+            // ScaleFX & cia guardam dados em RGBA16F; sem a extensão o efeito não roda.
+            if (specs.any { it.floatFb } && !halfFloatSupported) {
+                Log.e(TAG, "mpass '$key' precisa de meio-float, indisponível neste device")
+                return null
+            }
+            val passes = specs.map { s ->
+                val prog = buildProgramFromBody(loadFragFile(s.frag))
                 MpPass(
                     prog,
                     GLES20.glGetAttribLocation(prog, "aPos"),
                     GLES20.glGetAttribLocation(prog, "aTex"),
+                    GLES20.glGetUniformLocation(prog, "uOrigTex"),
+                    GLES20.glGetUniformLocation(prog, "uPrevTex"),
                     GLES20.glGetUniformLocation(prog, "uInputSize"),
                     GLES20.glGetUniformLocation(prog, "uOutputSize"),
+                    GLES20.glGetUniformLocation(prog, "uOrigSize"),
+                    GLES20.glGetUniformLocation(prog, "uPrevSize"),
                     GLES20.glGetUniformLocation(prog, "uFrameCount"),
-                    scale,
-                    filter,
+                    s.scale,
+                    s.filter,
+                    s.floatFb,
+                    s.prev,
                 )
             }
             return Multipass(passes)
         }
 
-        /** Cria uma textura RGBA8 `w`×`h` + FBO. `null` se o FBO não ficar completo. */
-        private fun createTarget(w: Int, h: Int, filter: Int): MpTarget? {
+        /**
+         * Cria uma textura `w`×`h` (RGBA8 ou, se `floatFb`, RGBA meio-float via
+         * `GL_HALF_FLOAT_OES`) + FBO. `null` se o FBO não ficar completo. Meio-float
+         * só é pedido quando `halfFloatSupported` (checado antes de compilar o efeito).
+         */
+        private fun createTarget(w: Int, h: Int, filter: Int, floatFb: Boolean): MpTarget? {
             val tex = IntArray(1)
             GLES20.glGenTextures(1, tex, 0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex[0])
@@ -2006,9 +2071,12 @@ class MainActivity : Activity() {
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, filter)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            // GLES2: internalformat == format (GL_RGBA, sem tamanho); o `type` decide a
+            // precisão. GL_HALF_FLOAT_OES não está na classe GLES20 → constante crua.
+            val type = if (floatFb) GL_HALF_FLOAT_OES else GLES20.GL_UNSIGNED_BYTE
             GLES20.glTexImage2D(
                 GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0,
-                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null,
+                GLES20.GL_RGBA, type, null,
             )
             val fbo = IntArray(1)
             GLES20.glGenFramebuffers(1, fbo, 0)
@@ -2038,7 +2106,8 @@ class MainActivity : Activity() {
             val list = ArrayList<MpTarget>()
             for (i in 0 until mp.passes.size - 1) {
                 val s = mp.passes[i].scale
-                val t = createTarget(srcW * s, srcH * s, mp.passes[i].filter) ?: break
+                val t = createTarget(srcW * s, srcH * s, mp.passes[i].filter, mp.passes[i].floatFb)
+                    ?: break
                 list.add(t)
             }
             mp.targets = list
@@ -2054,7 +2123,9 @@ class MainActivity : Activity() {
             var inTex = srcTex
             var inW = srcW
             var inH = srcH
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            // A textura original (fonte da cadeia) fica fixa na unit 1 o tempo todo.
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, srcTex)
             for (i in 0 until n) {
                 val isLast = i == n - 1
                 val pass = mp.passes[i]
@@ -2073,8 +2144,22 @@ class MainActivity : Activity() {
                     outH = t.h
                 }
                 GLES20.glUseProgram(pass.program)
+                GLES20.glUniform1i(pass.origLoc, 1)
+                GLES20.glUniform1i(pass.prevLoc, 2)
                 GLES20.glUniform2f(pass.inputLoc, inW.toFloat(), inH.toFloat())
                 GLES20.glUniform2f(pass.outputLoc, outW.toFloat(), outH.toFloat())
+                GLES20.glUniform2f(pass.origSizeLoc, srcW.toFloat(), srcH.toFloat())
+                // uPrevTex (unit 2): saída de um passe anterior declarado (`prev = N`).
+                // Sem `prev` válido aponta pra fonte (inofensivo: só quem declara amostra).
+                val prevT = mp.targets.getOrNull(pass.prev)
+                val prevTex = prevT?.tex ?: srcTex
+                GLES20.glUniform2f(
+                    pass.prevSizeLoc,
+                    (prevT?.w ?: srcW).toFloat(),
+                    (prevT?.h ?: srcH).toFloat(),
+                )
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, prevTex)
                 GLES20.glUniform1i(pass.frameLoc, frames)
                 quad.position(0)
                 GLES20.glVertexAttribPointer(pass.posLoc, 2, GLES20.GL_FLOAT, false, 16, quad)
@@ -2082,6 +2167,7 @@ class MainActivity : Activity() {
                 quad.position(2)
                 GLES20.glVertexAttribPointer(pass.texLoc, 2, GLES20.GL_FLOAT, false, 16, quad)
                 GLES20.glEnableVertexAttribArray(pass.texLoc)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inTex)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
                 if (!isLast) {
@@ -2091,6 +2177,8 @@ class MainActivity : Activity() {
                     inH = t.h
                 }
             }
+            // Restaura a unit ativa padrão (o resto do renderer assume TEXTURE0).
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         }
 
         /** Libera programas e FBOs do multipass atual (troca de shader / recriação). */
