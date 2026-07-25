@@ -5,7 +5,7 @@
 > quando resolvido (referenciando o PR que fechou). Ao descobrir um bug novo,
 > adicione aqui.
 >
-> _Última atualização: 2026-07-17_
+> _Última atualização: 2026-07-24_
 
 ## Abertos
 
@@ -39,6 +39,17 @@
 - **Suspeita:** a leitura da espécie do encontro (ou o carregamento do sprite
   correspondente) falha só no Android — espécie não resolvida, asset de sprite
   ausente no pacote Android, ou timing de leitura antes do dado estar pronto.
+
+### 5. Shiny Hunter no Beldum trava na pergunta do apelido
+- **Onde:** Shiny Hunter, método StaticGift (Beldum pós-E4).
+- **Sintoma:** ao pegar o Beldum, aparecem duas perguntas em sequência: (1) se
+  quer pegar o Pokémon — o A repetido do ciclo resolve bem; (2) se quer dar um
+  apelido ao Pokémon — aqui o ciclo quebra, porque os A's caem na tela de
+  nomeação e acabam batizando o Pokémon como `AAAAAAA`.
+- **Suspeita:** a automação não trata a caixa de diálogo de apelido — precisa
+  detectar/dispensar a pergunta do apelido (escolher "Não", ou navegar para
+  confirmar o nome vazio/padrão) em vez de só marteladar A. Falta um estado no
+  fluxo do StaticGift para o prompt de nickname.
 
 ## Em progresso
 

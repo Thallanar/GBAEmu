@@ -20,7 +20,7 @@ use auroragba_core::Gba;
 pub mod games;
 pub mod gfx;
 
-use games::{GameProfile, HuntMethod, TargetDef};
+use games::{Approach, GameProfile, HuntMethod, TargetDef};
 
 /// Força (em malha fechada) a seleção do inicial pro Poké Ball do alvo.
 ///
@@ -239,6 +239,36 @@ const SEED_INJECT_FRAME: u32 = 200;
 /// fixa: a entropia agora vem da seed injetada, não mais do timing.
 const MASH_PERIOD: u32 = 8;
 
+/// Frame (desde o reset) a partir do qual o [`HuntMethod::SoftResetApproach`]
+/// começa a tentar o passo de aproximação. Antes disso o jogo ainda está no
+/// título/menu de arquivo — telas de menu **vertical**, onde ◄/► são inertes, e
+/// onde um ▲/▼ perdido é corrigido pelo A-mash na tentativa seguinte. Como o
+/// passo é retentado em ciclo até o encontro (ou o timeout), começar cedo demais
+/// não quebra nada: só gasta alguns frames.
+const APPROACH_START_FRAME: u32 = 300;
+/// Frames com a direção **segurada** em cada tentativa de passo. Tem que passar
+/// do giro: o jogo primeiro vira o personagem e só o faz andar se a direção
+/// continuar segurada depois disso (o oposto do tap de 1 frame do `WildSpin`,
+/// que existe justamente pra NÃO andar).
+const APPROACH_HOLD_FRAMES: u32 = 16;
+/// Frames com o D-pad solto entre uma tentativa de passo e a próxima — é a janela
+/// em que o A-mash avança o diálogo/cutscene da aproximação do lendário.
+const APPROACH_GAP_FRAMES: u32 = 24;
+/// Janela total de um ciclo de aproximação (segura + solta).
+const APPROACH_CYCLE_FRAMES: u32 = APPROACH_HOLD_FRAMES + APPROACH_GAP_FRAMES;
+
+/// Botão do D-pad correspondente à direção de aproximação. (O mapeamento vive
+/// aqui, não em `games`, pra manter aquele módulo como dado puro sem depender do
+/// core.)
+fn approach_button(dir: Approach) -> Button {
+    match dir {
+        Approach::Left => Button::Left,
+        Approach::Right => Button::Right,
+        Approach::Up => Button::Up,
+        Approach::Down => Button::Down,
+    }
+}
+
 /// No [`HuntMethod::WildSpin`] a caça **não anda** — só muda a direção que o
 /// personagem encara (gira no lugar). Confirmado na ROM real: cada mudança de
 /// direção já conta pro sorteio de encontro, sem sair do tile da grama.
@@ -380,6 +410,9 @@ impl Hunter {
     /// daí o `tick`/`advance_to_encounter` amassa A até a batalha. Sorteia uma
     /// nova seed pra próxima tentativa render um PID diferente.
     pub fn soft_reset(&mut self, gba: &mut Gba) {
+        // Solta tudo antes do reset: sem isso um passo de aproximação em curso
+        // (ou o A do mash) vazaria segurado pra tela de título da tentativa nova.
+        self.clear_inputs(gba);
         gba.reset();
         self.frames_this_attempt = 0;
         self.reroll_seed();
@@ -402,6 +435,9 @@ impl Hunter {
             // Força o cursor do inicial pro alvo quando a bag está aberta (no-op
             // pros demais alvos/telas).
             force_starter_cursor(gba, profile, target);
+            // Passo em direção ao lendário que não espera interação (no-op nos
+            // demais métodos).
+            self.drive_approach(gba, target);
             // Tapa A (ver `tick`): cobre título → continuar → bag → diálogos.
             let press = (self.frames_this_attempt / MASH_PERIOD).is_multiple_of(2);
             gba.bus.io.joypad.set_button(Button::A, press);
@@ -409,7 +445,7 @@ impl Hunter {
             self.frames_this_attempt += 1;
 
             if self.ready_base(gba, profile, target).is_some() {
-                gba.bus.io.joypad.set_button(Button::A, false);
+                self.clear_inputs(gba);
                 return true;
             }
         }
@@ -506,6 +542,10 @@ impl Hunter {
             // no-op nas demais telas e pros demais alvos.
             force_starter_cursor(gba, profile, target);
 
+            // Passo em direção ao lendário que vem pra cima do jogador em vez de
+            // esperar um A (no-op nos demais métodos).
+            self.drive_approach(gba, target);
+
             // Tapa A (8 frames pressionado / 8 solto): confirma no título,
             // escolhe "Continuar", abre a bag, confirma o inicial (já forçado) e
             // avança diálogos — tudo com A. Tap (não segurar) pra cada prompt
@@ -516,7 +556,7 @@ impl Hunter {
             self.frames_this_attempt += 1;
 
             if let Some(base) = self.ready_base(gba, profile, target) {
-                gba.bus.io.joypad.set_button(Button::A, false);
+                self.clear_inputs(gba);
                 let result = self.check(gba, profile, target, base);
                 if result != CheckResult::Shiny {
                     self.soft_reset(gba);
@@ -629,6 +669,26 @@ impl Hunter {
         }
     }
 
+    /// Dirige o passo de aproximação do [`HuntMethod::SoftResetApproach`]: a
+    /// partir de [`APPROACH_START_FRAME`], segura a direção do lendário por
+    /// [`APPROACH_HOLD_FRAMES`] e solta por [`APPROACH_GAP_FRAMES`], em ciclo,
+    /// até o encontro carregar (ou a tentativa estourar o timeout).
+    ///
+    /// O ciclo repetir é de propósito: não sabemos em que frame exato o save
+    /// termina de carregar no overworld, e uma direção segurada numa tela de menu
+    /// vertical não faz nada — então tentar de novo a cada ~40 frames é mais
+    /// robusto do que cravar o frame do passo. No-op nos demais métodos.
+    fn drive_approach(&self, gba: &mut Gba, target: &TargetDef) {
+        let HuntMethod::SoftResetApproach(dir) = target.method else {
+            return;
+        };
+        let held = self
+            .frames_this_attempt
+            .checked_sub(APPROACH_START_FRAME)
+            .is_some_and(|f| f % APPROACH_CYCLE_FRAMES < APPROACH_HOLD_FRAMES);
+        gba.bus.io.joypad.set_button(approach_button(dir), held);
+    }
+
     /// Solta todos os botões dirigidos pela caça (na transição entre fases, pra
     /// não vazar input).
     fn clear_inputs(&self, gba: &mut Gba) {
@@ -667,7 +727,9 @@ impl Hunter {
         // (WildSpin) não usa try_once, e o inicial parte do estado já carregado.
         if matches!(
             target.method,
-            HuntMethod::SoftResetLegendary | HuntMethod::StaticGift
+            HuntMethod::SoftResetLegendary
+                | HuntMethod::SoftResetApproach(_)
+                | HuntMethod::StaticGift
         ) {
             self.soft_reset(gba);
         }
@@ -1008,6 +1070,100 @@ mod tests {
             CheckResult::Shiny
         );
         assert_eq!(hunter.last_species, 398);
+    }
+
+    /// O passo de aproximação ([`HuntMethod::SoftResetApproach`]): fica solto
+    /// enquanto o jogo ainda está no título (antes de [`APPROACH_START_FRAME`]),
+    /// e daí em diante alterna segurado/solto em ciclo — segurado o bastante pra
+    /// virar passo, não só giro.
+    #[test]
+    fn approach_holds_direction_in_cycles_after_boot() {
+        let mut gba = Gba::new();
+        let mut h = Hunter::new();
+        let target = TargetDef {
+            name: "Groudon",
+            species: 405,
+            slot: Slot::Enemy,
+            method: HuntMethod::SoftResetApproach(Approach::Right),
+            cursor: StarterCursor::Center,
+        };
+        let pressed =
+            |gba: &Gba, b: Button| (gba.bus.io.joypad.keyinput() & (1 << (b as u16))) == 0;
+
+        // Antes da janela de aproximação: nada de D-pad (o jogo ainda está no
+        // título/menu de arquivo).
+        h.frames_this_attempt = APPROACH_START_FRAME - 1;
+        h.drive_approach(&mut gba, &target);
+        assert!(
+            !pressed(&gba, Button::Right),
+            "cedo demais: deveria ir solto"
+        );
+
+        // Dois ciclos: segurado durante o HOLD, solto durante o GAP.
+        for cycle in 0..2 {
+            let base = APPROACH_START_FRAME + cycle * APPROACH_CYCLE_FRAMES;
+            for f in [base, base + APPROACH_HOLD_FRAMES - 1] {
+                h.frames_this_attempt = f;
+                h.drive_approach(&mut gba, &target);
+                assert!(
+                    pressed(&gba, Button::Right),
+                    "frame {f}: deveria estar segurado"
+                );
+            }
+            for f in [
+                base + APPROACH_HOLD_FRAMES,
+                base + APPROACH_CYCLE_FRAMES - 1,
+            ] {
+                h.frames_this_attempt = f;
+                h.drive_approach(&mut gba, &target);
+                assert!(
+                    !pressed(&gba, Button::Right),
+                    "frame {f}: deveria estar solto"
+                );
+            }
+        }
+
+        // O passo é segurado o bastante pra virar E andar (o `WildSpin` usa tap
+        // curto justamente pra NÃO andar) — se isso cair pro nível do tap, o
+        // personagem só gira e a batalha nunca dispara.
+        const { assert!(APPROACH_HOLD_FRAMES > WILD_TAP_FRAMES) };
+
+        // Kyogre anda pro lado oposto.
+        let kyogre = TargetDef {
+            name: "Kyogre",
+            species: 404,
+            method: HuntMethod::SoftResetApproach(Approach::Left),
+            ..target
+        };
+        h.frames_this_attempt = APPROACH_START_FRAME;
+        h.clear_inputs(&mut gba);
+        h.drive_approach(&mut gba, &kyogre);
+        assert!(pressed(&gba, Button::Left));
+        assert!(!pressed(&gba, Button::Right));
+    }
+
+    /// Alvos de outros métodos não podem receber D-pad do `drive_approach` — o
+    /// lendário estático clássico (Regis/Rayquaza) esperaria um A parado, e andar
+    /// tiraria o personagem de frente dele.
+    #[test]
+    fn approach_is_noop_for_other_methods() {
+        let mut gba = Gba::new();
+        let mut h = Hunter::new();
+        let target = TargetDef {
+            name: "Rayquaza",
+            species: 406,
+            slot: Slot::Enemy,
+            method: HuntMethod::SoftResetLegendary,
+            cursor: StarterCursor::Center,
+        };
+        h.frames_this_attempt = APPROACH_START_FRAME + 1;
+        h.drive_approach(&mut gba, &target);
+        for b in WILD_DIRS {
+            assert!(
+                (gba.bus.io.joypad.keyinput() & (1 << (b as u16))) != 0,
+                "{b:?} deveria seguir solto"
+            );
+        }
     }
 
     /// O ciclo de direções do [`HuntMethod::WildSpin`]: em cada janela exatamente
