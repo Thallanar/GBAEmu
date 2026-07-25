@@ -2,7 +2,7 @@
 
 > Emulador de Game Boy Advance multiplataforma (Windows, Linux, Android) com modo diferencial **Shiny Hunter** para automação de caça a Pokémon shiny.
 
-_Última atualização: 2026-07-17_
+_Última atualização: 2026-07-24_
 
 > O estado atual do projeto vive na seção **8. Status atual**; o trabalho não
 > segue ordem linear — pegue a fase/etapa que fizer sentido. Mantenha este
@@ -162,6 +162,13 @@ auroragba/
       IWRAM pela assinatura do LCG, tolerante a re-seed); espécies confirmadas
       pelo oráculo de sprite (`rng_scan --sprites`). Alvos: mascote da versão +
       Rayquaza + Regis + 3 iniciais.
+- [X] Método: lendário que **não espera interação** (`HuntMethod::SoftResetApproach`)
+      — Groudon/Kyogre das cavernas do evento de clima anormal (Terra Cave /
+      Marine Cave), que vêm pra cima do jogador por proximidade em vez de esperar
+      um A. Depois do soft-reset o Hunter segura a direção do lendário o bastante
+      pra **andar** 1 tile (16 frames) e solta por 24, em ciclo, com o A-mash
+      rodando nas folgas. Direções confirmadas em jogo: Groudon à direita, Kyogre
+      à esquerda. **Validado na ROM real.**
 - [ ] FireRed/LeafGreen (BPRE/BPGE): RAM + gRngValue + endereços do menu do
       inicial por versão (mapear com `rng_scan`/símbolos do decomp pokefirered)
 - [X] Método: random encounters selvagem (`HuntMethod::WildSpin`) — sem reset.
@@ -384,7 +391,9 @@ Otimizações estruturais do interpretador, medidas em release headless.
   da ROM, **validado na ROM real do Emerald**. Métodos: **starter** (3 iniciais de
   Hoenn via cursor em malha fechada), **selvagem** (`WildSpin`, sem reset),
   **presente estático** (`StaticGift` — Beldum pós-E4 + iniciais de Johto pós-Dex,
-  varrendo os 6 slots do party). Ruby/Sapphire também fechados. Faltam
+  varrendo os 6 slots do party) e **lendário por proximidade** (`SoftResetApproach`
+  — Groudon/Kyogre do clima anormal, com passo de aproximação). Ruby/Sapphire
+  também fechados. Faltam
   FireRed/LeafGreen, a pesca (estacionada) e o Marco 2 do selvagem (fuga encadeada).
 - [~] Fase 7 — Android: ponte JNI + app Kotlin (render GL ES + controles touch +
   **áudio via AudioTrack**), build via cargo-ndk + Gradle, **validado no emulador

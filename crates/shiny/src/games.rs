@@ -20,6 +20,14 @@ pub enum Slot {
 pub enum HuntMethod {
     /// Soft-reset na frente de um lendário estático: dá A/Start até a batalha.
     SoftResetLegendary,
+    /// Soft-reset num lendário que **não espera interação**: ele vem pra cima do
+    /// jogador quando você chega perto (Groudon na Terra Cave / Kyogre na Marine
+    /// Cave, do evento de clima anormal pós-Liga). Como a batalha dispara por
+    /// proximidade, o A repetido sozinho nunca chega ao encontro — o Hunter
+    /// precisa **andar** um tile na direção do lendário. Igual ao
+    /// [`HuntMethod::SoftResetLegendary`] no resto (soft-reset re-rola o PID,
+    /// alvo no slot 0 do time inimigo).
+    SoftResetApproach(Approach),
     /// Inicial no laboratório: amassa A pra chegar na bag e (se preciso) segura
     /// uma direção pra mover o cursor até o inicial certo.
     Starter,
@@ -40,6 +48,17 @@ pub enum HuntMethod {
     /// os diálogos. **Exige um slot de time livre** — com o time cheio o presente vai
     /// pro PC (outro endereço/formato), e a varredura não o encontra.
     StaticGift,
+}
+
+/// Para onde o Hunter deve dar o passo de aproximação no
+/// [`HuntMethod::SoftResetApproach`] — a direção em que o lendário está,
+/// relativa ao tile onde o jogo foi salvo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Approach {
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 /// No menu de seleção do inicial (3 Poké Balls em linha), de que lado fica o
@@ -181,18 +200,23 @@ const EMERALD: GameProfile = GameProfile {
             method: HuntMethod::SoftResetLegendary,
             cursor: StarterCursor::Center,
         },
+        // Groudon/Kyogre da Emerald ficam nas cavernas do evento de clima anormal
+        // (Terra Cave / Marine Cave) e disparam a batalha por proximidade, não por
+        // interação — daí o `SoftResetApproach`. Direções confirmadas em jogo: com
+        // o save feito no tile em frente, o Groudon fica um passo à DIREITA e o
+        // Kyogre um passo à ESQUERDA.
         TargetDef {
             name: "Groudon",
             species: 405,
             slot: Slot::Enemy,
-            method: HuntMethod::SoftResetLegendary,
+            method: HuntMethod::SoftResetApproach(Approach::Right),
             cursor: StarterCursor::Center,
         },
         TargetDef {
             name: "Kyogre",
             species: 404,
             slot: Slot::Enemy,
-            method: HuntMethod::SoftResetLegendary,
+            method: HuntMethod::SoftResetApproach(Approach::Left),
             cursor: StarterCursor::Center,
         },
         TargetDef {
