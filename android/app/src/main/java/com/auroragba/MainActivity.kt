@@ -34,8 +34,10 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.VideoView
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -256,6 +258,12 @@ class MainActivity : Activity() {
     @Volatile private var huntSupported = false
     @Volatile private var huntGameName = ""
     @Volatile private var huntTargets: Array<String> = emptyArray()
+    // Ajuda "Como usar" de cada alvo (mesmo índice de huntTargets), lida junto
+    // com os alvos na thread GL pra a UI não tocar no emulador.
+    @Volatile private var huntHelps: Array<HuntHelp> = emptyArray()
+
+    /** Ajuda de um alvo: título do modo, passo a passo e vídeo (nome-base ou ""). */
+    private class HuntHelp(val title: String, val body: String, val video: String)
 
     // Stats da caça publicadas pela thread GL a cada step; lidas pelo updater da UI.
     @Volatile private var statAttempts = 0L
@@ -1188,14 +1196,106 @@ class MainActivity : Activity() {
         }
         AlertDialog.Builder(this)
             .setTitle("Alvo — $huntGameName")
-            .setItems(targets) { _, i ->
-                currentTargetName = targets[i]
-                statAttempts = 0
-                statSpecies = 0
-                statBestSV = 0xFFFF
-                pendingHuntStart.set(i)
-            }
+            .setItems(targets) { _, i -> beginHunt(i) }
+            // "Como usar" no lado oposto aos botões de ação, como no desktop.
+            .setNeutralButton("❓ Como usar") { _, _ -> chooseHelpTarget() }
             .show()
+    }
+
+    /** Pede à thread GL pra começar a caça no alvo `i`. */
+    private fun beginHunt(i: Int) {
+        currentTargetName = huntTargets[i]
+        statAttempts = 0
+        statSpecies = 0
+        statBestSV = 0xFFFF
+        pendingHuntStart.set(i)
+    }
+
+    /** "❓ Como usar": escolhe de qual alvo ver a ajuda. */
+    private fun chooseHelpTarget() {
+        val targets = huntTargets
+        if (targets.isEmpty()) return
+        AlertDialog.Builder(this)
+            .setTitle("❓ Como usar — qual alvo?")
+            .setItems(targets) { _, i -> showHuntHelp(i) }
+            .setNegativeButton("Voltar") { _, _ -> startShinyHunter() }
+            .show()
+    }
+
+    /**
+     * Modal de ajuda do alvo `i`: passo a passo e, logo abaixo, o vídeo de exemplo
+     * em loop (quando o modo tem vídeo). Daqui já dá pra iniciar a caça.
+     */
+    private fun showHuntHelp(i: Int) {
+        val help = huntHelps.getOrNull(i) ?: return
+        val dp = resources.displayMetrics.density
+        val pad = (16 * dp).toInt()
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+        }
+        column.addView(TextView(this).apply {
+            text = huntTargets[i]
+            textSize = 16f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        })
+        column.addView(TextView(this).apply {
+            text = help.body
+            textSize = 14f
+            setPadding(0, pad / 2, 0, pad / 2)
+        })
+        var video: VideoView? = null
+        val file = if (help.video.isNotEmpty()) helpVideoFile(help.video) else null
+        if (file != null) {
+            video = VideoView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                )
+                setVideoPath(file.absolutePath)
+                setOnPreparedListener { mp ->
+                    mp.isLooping = true
+                    start()
+                }
+            }
+            column.addView(video)
+        } else {
+            column.addView(TextView(this).apply {
+                text = if (help.video.isNotEmpty()) {
+                    "Não foi possível abrir o vídeo de exemplo."
+                } else {
+                    "🎬 Ainda não há vídeo de exemplo para este modo."
+                }
+                alpha = 0.7f
+                setPadding(0, 0, 0, pad / 2)
+            })
+        }
+        AlertDialog.Builder(this)
+            .setTitle("❓ Como usar — ${help.title}")
+            .setView(ScrollView(this).apply { addView(column) })
+            .setPositiveButton("▶ Iniciar caça") { _, _ -> beginHunt(i) }
+            .setNegativeButton("Fechar", null)
+            .setOnDismissListener { video?.stopPlayback() }
+            .show()
+    }
+
+    /**
+     * O VideoView não lê direto dos assets do APK: copia `hunter_help/<nome>.mp4`
+     * pro cache (uma vez; recopia se o tamanho mudou numa versão nova do app).
+     * `null` se o asset não existe ou a cópia falhar.
+     */
+    private fun helpVideoFile(stem: String): File? = try {
+        val asset = "hunter_help/$stem.mp4"
+        val out = File(File(cacheDir, "hunter_help"), "$stem.mp4")
+        val size = assets.openFd(asset).use { it.length }
+        if (!out.isFile || out.length() != size) {
+            out.parentFile?.mkdirs()
+            assets.open(asset).use { input -> out.outputStream().use { input.copyTo(it) } }
+        }
+        out
+    } catch (e: Exception) {
+        Log.w(TAG, "vídeo de ajuda $stem indisponível", e)
+        null
     }
 
     /** Texto do overlay de status da caça (lido das stats publicadas). */
@@ -1410,10 +1510,18 @@ class MainActivity : Activity() {
             huntGameName = NativeBridge.huntGameName(handle)
             val n = NativeBridge.huntTargetCount(handle)
             huntTargets = Array(n) { NativeBridge.huntTargetName(handle, it) }
+            huntHelps = Array(n) {
+                HuntHelp(
+                    NativeBridge.huntHelpTitle(handle, it),
+                    NativeBridge.huntHelpBody(handle, it),
+                    NativeBridge.huntHelpVideo(handle, it),
+                )
+            }
             Log.i(TAG, "shiny hunter: $huntGameName, ${n} alvos")
         } else {
             huntGameName = ""
             huntTargets = emptyArray()
+            huntHelps = emptyArray()
         }
         runOnUiThread { stopHuntUI() }
 

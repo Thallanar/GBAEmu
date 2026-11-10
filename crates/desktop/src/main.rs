@@ -17,6 +17,7 @@ use eframe::egui;
 
 mod audio;
 mod discovery;
+mod help_video;
 mod library;
 mod link;
 mod png;
@@ -525,6 +526,11 @@ struct AuroraApp {
     gilrs: Option<gilrs::Gilrs>,
     /// Janela de configuração de controles aberta?
     show_input_config: bool,
+    /// Janela "❓ Como usar" do Shiny Hunter aberta?
+    show_hunt_help: bool,
+    /// Player do vídeo de exemplo da ajuda (criado ao abrir a janela; trocado
+    /// quando o alvo muda pra um modo com outro vídeo).
+    help_player: Option<help_video::VideoPlayer>,
     /// Binding em remapeamento (aguardando a próxima tecla/botão). None = nenhum.
     rebinding: Option<Rebind>,
     /// Biblioteca de ROMs (varredura de pasta + capas).
@@ -690,6 +696,8 @@ impl AuroraApp {
                 }
             },
             show_input_config: false,
+            show_hunt_help: false,
+            help_player: None,
             rebinding: None,
             library: library::Library::new(cache_dir),
             show_library: false,
@@ -1082,13 +1090,25 @@ impl AuroraApp {
                     .suffix(" fr/upd"),
             );
         });
-        if self.hunting {
-            if ui.button("⏹ Parar caça").clicked() {
-                self.hunting = false;
+        // Iniciar/parar à esquerda; "Como usar" no lado oposto.
+        ui.horizontal(|ui| {
+            if self.hunting {
+                if ui.button("⏹ Parar caça").clicked() {
+                    self.hunting = false;
+                }
+            } else if ui.button("▶ Iniciar caça").clicked() {
+                self.start_hunt();
             }
-        } else if ui.button("▶ Iniciar caça").clicked() {
-            self.start_hunt();
-        }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("❓ Como usar")
+                    .on_hover_text("Passo a passo e vídeo de exemplo deste modo de caça")
+                    .clicked()
+                {
+                    self.show_hunt_help = true;
+                }
+            });
+        });
 
         if self.hunter.found {
             ui.separator();
@@ -1286,6 +1306,57 @@ impl AuroraApp {
             }
         }
         last
+    }
+
+    /// Janela "❓ Como usar" do Shiny Hunter: passo a passo do modo do alvo
+    /// selecionado e, logo abaixo, o vídeo de exemplo (quando existe). O conteúdo
+    /// vem de `auroragba_shiny::help` — o mesmo texto que o Android mostra.
+    fn hunt_help_window(&mut self, ctx: &egui::Context) {
+        let Some(profile) = self.profile else {
+            self.show_hunt_help = false;
+            return;
+        };
+        let target = profile.targets[self.selected_target];
+        let help = auroragba_shiny::help::help_for(profile, &target);
+
+        // Player do vídeo deste modo: cria ao abrir; troca se o alvo mudou de modo.
+        match (help.video, &self.help_player) {
+            (Some(v), Some(p)) if p.video() == v => {}
+            (Some(v), _) => self.help_player = help_video::VideoPlayer::new(v),
+            (None, _) => self.help_player = None,
+        }
+
+        let mut open = self.show_hunt_help;
+        egui::Window::new(format!("❓ Como usar — {}", help.title))
+            .id(egui::Id::new("hunt_help"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                ui.set_width(560.0);
+                ui.label(egui::RichText::new(target.name).strong());
+                ui.add_space(4.0);
+                for para in help.body.split("\n\n") {
+                    ui.label(para);
+                    ui.add_space(6.0);
+                }
+                ui.separator();
+                match &mut self.help_player {
+                    Some(player) => player.show(ui, 560.0),
+                    None if help.video.is_some() => {
+                        ui.label("Não foi possível iniciar o vídeo de exemplo.");
+                    }
+                    None => {
+                        ui.label(egui::RichText::new(auroragba_shiny::help::NO_VIDEO_NOTE).weak());
+                    }
+                }
+            });
+        self.show_hunt_help = open;
+        if !open {
+            // Libera o decoder e a textura ao fechar.
+            self.help_player = None;
+        }
     }
 
     /// Janela de configuração de controles: uma grade Botão × (Teclado, Gamepad)
@@ -2081,6 +2152,10 @@ impl eframe::App for AuroraApp {
         // Janela de configuração de controles (quando aberta).
         if self.show_input_config {
             self.input_config_window(ctx);
+        }
+        // Ajuda "Como usar" do Shiny Hunter (quando aberta).
+        if self.show_hunt_help {
+            self.hunt_help_window(ctx);
         }
         // Janela de vídeo (escala + shader). Passa o contexto GL pra compilar
         // shaders importados na hora do clique em "Importar".

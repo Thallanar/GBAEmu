@@ -186,6 +186,12 @@ auroragba/
       o re-seed (valor do `gRngValue` fora do alcance do LCG) e reinjeta.
       Validado sem interface no save real do FireRed (inicial Bulbasaur: PIDs
       distintos a cada reset). Falta uma caça completa em jogo (lendários/presentes).
+- [X] **"❓ Como usar"** no Shiny Hunter (desktop e Android): modal com o passo a
+      passo do modo do alvo e o vídeo de exemplo logo abaixo, em loop. Texto único
+      em `crates/shiny/src/help.rs`; vídeos em `assets/hunter-help/` (desktop
+      decodifica H.264 baseline com `openh264`, Android usa `VideoView`). Vídeos
+      gravados: iniciais RSE, iniciais FRLG e selvagens. **Faltam vídeos** de
+      presentes, fósseis, lendários, Groudon/Kyogre e pesca (hoje só texto).
 - [X] Método: random encounters selvagem (`HuntMethod::WildSpin`) — sem reset.
       O boneco fica na mesma moita e o Hunter cicla as 4 direções (cada uma
       segurada o bastante pra virar **passo**, não só rotação; mudar a direção
