@@ -15,6 +15,9 @@ path = "src/main.rs"
 name = "smoke"
 path = "src/bin/smoke.rs"
 
+[build-dependencies]
+winresource = "0.1"
+
 [dependencies]
 auroragba-core = { path = "../core", features = ["save-states"] }
 auroragba-link = { path = "../link" }

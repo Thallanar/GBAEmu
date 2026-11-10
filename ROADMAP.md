@@ -130,6 +130,10 @@ auroragba/
 - [X] Configuração de teclas e gamepad (gilrs; remapeável na UI, persistido)
 - [X] Save states UI (8 slots em disco, F5/F9, menu "Estado")
 - [X] Fast-forward (Espaço), rewind (R, anel em RAM), screenshots (F12, PNG)
+- [X] Ícone do app (o mesmo do launcher Android, gerado por
+      `scripts/gen_desktop_icon.py`): ícone da janela via `with_icon`, ícone do
+      `.exe` no Windows via `build.rs` (`winresource`) e `.desktop` no Linux
+      (`scripts/install_linux_desktop.sh` — no Wayland a dock só usa o `.desktop`)
 
 ### Fase 6 — 🌟 Shiny Hunter Mode (3–5 semanas)
 

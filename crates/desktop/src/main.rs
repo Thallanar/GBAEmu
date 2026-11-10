@@ -392,10 +392,18 @@ fn main() -> eframe::Result<()> {
     // da janela abrir — o host bloqueia até o parceiro chegar.
     let link_session = parse_link_args();
 
+    // Mesmo ícone do launcher Android (gerado por scripts/gen_desktop_icon.py).
+    // Vale pra barra de título/tarefas no Windows e no X11. No Wayland o
+    // compositor ignora o ícone da janela e usa o do `.desktop` cujo nome bate
+    // com o `app_id` — ver assets/linux/auroragba.desktop.
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/auroragba.png"))
+        .expect("ícone embutido deve ser um PNG válido");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 720.0])
-            .with_title("AuroraGBA"),
+            .with_title("AuroraGBA")
+            .with_app_id("auroragba")
+            .with_icon(icon),
         ..Default::default()
     };
 
