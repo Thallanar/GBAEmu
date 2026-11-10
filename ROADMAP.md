@@ -2,7 +2,7 @@
 
 > Emulador de Game Boy Advance multiplataforma (Windows, Linux, Android) com modo diferencial **Shiny Hunter** para automação de caça a Pokémon shiny.
 
-_Última atualização: 2026-07-24_
+_Última atualização: 2026-11-10_
 
 > O estado atual do projeto vive na seção **8. Status atual**; o trabalho não
 > segue ordem linear — pegue a fase/etapa que fizer sentido. Mantenha este
@@ -169,8 +169,15 @@ auroragba/
       pra **andar** 1 tile (16 frames) e solta por 24, em ciclo, com o A-mash
       rodando nas folgas. Direções confirmadas em jogo: Groudon à direita, Kyogre
       à esquerda. **Validado na ROM real.**
-- [ ] FireRed/LeafGreen (BPRE/BPGE): RAM + gRngValue + endereços do menu do
-      inicial por versão (mapear com `rng_scan`/símbolos do decomp pokefirered)
+- [~] FireRed/LeafGreen (BPRE/BPGE): perfis completos — endereços dos símbolos
+      do decomp pokefirered (**iguais nas 4 builds** FR/LG × rev 0/1).
+      `gRngValue=0x03005000` **confirmado empiricamente** com `rng_scan` nas duas
+      ROMs (rev 1); espécies confirmadas pelo oráculo de sprite. `gMain.inBattle`
+      (0x03003529, bit 0x02) pelo layout do `struct Main` (igual ao Emerald).
+      Iniciais de Kanto = Balls na mesa ⇒ `StaticGift` (sem menu de cursor).
+      Alvos: 3 iniciais, Mewtwo, pássaros, Snorlax, Lapras, Eevee,
+      Hitmonlee/Hitmonchan, 3 fósseis, selvagem. **Falta validar em jogo** (caça
+      real numa ROM com save).
 - [X] Método: random encounters selvagem (`HuntMethod::WildSpin`) — sem reset.
       O boneco fica na mesma moita e o Hunter cicla as 4 direções (cada uma
       segurada o bastante pra virar **passo**, não só rotação; mudar a direção
@@ -393,8 +400,8 @@ Otimizações estruturais do interpretador, medidas em release headless.
   **presente estático** (`StaticGift` — Beldum pós-E4 + iniciais de Johto pós-Dex,
   varrendo os 6 slots do party) e **lendário por proximidade** (`SoftResetApproach`
   — Groudon/Kyogre do clima anormal, com passo de aproximação). Ruby/Sapphire
-  também fechados. Faltam
-  FireRed/LeafGreen, a pesca (estacionada) e o Marco 2 do selvagem (fuga encadeada).
+  também fechados. FireRed/LeafGreen com perfis prontos (falta validar em jogo).
+  Faltam a pesca (estacionada) e o Marco 2 do selvagem (fuga encadeada).
 - [~] Fase 7 — Android: ponte JNI + app Kotlin (render GL ES + controles touch +
   **áudio via AudioTrack**), build via cargo-ndk + Gradle, **validado no emulador
   rodando Pokémon Emerald**. Saves (`.sav` + estados, espelho SAF), biblioteca de
@@ -430,7 +437,7 @@ Otimizações estruturais do interpretador, medidas em release headless.
   HLE não foram formatados); arquivos novos/reescritos já estão fmt-clean.
 - **Timing de ciclos**: hoje cada instrução conta como 1 ciclo (placeholder);
   falta wait states por região de memória (afeta precisão fina e pitch de áudio).
-- **Faltam**: Fase 6 (FireRed/LeafGreen + método de pesca, estacionado + Marco 2
+- **Faltam**: Fase 6 (validar FireRed/LeafGreen em jogo + método de pesca, estacionado + Marco 2
   do selvagem no Shiny Hunter), mosaic afim (só BG texto + OBJ implementados),
   APK Android assinado, link Android↔PC sobre Wi-Fi (latência) e o relay de
   internet (Fase Link L4).
