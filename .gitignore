@@ -31,3 +31,6 @@ saves/
 # Logs
 *.log
 /local.properties
+
+# Instruções locais do Claude Code — não versionar
+CLAUDE.md
