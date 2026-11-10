@@ -353,7 +353,7 @@ mod tests {
         // o que produzimos, com as cores certas.
         let (w, h) = (4usize, 3usize);
         let mut rgba = vec![0u8; w * h * 4];
-        for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+        for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             px.copy_from_slice(&[(i * 20) as u8, 255 - (i * 10) as u8, (i * 5) as u8, 255]);
         }
         let png = crate::png::encode_rgba(w, h, &rgba);

@@ -787,7 +787,9 @@ mod android_impl {
         // RGBA (bytes) → ARGB (i32 por pixel) pro Bitmap.ARGB_8888 do Android.
         let px: Vec<jint> = sprite
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| {
                 ((c[3] as i32) << 24) | ((c[0] as i32) << 16) | ((c[1] as i32) << 8) | c[2] as i32
             })

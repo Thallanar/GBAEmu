@@ -130,7 +130,7 @@ fn main() -> std::io::Result<()> {
         let fb = &gba.bus.ppu.framebuffer;
         let mut f = std::fs::File::create(&out)?;
         write!(f, "P6\n{} {}\n255\n", 240, 160)?;
-        for px in fb.chunks_exact(4) {
+        for px in fb.as_chunks::<4>().0.iter() {
             f.write_all(&px[0..3])?;
         }
         println!("Framebuffer salvo em {out}");
@@ -222,7 +222,7 @@ fn main() -> std::io::Result<()> {
     // Resumo do framebuffer: número de cores distintas (sanidade da renderização).
     let fb = &gba.bus.ppu.framebuffer;
     let mut colors = std::collections::HashSet::new();
-    for px in fb.chunks_exact(4) {
+    for px in fb.as_chunks::<4>().0.iter() {
         colors.insert([px[0], px[1], px[2]]);
     }
     println!("Framebuffer: {} cores distintas", colors.len());
@@ -237,7 +237,7 @@ fn main() -> std::io::Result<()> {
         use std::io::Write;
         let mut f = std::fs::File::create(&out)?;
         write!(f, "P6\n{} {}\n255\n", 240, 160)?;
-        for px in fb.chunks_exact(4) {
+        for px in fb.as_chunks::<4>().0.iter() {
             f.write_all(&px[0..3])?;
         }
         println!("Framebuffer salvo em {out}");

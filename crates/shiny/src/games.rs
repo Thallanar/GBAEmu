@@ -446,8 +446,175 @@ const SAPPHIRE: GameProfile = GameProfile {
     ],
 };
 
+// ───── FireRed/LeafGreen (BPRE/BPGE) ─────
+//
+// Endereços dos símbolos do decomp pret/pokefirered (branch `symbols`),
+// conferidos nas QUATRO builds (FR/LG × rev 0/1): gPlayerParty, gEnemyParty,
+// gRngValue e gMain são IDÊNTICOS em todas. `gRngValue` (0x03005000) também foi
+// confirmado empiricamente com o `rng_scan` nas ROMs FR e LG rev 1 (1199/1200
+// avanços de LCG). Como no Emerald, as parties ficam na EWRAM.
+//
+// Diferenças de roteiro pro Hoenn:
+// - **Iniciais**: não há menu de cursor. São três Poké Balls na mesa do Oak; você
+//   anda até a que quer e o diálogo é só "YES" — é o mesmo caso dos iniciais de
+//   Johto no Emerald, então usa [`HuntMethod::StaticGift`] (salve EM FRENTE à Ball
+//   do alvo; o time está vazio, o inicial cai no slot 0 e a varredura acha).
+// - Lendários estáticos (pássaros, Mewtwo, Snorlax) disparam a batalha com A —
+//   [`HuntMethod::SoftResetLegendary`]. No Snorlax o A também responde "YES" pra
+//   usar a Poké Flute. Os cães lendários são roamers (PID fixado no save quando
+//   gerados — soft-reset não re-rola), ficam de fora como os Lati.
+//
+// Índices INTERNOS Gen 3: todos os alvos de Kanto são ≤251, faixa em que o
+// índice interno = nº da Dex nacional (só a cauda de Hoenn é reordenada).
+
+/// Alvos comuns a FireRed e LeafGreen (não há exclusivo de versão entre eles).
+const KANTO_TARGETS: &[TargetDef] = &[
+    // Iniciais (presente do Oak, Ball na mesa).
+    TargetDef {
+        name: "Bulbasaur (inicial)",
+        species: 1,
+        slot: Slot::Player,
+        method: HuntMethod::StaticGift,
+        cursor: StarterCursor::Center,
+    },
+    TargetDef {
+        name: "Charmander (inicial)",
+        species: 4,
+        slot: Slot::Player,
+        method: HuntMethod::StaticGift,
+        cursor: StarterCursor::Center,
+    },
+    TargetDef {
+        name: "Squirtle (inicial)",
+        species: 7,
+        slot: Slot::Player,
+        method: HuntMethod::StaticGift,
+        cursor: StarterCursor::Center,
+    },
+    // Lendários / estáticos (soft-reset na frente, A dispara a batalha).
+    TargetDef {
+        name: "Mewtwo",
+        species: 150,
+        slot: Slot::Enemy,
+        method: HuntMethod::SoftResetLegendary,
+        cursor: StarterCursor::Center,
+    },
+    TargetDef {
+        name: "Articuno",
+        species: 144,
+        slot: Slot::Enemy,
+        method: HuntMethod::SoftResetLegendary,
+        cursor: StarterCursor::Center,
+    },
+    TargetDef {
+        name: "Zapdos",
+        species: 145,
+        slot: Slot::Enemy,
+        method: HuntMethod::SoftResetLegendary,
+        cursor: StarterCursor::Center,
+    },
+    TargetDef {
+        name: "Moltres",
+        species: 146,
+        slot: Slot::Enemy,
+        method: HuntMethod::SoftResetLegendary,
+        cursor: StarterCursor::Center,
+    },
+    TargetDef {
+        name: "Snorlax",
+        species: 143,
+        slot: Slot::Enemy,
+        method: HuntMethod::SoftResetLegendary,
+        cursor: StarterCursor::Center,
+    },
+    // Presentes por script (A-mash; exigem vaga no time).
+    TargetDef {
+        name: "Lapras (presente)",
+        species: 131,
+        slot: Slot::Player,
+        method: HuntMethod::StaticGift,
+        cursor: StarterCursor::Center,
+    },
+    TargetDef {
+        name: "Eevee (presente)",
+        species: 133,
+        slot: Slot::Player,
+        method: HuntMethod::StaticGift,
+        cursor: StarterCursor::Center,
+    },
+    TargetDef {
+        name: "Hitmonlee (presente)",
+        species: 106,
+        slot: Slot::Player,
+        method: HuntMethod::StaticGift,
+        cursor: StarterCursor::Center,
+    },
+    TargetDef {
+        name: "Hitmonchan (presente)",
+        species: 107,
+        slot: Slot::Player,
+        method: HuntMethod::StaticGift,
+        cursor: StarterCursor::Center,
+    },
+    // Fósseis revividos no laboratório de Cinnabar: salve em frente ao cientista
+    // depois de entregar o fóssil (o PID nasce quando ele te entrega o Pokémon).
+    TargetDef {
+        name: "Omanyte (fóssil)",
+        species: 138,
+        slot: Slot::Player,
+        method: HuntMethod::StaticGift,
+        cursor: StarterCursor::Center,
+    },
+    TargetDef {
+        name: "Kabuto (fóssil)",
+        species: 140,
+        slot: Slot::Player,
+        method: HuntMethod::StaticGift,
+        cursor: StarterCursor::Center,
+    },
+    TargetDef {
+        name: "Aerodactyl (fóssil)",
+        species: 142,
+        slot: Slot::Player,
+        method: HuntMethod::StaticGift,
+        cursor: StarterCursor::Center,
+    },
+    // Selvagem na grama (qualquer espécie) — mesmo WildSpin do Emerald.
+    TargetDef {
+        name: "Selvagem (qualquer)",
+        species: 0,
+        slot: Slot::Enemy,
+        method: HuntMethod::WildSpin,
+        cursor: StarterCursor::Center,
+    },
+];
+
+/// `gMain` do FRLG fica em 0x030030F0; o `struct Main` tem o MESMO layout do
+/// Emerald (`inBattle` = bit 1 do byte em +0x439).
+const FRLG_BATTLE_FLAG: (u32, u8) = (0x0300_3529, 0x02);
+
+/// Pokémon FireRed (BPRE).
+const FIRERED: GameProfile = GameProfile {
+    code: "BPRE",
+    name: "Pokémon FireRed",
+    player_party: 0x0202_4284,
+    enemy_party: 0x0202_402C,
+    rng_addr: Some(0x0300_5000),
+    // Sem menu de cursor: os iniciais são StaticGift (ver acima).
+    starter_menu: None,
+    battle_flag: Some(FRLG_BATTLE_FLAG),
+    targets: KANTO_TARGETS,
+};
+
+/// Pokémon LeafGreen (BPGE). Mesmos endereços e alvos do FireRed.
+const LEAFGREEN: GameProfile = GameProfile {
+    code: "BPGE",
+    name: "Pokémon LeafGreen",
+    ..FIRERED
+};
+
 /// Todos os perfis conhecidos.
-pub const PROFILES: &[GameProfile] = &[EMERALD, RUBY, SAPPHIRE];
+pub const PROFILES: &[GameProfile] = &[EMERALD, RUBY, SAPPHIRE, FIRERED, LEAFGREEN];
 
 /// Procura um perfil pelo game code do header da ROM.
 pub fn detect(game_code: &str) -> Option<&'static GameProfile> {
@@ -506,6 +673,32 @@ mod tests {
                 "{name}: presente cai no time do jogador"
             );
         }
+    }
+
+    #[test]
+    fn detects_firered_and_leafgreen_by_code() {
+        let fr = detect("BPRE").expect("FireRed deveria ser reconhecido");
+        let lg = detect("BPGE").expect("LeafGreen deveria ser reconhecido");
+        for p in [fr, lg] {
+            assert!(p.rng_addr.is_some() && p.battle_flag.is_some());
+            // Iniciais de Kanto: presentes na mesa (StaticGift), sem menu de cursor.
+            assert!(p.starter_menu.is_none());
+            for (name, species) in [
+                ("Bulbasaur (inicial)", 1u16),
+                ("Charmander (inicial)", 4),
+                ("Squirtle (inicial)", 7),
+            ] {
+                let t = p
+                    .targets
+                    .iter()
+                    .find(|t| t.name == name)
+                    .unwrap_or_else(|| panic!("{name} deveria existir em {}", p.name));
+                assert_eq!(t.species, species);
+                assert_eq!(t.method, HuntMethod::StaticGift);
+            }
+        }
+        assert_eq!(fr.player_party, lg.player_party);
+        assert_ne!(fr.name, lg.name);
     }
 
     #[test]
