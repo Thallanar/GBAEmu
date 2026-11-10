@@ -1,0 +1,18 @@
+# Cross-compile do desktop pra Windows a partir do Linux (MinGW).
+#
+# O `openh264` (player dos vídeos do "❓ Como usar") é C++. Por padrão o `cc` o
+# linka com a libstdc++ DINÂMICA, e o .exe passa a exigir libstdc++-6.dll — que
+# não existe num Windows comum. Aqui, só no alvo windows-gnu:
+# - CXXSTDLIB vazio: o `cc` não pede a libstdc++;
+# - o link do binário a adiciona ESTÁTICA (e o crt-static cuida de libgcc/pthread).
+# O CI do Windows usa o alvo MSVC e não passa por aqui.
+[target.x86_64-pc-windows-gnu]
+rustflags = [
+  "-C", "target-feature=+crt-static",
+  # A libstdc++ entra no FIM da linha de link, então as libs de que ela depende
+  # (libgcc p/ threads, mingw32/mingwex/msvcrt p/ a libc) vêm repetidas depois dela.
+  "-C", "link-args=-Wl,-Bstatic -lstdc++ -lgcc -lgcc_eh -Wl,-Bdynamic -lmingw32 -lmingwex -lmsvcrt -lkernel32",
+]
+
+[env]
+CXXSTDLIB_x86_64_pc_windows_gnu = ""
