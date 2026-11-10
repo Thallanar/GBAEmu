@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=AuroraGBA
+Comment=Emulador de Game Boy Advance com modo Shiny Hunter
+Exec=auroragba %f
+Icon=auroragba
+Terminal=false
+Categories=Game;Emulator;
+MimeType=application/x-gba-rom;
+StartupWMClass=auroragba
