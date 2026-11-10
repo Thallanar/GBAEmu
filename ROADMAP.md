@@ -180,8 +180,12 @@ auroragba/
       (0x03003529, bit 0x02) pelo layout do `struct Main` (igual ao Emerald).
       Iniciais de Kanto = Balls na mesa ⇒ `StaticGift` (sem menu de cursor).
       Alvos: 3 iniciais, Mewtwo, pássaros, Snorlax, Lapras, Eevee,
-      Hitmonlee/Hitmonchan, 3 fósseis, selvagem. **Falta validar em jogo** (caça
-      real numa ROM com save).
+      Hitmonlee/Hitmonchan, 3 fósseis, selvagem. **Bugfix 0.70.2**: o FRLG
+      re-semeia o RNG com o Timer1 ao sair do título (frame ~338, depois da
+      injeção do frame 200), e todo reset dava o mesmo PID. Agora o Hunter detecta
+      o re-seed (valor do `gRngValue` fora do alcance do LCG) e reinjeta.
+      Validado sem interface no save real do FireRed (inicial Bulbasaur: PIDs
+      distintos a cada reset). Falta uma caça completa em jogo (lendários/presentes).
 - [X] Método: random encounters selvagem (`HuntMethod::WildSpin`) — sem reset.
       O boneco fica na mesma moita e o Hunter cicla as 4 direções (cada uma
       segurada o bastante pra virar **passo**, não só rotação; mudar a direção

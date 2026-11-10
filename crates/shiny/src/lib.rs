@@ -213,6 +213,9 @@ pub struct Hunter {
     /// `true` depois que `pending_seed` já foi escrito na RAM nesta tentativa
     /// (evita reinjetar a cada frame).
     seed_injected: bool,
+    /// Último valor conhecido do `gRngValue` desde a injeção — base pra detectar
+    /// um re-seed feito pelo próprio jogo (ver [`Hunter::maybe_inject_seed`]).
+    last_rng: u32,
     /// Estado do PRNG do host (SplitMix64). Semeado no `new()` por entropia real
     /// (relógio + PID do processo), então **único por instância** — é isso que
     /// faz vários emuladores abertos juntos gerarem PIDs diferentes em vez de
@@ -235,6 +238,29 @@ pub struct Hunter {
 /// de ~60 a ~500 frames (o PID é rolado entre 500 e 800); 200 fica folgado nas
 /// duas pontas.
 const SEED_INJECT_FRAME: u32 = 200;
+/// Máximo de chamadas a `Random()` que um frame pode fazer pra o valor novo do
+/// `gRngValue` ainda contar como "o mesmo RNG avançando" (e não um re-seed). Bem
+/// acima do que telas normais consomem; um falso "re-seed" só reinjeta uma seed
+/// nova do host, o que é inofensivo.
+const MAX_RNG_STEPS_PER_FRAME: u32 = 4096;
+
+/// Um passo do LCG da Gen 3 (`Random()` do jogo).
+fn lcg_next(seed: u32) -> u32 {
+    seed.wrapping_mul(0x41C6_4E6D).wrapping_add(0x6073)
+}
+
+/// `to` sai de `from` em até `max_steps` passos do LCG? `false` ⇒ alguém escreveu
+/// um valor novo no RNG (re-seed).
+fn lcg_reachable(from: u32, to: u32, max_steps: u32) -> bool {
+    let mut s = from;
+    for _ in 0..=max_steps {
+        if s == to {
+            return true;
+        }
+        s = lcg_next(s);
+    }
+    false
+}
 /// Largura de cada meio-ciclo do tap de A (8 pressionado / 8 solto). Cadência
 /// fixa: a entropia agora vem da seed injetada, não mais do timing.
 const MASH_PERIOD: u32 = 8;
@@ -347,6 +373,7 @@ impl Hunter {
             frames_this_attempt: 0,
             pending_seed: 0,
             seed_injected: false,
+            last_rng: 0,
             rng_state: Self::host_seed(),
             wild_phase: WildPhase::Spinning,
             spin_frames: 0,
@@ -395,14 +422,34 @@ impl Hunter {
     /// Emerald é determinístico (seed fixa no boot) e todo reset, com o mesmo
     /// roteiro de inputs, geraria o **mesmo** PID — medido: 1 único PID em 20
     /// resets. Com a injeção: 20/20 distintos. Jogos sem `rng_addr` não têm
-    /// entropia (a caça vira determinística) — por ora só Emerald é suportado.
+    /// entropia (a caça vira determinística).
+    ///
+    /// **Re-seed do jogo**: depois da injeção, vigia o `gRngValue` a cada frame.
+    /// Se o valor novo não for alcançável a partir do anterior por passos do LCG,
+    /// o jogo re-semeou por conta própria — e a nossa seed se perdeu. FireRed/
+    /// LeafGreen fazem isso ao sair da tela de título (`SeedRngAndSetTrainerId`,
+    /// seed = Timer1, que no emulador é sempre igual): medido no frame ~338, depois
+    /// da injeção no 200 e antes do PID (~900). Sem isso o FRLG dava o **mesmo PID
+    /// em toda tentativa**. Aí injetamos de novo, com seed nova do host.
     fn maybe_inject_seed(&mut self, gba: &mut Gba, profile: &GameProfile) {
-        if self.seed_injected || self.frames_this_attempt != SEED_INJECT_FRAME {
+        let Some(addr) = profile.rng_addr else {
+            return;
+        };
+        if !self.seed_injected {
+            if self.frames_this_attempt == SEED_INJECT_FRAME {
+                gba.bus.write_u32(addr, self.pending_seed);
+                self.last_rng = self.pending_seed;
+                self.seed_injected = true;
+            }
             return;
         }
-        if let Some(addr) = profile.rng_addr {
-            gba.bus.write_u32(addr, self.pending_seed);
-            self.seed_injected = true;
+        let now = gba.bus.read_u32(addr);
+        if lcg_reachable(self.last_rng, now, MAX_RNG_STEPS_PER_FRAME) {
+            self.last_rng = now;
+        } else {
+            let seed = self.next_rng() as u32;
+            gba.bus.write_u32(addr, seed);
+            self.last_rng = seed;
         }
     }
 
@@ -880,6 +927,69 @@ mod tests {
     /// As seeds de uma única instância não podem repetir em ciclo curto (o bug
     /// antigo: a fórmula `attempts % 300` repetia a cada 300 tentativas). Colhe
     /// muitas seeds e exige diversidade quase total.
+    #[test]
+    fn lcg_reachable_tells_advance_from_reseed() {
+        let s = 0x1234_5678;
+        let mut t = s;
+        for _ in 0..50 {
+            t = lcg_next(t);
+        }
+        assert!(lcg_reachable(s, s, 4096), "0 passos = mesmo valor");
+        assert!(
+            lcg_reachable(s, t, 4096),
+            "50 passos do LCG = avanço normal"
+        );
+        assert!(!lcg_reachable(s, 0x0000_ABCD, 4096), "valor novo = re-seed");
+    }
+
+    /// Regressão FRLG: o jogo re-semeia o RNG (Timer1) ao sair do título, DEPOIS
+    /// da injeção do frame 200 — antes o Hunter não percebia e todo reset dava o
+    /// mesmo PID. Agora um re-seed depois da injeção dispara uma reinjeção; um
+    /// avanço normal do LCG não.
+    #[test]
+    fn reinjects_seed_when_game_reseeds_after_injection() {
+        let rng = 0x0300_5000;
+        let mut gba = Gba::new();
+        let profile = GameProfile {
+            code: "TEST",
+            name: "test",
+            player_party: 0x0200_0000,
+            enemy_party: 0x0200_1000,
+            rng_addr: Some(rng),
+            starter_menu: None,
+            battle_flag: None,
+            targets: &[],
+        };
+        let mut h = Hunter::new();
+
+        // Antes do frame de injeção: não mexe no RNG.
+        h.frames_this_attempt = SEED_INJECT_FRAME - 1;
+        gba.bus.write_u32(rng, 0x0000_0042);
+        h.maybe_inject_seed(&mut gba, &profile);
+        assert_eq!(gba.bus.read_u32(rng), 0x0000_0042);
+
+        // No frame de injeção: escreve a seed da tentativa.
+        h.frames_this_attempt = SEED_INJECT_FRAME;
+        h.maybe_inject_seed(&mut gba, &profile);
+        let injected = gba.bus.read_u32(rng);
+        assert_eq!(injected, h.pending_seed);
+
+        // O jogo avança o RNG normalmente: nada muda.
+        let advanced = lcg_next(lcg_next(injected));
+        gba.bus.write_u32(rng, advanced);
+        h.maybe_inject_seed(&mut gba, &profile);
+        assert_eq!(gba.bus.read_u32(rng), advanced);
+
+        // O jogo re-semeia com um valor de 16 bits (Timer1): reinjeta seed nova.
+        gba.bus.write_u32(rng, 0x0000_0A6A);
+        h.maybe_inject_seed(&mut gba, &profile);
+        let reinjected = gba.bus.read_u32(rng);
+        assert_ne!(
+            reinjected, 0x0000_0A6A,
+            "re-seed do jogo deveria ser sobrescrito"
+        );
+    }
+
     #[test]
     fn seeds_do_not_cycle() {
         let mut h = Hunter::new();
