@@ -388,12 +388,23 @@ impl Hunter {
     /// Semente de entropia **real** do host: instante atual (nanos) misturado com
     /// o PID do processo. Dois emuladores abertos no mesmo instante ainda diferem
     /// pelo PID, então cada instância parte de um ponto distinto do PRNG.
+    ///
+    /// Mistura também um **contador global** do processo: no Windows o relógio só
+    /// anda de 100 em 100 ns, e duas instâncias criadas em sequência no mesmo
+    /// processo pegavam o mesmo instante (e o mesmo PID) ⇒ a mesma seed. O
+    /// contador garante que cada `Hunter::new()` do processo parta de um ponto
+    /// distinto, independente da resolução do relógio.
     fn host_seed() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static INSTANCE: AtomicU64 = AtomicU64::new(0);
+        let n = INSTANCE.fetch_add(1, Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
-        nanos ^ ((std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        nanos
+            ^ ((std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            ^ n.wrapping_mul(0xD1B5_4A32_D192_ED03)
     }
 
     /// Próximo valor do PRNG do host (SplitMix64). Não-periódico na prática
@@ -1009,6 +1020,15 @@ mod tests {
     /// Duas instâncias criadas separadamente não podem produzir a mesma
     /// sequência de seeds (o bug antigo: 4 emuladores idênticos explorando os
     /// mesmos PIDs).
+    /// Regressão (CI Windows): seeds pedidas em sequência no mesmo processo nunca
+    /// podem coincidir, mesmo que o relógio não tenha andado entre elas.
+    #[test]
+    fn host_seeds_differ_back_to_back() {
+        let seeds: std::collections::HashSet<u64> =
+            (0..1000).map(|_| Hunter::host_seed()).collect();
+        assert_eq!(seeds.len(), 1000, "host_seed repetiu dentro do processo");
+    }
+
     #[test]
     fn instances_diverge() {
         let (mut a, mut b) = (Hunter::new(), Hunter::new());
