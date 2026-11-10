@@ -132,7 +132,7 @@ impl Scaler {
         // [R,G,B,A] em memória → u32 0xAARRGGBB que a hqx espera.
         self.src_u32.clear();
         self.src_u32.reserve(n);
-        for px in src.chunks_exact(4).take(n) {
+        for px in src.as_chunks::<4>().0.iter().take(n) {
             self.src_u32.push(
                 (px[3] as u32) << 24 | (px[0] as u32) << 16 | (px[1] as u32) << 8 | (px[2] as u32),
             );
@@ -186,9 +186,9 @@ mod tests {
         let (w, h) = Scaler::new().scale(Upscale::Hq2x, &src, 2, 2, &mut out);
         assert_eq!((w, h), (4, 4));
         assert_eq!(out.len(), 4 * 4 * 4);
-        for px in out.chunks_exact(4) {
+        for px in out.as_chunks::<4>().0.iter() {
             assert_eq!(
-                px, red,
+                *px, red,
                 "cor deve sobreviver ao round-trip de empacotamento"
             );
         }
@@ -208,7 +208,7 @@ mod tests {
         let (ow, oh) = Scaler::new().scale(Upscale::Xbrz2x, &src, sw, sh, &mut out);
         assert_eq!((ow, oh), (8, 8));
         assert_eq!(out.len(), 8 * 8 * 4);
-        for (i, px) in out.chunks_exact(4).enumerate() {
+        for (i, px) in out.as_chunks::<4>().0.iter().enumerate() {
             let (x, y) = (i % ow, i / ow);
             assert_eq!(&px[0..3], &red[0..3], "RGB sólido deve sobreviver ao xBRZ");
             let interior = x > 0 && y > 0 && x < ow - 1 && y < oh - 1;

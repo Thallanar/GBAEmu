@@ -198,7 +198,7 @@ fn dump_sprites(rom: &[u8], code: &str, dir: &str) -> std::io::Result<()> {
             let path = format!("{dir}/{code}_{}_{slug}{suffix}.ppm", t.species);
             let mut f = std::fs::File::create(&path)?;
             write!(f, "P6\n{} {}\n255\n", sp.width, sp.height)?;
-            for px in sp.rgba.chunks_exact(4) {
+            for px in sp.rgba.as_chunks::<4>().0.iter() {
                 // PPM não tem alpha: pixel transparente vira magenta (destaca).
                 if px[3] == 0 {
                     f.write_all(&[0xFF, 0x00, 0xFF])?;
