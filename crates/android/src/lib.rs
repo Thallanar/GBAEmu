@@ -608,6 +608,67 @@ mod android_impl {
             .unwrap_or(std::ptr::null_mut())
     }
 
+    /// Ajuda "Como usar" do alvo `i` (mesmo conteúdo do desktop, de
+    /// `auroragba_shiny::help`). `None` se o jogo/alvo é inválido.
+    unsafe fn help_of(handle: jlong, i: jint) -> Option<auroragba_shiny::help::Help> {
+        let profile = emu(handle)?.profile?;
+        let target = profile.targets.get(usize::try_from(i).ok()?)?;
+        Some(auroragba_shiny::help::help_for(profile, target))
+    }
+
+    fn jstr(env: &JNIEnv, s: &str) -> jstring {
+        env.new_string(s)
+            .map(|s| s.into_raw())
+            .unwrap_or(std::ptr::null_mut())
+    }
+
+    /// Título do modo de caça do alvo `i` (ex.: "Iniciais de Kanto").
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntHelpTitle(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        i: jint,
+    ) -> jstring {
+        jstr(&env, help_of(handle, i).map_or("", |h| h.title))
+    }
+
+    /// Texto explicativo (passo a passo) do alvo `i`.
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntHelpBody(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        i: jint,
+    ) -> jstring {
+        let body = help_of(handle, i).map(|h| h.body).unwrap_or_default();
+        jstr(&env, &body)
+    }
+
+    /// Nome-base do vídeo de exemplo do alvo `i` (asset `hunter_help/<nome>.mp4`),
+    /// ou vazio se o modo ainda não tem vídeo.
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntHelpVideo(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        i: jint,
+    ) -> jstring {
+        let stem = help_of(handle, i)
+            .and_then(|h| h.video)
+            .map_or("", |v| v.stem());
+        jstr(&env, stem)
+    }
+
     /// Inicia a caça no alvo `target`. Reinicia o Hunter (zera contadores e
     /// re-semeia o PRNG do host). Devolve `false` se o jogo não é suportado ou o
     /// alvo é inválido.

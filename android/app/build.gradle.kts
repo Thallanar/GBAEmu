@@ -11,8 +11,8 @@ android {
         applicationId = "com.auroragba"
         minSdk = 24
         targetSdk = 34
-        versionCode = 71
-        versionName = "0.70.3"
+        versionCode = 72
+        versionName = "0.72.1"
         // ABIs que empacotamos (emulador x86_64 + dispositivos arm64). As `.so`
         // são geradas pelo cargo-ndk em src/main/jniLibs/<abi>/ (ver android/README.md).
         ndk {
@@ -26,6 +26,9 @@ android {
     sourceSets {
         getByName("main") {
             assets.srcDir("../../assets/shaders")
+            // Vídeos do "❓ Como usar" do Shiny Hunter: ficam em hunter_help/*.mp4
+            // nos assets (os .h264 do desktop ficam de fora, em outra pasta).
+            assets.srcDir("../../assets/hunter-help/android")
         }
     }
 

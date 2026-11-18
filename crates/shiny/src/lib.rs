@@ -19,6 +19,7 @@ use auroragba_core::Gba;
 
 pub mod games;
 pub mod gfx;
+pub mod help;
 
 use games::{Approach, GameProfile, HuntMethod, TargetDef};
 

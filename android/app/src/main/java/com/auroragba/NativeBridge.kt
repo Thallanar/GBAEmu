@@ -85,6 +85,15 @@ object NativeBridge {
     /** Nome do alvo `i`. */
     external fun huntTargetName(handle: Long, i: Int): String
 
+    /** Título do modo de caça do alvo (ajuda "Como usar"). */
+    external fun huntHelpTitle(handle: Long, i: Int): String
+
+    /** Passo a passo do alvo (ajuda "Como usar"), parágrafos separados por linha em branco. */
+    external fun huntHelpBody(handle: Long, i: Int): String
+
+    /** Nome-base do vídeo de exemplo (`hunter_help/<nome>.mp4` nos assets), ou vazio. */
+    external fun huntHelpVideo(handle: Long, i: Int): String
+
     /** Inicia a caça no alvo; `true` se o jogo/alvo é válido. */
     external fun huntStart(handle: Long, target: Int): Boolean
 
