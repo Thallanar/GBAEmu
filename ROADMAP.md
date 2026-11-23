@@ -2,7 +2,7 @@
 
 > Emulador de Game Boy Advance multiplataforma (Windows, Linux, Android) com modo diferencial **Shiny Hunter** para automação de caça a Pokémon shiny.
 
-_Última atualização: 2026-11-10_
+_Última atualização: 2026-11-23_
 
 > O estado atual do projeto vive na seção **8. Status atual**; o trabalho não
 > segue ordem linear — pegue a fase/etapa que fizer sentido. Mantenha este
@@ -293,10 +293,20 @@ Plano em 3 etapas (ordem decidida):
       batch da PPU + fast-path do bus (#22, ×1,43) e batch dos timers com
       catch-up ciclo-exato (#27, áudio bit-idêntico). A otimização mais pesada
       (cache de decode + handlers monomorfizados) migrou para a **Fase 10**.
-- [~] **2. Pacing uniforme no desktop**: tentado e **estacionado** — baseline
-      mantido. O dynamic rate control não resolveu o judder de forma limpa; as
-      lições ficaram registradas. No Android, o pacing de apresentação (~59,73
-      fps anunciados ao compositor) já foi entregue (#28).
+- [ ] **2. Pacing uniforme no desktop** — **reaberta em 23/nov/2026** (o
+      desktop segue visivelmente menos fluido que o Android). Histórico: uma 1ª
+      tentativa de dynamic rate control não resolveu o judder de forma limpa e o
+      baseline foi mantido. No Android o problema foi resolvido (#28) anunciando
+      ~59,73 fps ao compositor (`setFrameRate`) — recurso que não existe no
+      desktop, então lá o ajuste tem que ser nosso.
+      - **Causa no desktop:** `run_paced` roda 0–4 frames por update conforme o
+        buffer de áudio → frames repetidos/pulados; somado ao batimento monitor ×
+        59,73 Hz (60 Hz: soluço a cada poucos s; 144 Hz: 2,41 refreshes/frame).
+      - **Caminho a avaliar:** exatamente 1 frame por vsync (ou 1 a cada N em
+        120/144 Hz) com o áudio reamostrado ±0,5% para acompanhar o monitor;
+        lição do Android: não desacoplar emulação e render sem sincronizar os
+        relógios (piora) e não deixar o buffer de áudio esvaziar (chiado).
+      - Validar em monitor de 60 Hz e de refresh alto; áudio não pode regredir.
 - [X] **3. Fast-forward personalizável**: no Android via menu (2x/4x/8x, #35);
       no desktop continua no atalho de Espaço com orçamento fixo.
 
@@ -428,9 +438,10 @@ Otimizações estruturais do interpretador, medidas em release headless.
   `hqx` + `xbrz-rs`; seleção Android por chave de algoritmo no JNI) fechados ponta a
   ponta. **Motor multipass** (`.mpass`, ping-pong de FBO) com **blur** e **ScaleFX**
   (5 passes, meio-float) entregues. Próximos: Anime4K, cheats, i18n.
-- [X] Fase 9 — Performance: batch da PPU + fast-path do bus (×1,43) + batch dos
-  timers ciclo-exato. Pacing uniforme no desktop tentado e **estacionado**
-  (baseline mantido); fast-forward por menu no Android.
+- [~] Fase 9 — Performance: batch da PPU + fast-path do bus (×1,43) + batch dos
+  timers ciclo-exato; fast-forward por menu no Android. Falta o **pacing
+  uniforme no desktop** (etapa 2, reaberta em 23/nov — judder por frames
+  irregulares por update).
 - [~] Fase 10 — Aceleração do core: cache de decode + handlers monomorfizados
   entregues; JIT só se o profiling provar necessidade.
 - [~] Fase Link — Cabo de link: SIO desconectado → lockstep TCP → **trade Gen 3**
