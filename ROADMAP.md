@@ -165,7 +165,9 @@ auroragba/
       empiricamente** nas duas ROMs com a ferramenta nova `rng_scan` (scan da
       IWRAM pela assinatura do LCG, tolerante a re-seed); espécies confirmadas
       pelo oráculo de sprite (`rng_scan --sprites`). Alvos: mascote da versão +
-      Rayquaza + Regis + 3 iniciais.
+      Rayquaza + Regis + 3 iniciais + **selvagem** (#76: `gMain.inBattle` =
+      0x03001BAD e cursor do menu = 0x02024E60, achados empiricamente no Ruby e
+      conferidos no Sapphire rev 2; 20/20 fugas no save real do Ruby).
 - [X] Método: lendário que **não espera interação** (`HuntMethod::SoftResetApproach`)
       — Groudon/Kyogre das cavernas do evento de clima anormal (Terra Cave /
       Marine Cave), que vêm pra cima do jogador por proximidade em vez de esperar
@@ -200,8 +202,7 @@ auroragba/
       não-shiny ⇒ foge e volta a girar. Desde o #75 a fuga confirma CORRER em
       malha fechada (`action_cursor` = `gActionSelectionCursor`, achado
       empiricamente em Emerald/FireRed/Ruby) — às cegas ela às vezes abria a bag
-      e travava. R/S: `inBattle` (0x03001BAD) e cursor já confirmados no Ruby;
-      falta só ligar o alvo selvagem no perfil.
+      e travava. Disponível nos cinco jogos (R/S desde o #76).
 - [X] Método: presente estático (`HuntMethod::StaticGift`) — presentes dados por
       script onde pegar roda `CreateMon(Random())`, então soft-reset re-rola o
       PID. Diferença-chave: o presente cai no **primeiro slot livre** de
@@ -439,8 +440,8 @@ Otimizações estruturais do interpretador, medidas em release headless.
   varrendo os 6 slots do party) e **lendário por proximidade** (`SoftResetApproach`
   — Groudon/Kyogre do clima anormal, com passo de aproximação). Ruby/Sapphire
   também fechados. FireRed/LeafGreen com perfis prontos (falta validar em jogo).
-  Selvagem com fuga encadeada (Marco 2) robusta desde o #75. Falta a pesca
-  (estacionada).
+  Selvagem com fuga encadeada (Marco 2) robusta desde o #75 e disponível nos
+  cinco jogos (R/S no #76). Falta a pesca (estacionada).
 - [~] Fase 7 — Android: ponte JNI + app Kotlin (render GL ES + controles touch +
   **áudio via AudioTrack**), build via cargo-ndk + Gradle, **validado no emulador
   rodando Pokémon Emerald**. Saves (`.sav` + estados, espelho SAF), biblioteca de
