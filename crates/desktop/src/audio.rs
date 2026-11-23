@@ -18,7 +18,15 @@ pub struct AudioOut {
     channels: u16,
     /// Posição fracionária (em frames de entrada) do reamostrador.
     phase: f64,
+    /// Velocidade da emulação relativa ao GBA real (do pacer): o APU entrega
+    /// `in_rate × speed` amostras por segundo de tempo real.
+    speed: f64,
+    /// Média móvel da fila (amostras), para o controle de taxa dinâmico.
+    fill_avg: f64,
 }
+
+/// Desvio máximo do controle de taxa dinâmico (±0,5%: inaudível).
+const DRC_MAX: f64 = 0.005;
 
 impl AudioOut {
     pub fn new() -> Option<Self> {
@@ -80,6 +88,8 @@ impl AudioOut {
             sample_rate,
             channels,
             phase: 0.0,
+            speed: 1.0,
+            fill_avg: 0.0,
         })
     }
 
@@ -88,22 +98,45 @@ impl AudioOut {
         self.ring.lock().unwrap().len()
     }
 
+    /// A fila de áudio em milissegundos (para o trace de pacing).
+    pub fn queued_ms(&self) -> f64 {
+        self.queued() as f64 * 1000.0 / (self.sample_rate as f64 * self.channels as f64)
+    }
+
     /// Nível-alvo de buffer (~67 ms): o frontend roda frames até atingi-lo,
     /// sincronizando a emulação ao tempo real.
     pub fn target(&self) -> usize {
         (self.sample_rate as usize) * (self.channels as usize) / 15
     }
 
+    /// Velocidade atual da emulação (ver [`crate::pacing::Pacer::speed`]).
+    pub fn set_speed(&mut self, speed: f64) {
+        self.speed = speed;
+    }
+
     /// Recebe um lote de amostras do APU (i16 intercaladas L,R a `in_rate`),
     /// reamostra para a taxa do dispositivo (interpolação linear) e empurra no
-    /// ring. Se o ring crescer demais (produtor mais rápido que o consumidor),
-    /// descarta para ressincronizar.
+    /// ring.
+    ///
+    /// A emulação é ritmada pelo monitor, então o áudio é que se ajusta: a taxa
+    /// de reamostragem leva em conta a `speed` do pacer e um controle de taxa
+    /// dinâmico (±0,5%) que puxa a fila de volta ao alvo, compensando a deriva
+    /// entre o relógio do monitor e o da placa de som. Fila quase vazia (início,
+    /// depois de fast-forward/rewind) é completada com silêncio; fila grande
+    /// demais é descartada para ressincronizar.
     pub fn push(&mut self, apu: &[i16], in_rate: u32) {
         let frames = apu.len() / 2;
         if frames == 0 {
             return;
         }
-        let step = in_rate as f64 / self.sample_rate as f64; // frames de entrada por frame de saída
+        // Controle de taxa dinâmico: fila acima do alvo → consome a entrada um
+        // pouco mais rápido (menos saída), abaixo → mais devagar.
+        let target = self.target() as f64;
+        let queued = self.queued() as f64;
+        self.fill_avg += (queued - self.fill_avg) * 0.02;
+        let drc = ((self.fill_avg / target - 1.0) * DRC_MAX).clamp(-DRC_MAX, DRC_MAX);
+        // Frames de entrada por frame de saída.
+        let step = in_rate as f64 * self.speed * (1.0 + drc) / self.sample_rate as f64;
         let mut out: Vec<f32> = Vec::new();
 
         while self.phase < frames as f64 {
@@ -138,11 +171,19 @@ impl AudioOut {
         }
         self.phase -= frames as f64; // carrega a fração para o próximo lote
 
+        let target = self.target();
         let mut ring = self.ring.lock().unwrap();
         // Limita a latência a ~250 ms; se estourar, ressincroniza.
         let max = (self.sample_rate as usize) * (self.channels as usize) / 4;
         if ring.len() + out.len() > max {
             ring.clear();
+        }
+        // Quase vazia: completa com silêncio até o alvo, para não picotar
+        // esperando o controle de taxa (lento de propósito) encher a fila.
+        if ring.len() < target / 4 {
+            let pad = target - ring.len();
+            ring.extend(std::iter::repeat_n(0.0, pad - pad % self.channels as usize));
+            self.fill_avg = target as f64;
         }
         ring.extend(out);
     }
