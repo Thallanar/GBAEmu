@@ -100,8 +100,16 @@ object NativeBridge {
     /** Para a caça. */
     external fun huntStop(handle: Long)
 
-    /** Roda um lote de `batch` frames da caça; `true` quando achou o shiny. */
-    external fun huntStep(handle: Long, batch: Int): Boolean
+    /**
+     * Roda um lote de `batch` frames da caça. Devolve [HUNT_CONTINUE],
+     * [HUNT_SHINY] (achou; a caça parou) ou [HUNT_PARTY_FULL] (presente com o
+     * time cheio; a caça parou).
+     */
+    external fun huntStep(handle: Long, batch: Int): Int
+
+    const val HUNT_CONTINUE = 0
+    const val HUNT_SHINY = 1
+    const val HUNT_PARTY_FULL = 2
 
     /** Tentativas (resets) da caça atual. */
     external fun huntAttempts(handle: Long): Long

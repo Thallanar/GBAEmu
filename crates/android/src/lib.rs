@@ -712,9 +712,10 @@ mod android_impl {
         }
     }
 
-    /// Roda um lote de `batch` frames da caça. Devolve `true` quando achou o
-    /// shiny (a caça para sozinha e o controle volta pro jogador ver a batalha).
-    /// O áudio gerado é descartado (caça acelerada, sem som).
+    /// Roda um lote de `batch` frames da caça. Devolve [`HUNT_CONTINUE`] (segue),
+    /// [`HUNT_SHINY`] (achou: a caça para sozinha e o controle volta pro jogador
+    /// ver a batalha) ou [`HUNT_PARTY_FULL`] (presente com o time cheio: a caça
+    /// para e a UI pede pra liberar um slot). O áudio gerado é descartado.
     ///
     /// # Safety
     /// `handle` válido.
@@ -724,20 +725,20 @@ mod android_impl {
         _class: JClass,
         handle: jlong,
         batch: jint,
-    ) -> jboolean {
+    ) -> jint {
         let Some(emu) = emu(handle) else {
-            return JNI_FALSE;
+            return HUNT_CONTINUE;
         };
         if !emu.hunting {
-            return JNI_FALSE;
+            return HUNT_CONTINUE;
         }
         let Some(profile) = emu.profile else {
             emu.hunting = false;
-            return JNI_FALSE;
+            return HUNT_CONTINUE;
         };
         let Some(target) = profile.targets.get(emu.target) else {
             emu.hunting = false;
-            return JNI_FALSE;
+            return HUNT_CONTINUE;
         };
         // `hunter` e `gba` são campos disjuntos: dá pra emprestar os dois.
         let result = emu
@@ -745,13 +746,23 @@ mod android_impl {
             .tick(&mut emu.gba, profile, target, batch.max(1) as u32, 60 * 60);
         // Não tocamos o áudio da caça; limpa pra não crescer o buffer.
         emu.gba.bus.apu.buffer.clear();
-        if result == CheckResult::Shiny {
-            emu.hunting = false;
-            JNI_TRUE
-        } else {
-            JNI_FALSE
+        match result {
+            CheckResult::Shiny => {
+                emu.hunting = false;
+                HUNT_SHINY
+            }
+            CheckResult::PartyFull => {
+                emu.hunting = false;
+                HUNT_PARTY_FULL
+            }
+            CheckResult::NotReady | CheckResult::NotShiny => HUNT_CONTINUE,
         }
     }
+
+    /// Códigos do `huntStep` (espelhados no `NativeBridge.kt`).
+    const HUNT_CONTINUE: jint = 0;
+    const HUNT_SHINY: jint = 1;
+    const HUNT_PARTY_FULL: jint = 2;
 
     /// Número de tentativas (resets) da caça atual.
     ///
