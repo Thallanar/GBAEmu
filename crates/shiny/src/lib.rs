@@ -323,7 +323,14 @@ const WILD_DIRS: [Button; 4] = [Button::Right, Button::Up, Button::Left, Button:
 /// (confirma CORRER / avança texto). O B antes do A é o seguro: se um A errado
 /// tiver aberto o menu de golpes, o B volta pro menu de ação antes do próximo A —
 /// então a fuga nunca acaba atacando.
+///
+/// Com o cursor do menu mapeado ([`GameProfile::action_cursor`]) o **A só sai com
+/// o cursor em CORRER**; nos outros casos vira B. Às cegas havia uma janela sem
+/// saída: se o menu ficava ativo entre o ▼ e o ►, só o ► contava (LUTAR → BAG) e
+/// o A abria a bag — onde o ciclo trocava de bolso e nunca mais fechava.
 const FLEE_INPUTS: [Button; 4] = [Button::B, Button::Down, Button::Right, Button::A];
+/// Valor do cursor do menu de ação com CORRER selecionado.
+const ACTION_RUN: u8 = 3;
 /// Frames de tap dentro de cada passo da fuga.
 const FLEE_TAP_FRAMES: u32 = 2;
 /// Frames com tudo solto entre um passo da fuga e o próximo.
@@ -691,7 +698,7 @@ impl Hunter {
                         self.resume_spin(gba);
                         continue;
                     }
-                    self.drive_flee(gba);
+                    self.drive_flee(gba, profile);
                     gba.run_frame();
                     self.flee_frames += 1;
                 }
@@ -718,11 +725,19 @@ impl Hunter {
 
     /// Toca a sequência de fuga ([`FLEE_INPUTS`]) em ciclo, um botão por passo de
     /// [`FLEE_STEP_FRAMES`] (tap curto + respiro). Dirigida por `flee_frames`.
-    fn drive_flee(&self, gba: &mut Gba) {
+    /// Com o cursor mapeado, o A só sai em CORRER (senão vira B).
+    fn drive_flee(&self, gba: &mut Gba, profile: &GameProfile) {
         let idx = (self.flee_frames / FLEE_STEP_FRAMES) as usize % FLEE_INPUTS.len();
         let phase = self.flee_frames % FLEE_STEP_FRAMES;
         let pressing = phase < FLEE_TAP_FRAMES;
-        let active = FLEE_INPUTS[idx];
+        let mut active = FLEE_INPUTS[idx];
+        if active == Button::A {
+            if let Some(addr) = profile.action_cursor {
+                if gba.bus.read_u8(addr) != ACTION_RUN {
+                    active = Button::B;
+                }
+            }
+        }
         for b in WILD_ALL_BUTTONS {
             gba.bus.io.joypad.set_button(b, pressing && b == active);
         }
@@ -829,6 +844,7 @@ mod tests {
                 input_funcs: &[0x0813_425D],
             }),
             battle_flag: None,
+            action_cursor: None,
             targets: &[],
         };
         let mudkip = TargetDef {
@@ -970,6 +986,7 @@ mod tests {
             rng_addr: Some(rng),
             starter_menu: None,
             battle_flag: None,
+            action_cursor: None,
             targets: &[],
         };
         let mut h = Hunter::new();
@@ -1060,6 +1077,7 @@ mod tests {
             rng_addr: None,
             starter_menu: None,
             battle_flag: None,
+            action_cursor: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -1100,6 +1118,7 @@ mod tests {
             rng_addr: None,
             starter_menu: None,
             battle_flag: None,
+            action_cursor: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -1170,6 +1189,7 @@ mod tests {
             rng_addr: None,
             starter_menu: None,
             battle_flag: None,
+            action_cursor: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -1364,28 +1384,53 @@ mod tests {
         );
     }
 
-    /// `drive_flee` cicla [`FLEE_INPUTS`] (B → ▼ → ► → A), um por passo, com tap
-    /// curto + respiro.
+    /// `drive_flee` às cegas (cursor não mapeado) cicla [`FLEE_INPUTS`]
+    /// (B → ▼ → ► → A), um por passo, com tap curto + respiro.
     #[test]
     fn wild_drive_flee_cycles_inputs() {
         let mut gba = Gba::new();
         let mut h = Hunter::new();
+        let blind = GameProfile {
+            action_cursor: None,
+            ..*games::detect("BPEE").unwrap()
+        };
         let pressed =
             |gba: &Gba, b: Button| (gba.bus.io.joypad.keyinput() & (1 << (b as u16))) == 0;
 
         for (step, &btn) in FLEE_INPUTS.iter().enumerate() {
             // Tap: só `btn` pressionado.
             h.flee_frames = step as u32 * FLEE_STEP_FRAMES;
-            h.drive_flee(&mut gba);
+            h.drive_flee(&mut gba, &blind);
             for b in WILD_ALL_BUTTONS {
                 assert_eq!(pressed(&gba, b), b == btn, "passo {step} (tap): {b:?}");
             }
             // Respiro: tudo solto.
             h.flee_frames = step as u32 * FLEE_STEP_FRAMES + FLEE_TAP_FRAMES;
-            h.drive_flee(&mut gba);
+            h.drive_flee(&mut gba, &blind);
             for b in WILD_ALL_BUTTONS {
                 assert!(!pressed(&gba, b), "passo {step} (respiro): {b:?}");
             }
+        }
+    }
+
+    /// Com o cursor do menu mapeado, o passo do A só aperta A com o cursor em
+    /// CORRER; em LUTAR/BAG/POKÉMON vira B (nunca abre a bag nem o time).
+    #[test]
+    fn wild_drive_flee_only_confirms_on_run() {
+        let mut gba = Gba::new();
+        let mut h = Hunter::new();
+        let profile = games::detect("BPEE").unwrap();
+        let cursor = profile.action_cursor.unwrap();
+        let pressed =
+            |gba: &Gba, b: Button| (gba.bus.io.joypad.keyinput() & (1 << (b as u16))) == 0;
+        let a_step = FLEE_INPUTS.iter().position(|&b| b == Button::A).unwrap() as u32;
+        h.flee_frames = a_step * FLEE_STEP_FRAMES;
+
+        for (value, expect_a) in [(0u8, false), (1, false), (2, false), (ACTION_RUN, true)] {
+            gba.bus.write_u8(cursor, value);
+            h.drive_flee(&mut gba, profile);
+            assert_eq!(pressed(&gba, Button::A), expect_a, "cursor {value}: A");
+            assert_eq!(pressed(&gba, Button::B), !expect_a, "cursor {value}: B");
         }
     }
 }

@@ -146,6 +146,11 @@ pub struct GameProfile {
     /// acabou (o `gEnemyParty` fica sujo após a fuga, então não serve). `None` =
     /// não mapeado ⇒ a caça com fuga não funciona nesse jogo.
     pub battle_flag: Option<(u32, u8)>,
+    /// Cursor do menu de ação da batalha (`gActionSelectionCursor[0]`): 0 LUTAR,
+    /// 1 BAG, 2 POKÉMON, 3 CORRER. A fuga do selvagem só confirma com A quando
+    /// ele está em CORRER (malha fechada) — às cegas, um ▼ perdido levava o ►
+    /// pra BAG e o A abria a bag. `None` = não mapeado ⇒ fuga às cegas.
+    pub action_cursor: Option<u32>,
     /// Alvos de caça suportados neste jogo.
     pub targets: &'static [TargetDef],
 }
@@ -185,6 +190,8 @@ const EMERALD: GameProfile = GameProfile {
     // gMain.inBattle (gMain 0x030022C0 + 0x439): 0x00 no overworld, 0x02 na
     // batalha. Confirmado na ROM real com o localizador de flag de batalha.
     battle_flag: Some((0x0300_26F9, 0x02)),
+    // Achado empiricamente na ROM real (► ▼ ◄ ▲ no menu ⇒ 0,1,3,2,0).
+    action_cursor: Some(0x0202_44AC),
     targets: &[
         // Lendários estáticos (soft-reset na frente). Índices INTERNOS do Gen 3
         // (≠ dex nacional): a cauda de Hoenn é REORDENADA — não é um offset fixo.
@@ -404,6 +411,9 @@ const RUBY: GameProfile = GameProfile {
     starter_menu: Some(RS_STARTER_MENU),
     // Flag de batalha do R/S ainda não mapeado (sem caça de selvagem aqui por ora).
     battle_flag: None,
+    // Confirmado na ROM real do Ruby (► ▼ ◄ ▲ ⇒ 0,1,3,2,0). Só vale quando o R/S
+    // ganhar caça de selvagem (falta o `battle_flag`).
+    action_cursor: Some(0x0202_4E60),
     targets: &[
         TargetDef {
             name: "Groudon",
@@ -430,6 +440,8 @@ const SAPPHIRE: GameProfile = GameProfile {
     rng_addr: Some(0x0300_4818),
     starter_menu: Some(RS_STARTER_MENU),
     battle_flag: None,
+    // Provavelmente igual ao Ruby (0x02024E60), mas não confirmado no Sapphire.
+    action_cursor: None,
     targets: &[
         TargetDef {
             name: "Kyogre",
@@ -593,6 +605,10 @@ const KANTO_TARGETS: &[TargetDef] = &[
 /// Emerald (`inBattle` = bit 1 do byte em +0x439).
 const FRLG_BATTLE_FLAG: (u32, u8) = (0x0300_3529, 0x02);
 
+/// `gActionSelectionCursor` do FRLG — achado empiricamente no FireRed (rev 1);
+/// o LeafGreen compartilha os símbolos de EWRAM.
+const FRLG_ACTION_CURSOR: u32 = 0x0202_3FF8;
+
 /// Pokémon FireRed (BPRE).
 const FIRERED: GameProfile = GameProfile {
     code: "BPRE",
@@ -603,6 +619,7 @@ const FIRERED: GameProfile = GameProfile {
     // Sem menu de cursor: os iniciais são StaticGift (ver acima).
     starter_menu: None,
     battle_flag: Some(FRLG_BATTLE_FLAG),
+    action_cursor: Some(FRLG_ACTION_CURSOR),
     targets: KANTO_TARGETS,
 };
 
