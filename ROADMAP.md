@@ -226,6 +226,11 @@ auroragba/
 - [X] Extras de UX: fast-forward 2x/4x/8x, captura de tela (PNG na galeria),
       botão de reset, pacing de apresentação (~59,73 fps ao compositor)
 - [ ] Empacotamento APK assinado / distribuição
+- [ ] **Redefinição da UI** (só Android; pedido em 23/nov/2026): hoje tudo vive
+      num ☰ menu de diálogos empilhados (shader, upscale, remap, link,
+      velocidade, estados, caça). Reorganizar a navegação e o visual do app.
+      A tela de configurações gerais (som/escala/interface) é das duas frentes,
+      ver Fase 8.
 
 ### Fase 8 — ✨ Polimento & features extras (contínuo)
 
@@ -268,6 +273,10 @@ fazem sentido.
 
 **Acessibilidade & UX:**
 
+- [ ] **Configurações gerais** (desktop **e** Android; pedido em 23/nov/2026):
+      uma tela única com som (volume/mudo), escala da tela
+      (inteira/ajustada/proporção) e opções de interface — no Android também
+      layout, tamanho e opacidade dos controles touch. Tudo persistido.
 - [ ] Localização PT-BR (e estrutura i18n para outros idiomas)
 - [ ] Temas de UI além do dark (seguindo o accent holográfico/shiny)
 - [ ] Macros / turbo de botão (auto-fire configurável)
@@ -293,20 +302,20 @@ Plano em 3 etapas (ordem decidida):
       batch da PPU + fast-path do bus (#22, ×1,43) e batch dos timers com
       catch-up ciclo-exato (#27, áudio bit-idêntico). A otimização mais pesada
       (cache de decode + handlers monomorfizados) migrou para a **Fase 10**.
-- [ ] **2. Pacing uniforme no desktop** — **reaberta em 23/nov/2026** (o
-      desktop segue visivelmente menos fluido que o Android). Histórico: uma 1ª
-      tentativa de dynamic rate control não resolveu o judder de forma limpa e o
-      baseline foi mantido. No Android o problema foi resolvido (#28) anunciando
-      ~59,73 fps ao compositor (`setFrameRate`) — recurso que não existe no
-      desktop, então lá o ajuste tem que ser nosso.
-      - **Causa no desktop:** `run_paced` roda 0–4 frames por update conforme o
-        buffer de áudio → frames repetidos/pulados; somado ao batimento monitor ×
-        59,73 Hz (60 Hz: soluço a cada poucos s; 144 Hz: 2,41 refreshes/frame).
-      - **Caminho a avaliar:** exatamente 1 frame por vsync (ou 1 a cada N em
-        120/144 Hz) com o áudio reamostrado ±0,5% para acompanhar o monitor;
-        lição do Android: não desacoplar emulação e render sem sincronizar os
-        relógios (piora) e não deixar o buffer de áudio esvaziar (chiado).
-      - Validar em monitor de 60 Hz e de refresh alto; áudio não pode regredir.
+- [X] **2. Pacing uniforme no desktop** — reaberta e **implementada em
+      23/nov/2026**, validada em uso (#74). Medição com o trace
+      `AURORAGBA_PACING_TRACE=1` num monitor de 144 Hz: o pacing antigo, ritmado
+      pelo áudio, rodava 2–3 frames por vez ~24×/s (só ~24 imagens distintas por
+      segundo). Agora o ritmo vem do monitor (`crates/desktop/src/pacing.rs`):
+      - Monitor ~múltiplo de 59,73 Hz (60/120 Hz…): **trava** em 1 frame a cada
+        N vsyncs — cadência perfeita, jogo a `Hz/N` (+0,46% em 60 Hz).
+      - Outros (144 Hz…): frames distribuídos pelo tempo real — em 144 Hz,
+        60 imagens/s espaçadas por 2 ou 3 vsyncs, sem rajadas.
+      - Áudio reamostra na velocidade do pacer + controle de taxa dinâmico
+        (±0,5%) contra a deriva entre os relógios; fila quase vazia é completada
+        com silêncio.
+      - Limite: em 144 Hz a alternância 2/3 é inevitável (144/59,73 = 2,41).
+        Fica 100% liso em 60/120 Hz ou com VRR.
 - [X] **3. Fast-forward personalizável**: no Android via menu (2x/4x/8x, #35);
       no desktop continua no atalho de Espaço com orçamento fixo.
 
@@ -430,18 +439,19 @@ Otimizações estruturais do interpretador, medidas em release headless.
   **áudio via AudioTrack**), build via cargo-ndk + Gradle, **validado no emulador
   rodando Pokémon Emerald**. Saves (`.sav` + estados, espelho SAF), biblioteca de
   ROMs persistente, gamepad físico remapeável, fast-forward, screenshot, reset e
-  Shiny Hunter em retrato — tudo entregue. Falta só APK assinado / distribuição.
+  Shiny Hunter em retrato — tudo entregue. Faltam APK assinado /
+  distribuição e a **redefinição da UI** do app.
 - [~] Fase 8 — Polimento/apresentação: integer scaling + aspect lock nas duas
   frentes; **shaders** (pipeline "shader-como-dado" single-pass, embutidos
   scanlines/LCD-grid/LCD3x/CRT + importar `.frag` "Custom", seletor persistido) e
   **filtros de upscale HQ2x/3x/4x + xBRZ2x/3x/4x** (crate `auroragba-scale` sobre
   `hqx` + `xbrz-rs`; seleção Android por chave de algoritmo no JNI) fechados ponta a
   ponta. **Motor multipass** (`.mpass`, ping-pong de FBO) com **blur** e **ScaleFX**
-  (5 passes, meio-float) entregues. Próximos: Anime4K, cheats, i18n.
-- [~] Fase 9 — Performance: batch da PPU + fast-path do bus (×1,43) + batch dos
-  timers ciclo-exato; fast-forward por menu no Android. Falta o **pacing
-  uniforme no desktop** (etapa 2, reaberta em 23/nov — judder por frames
-  irregulares por update).
+  (5 passes, meio-float) entregues. Próximos: **configurações gerais** (som,
+  escala, interface — desktop e Android), Anime4K, cheats, i18n.
+- [X] Fase 9 — Performance: batch da PPU + fast-path do bus (×1,43) + batch dos
+  timers ciclo-exato; fast-forward por menu no Android; **pacing uniforme no
+  desktop** (ritmo pelo monitor + controle de taxa dinâmico no áudio, #74).
 - [~] Fase 10 — Aceleração do core: cache de decode + handlers monomorfizados
   entregues; JIT só se o profiling provar necessidade.
 - [~] Fase Link — Cabo de link: SIO desconectado → lockstep TCP → **trade Gen 3**

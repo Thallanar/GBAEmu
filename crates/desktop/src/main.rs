@@ -20,6 +20,7 @@ mod discovery;
 mod help_video;
 mod library;
 mod link;
+mod pacing;
 mod png;
 mod shader;
 
@@ -392,6 +393,11 @@ fn main() -> eframe::Result<()> {
     // `--link-join <ip:porta>` entra (child). A sessão é estabelecida antes
     // da janela abrir — o host bloqueia até o parceiro chegar.
     let link_session = parse_link_args();
+    // ROM opcional na linha de comando (`auroragba jogo.gba`): abre direto.
+    let rom_arg = std::env::args()
+        .skip(1)
+        .find(|a| a.to_ascii_lowercase().ends_with(".gba"))
+        .map(PathBuf::from);
 
     // Mesmo ícone do launcher Android (gerado por scripts/gen_desktop_icon.py).
     // Vale pra barra de título/tarefas no Windows e no X11. No Wayland o
@@ -411,7 +417,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "AuroraGBA",
         options,
-        Box::new(|cc| Box::new(AuroraApp::new(cc, link_session))),
+        Box::new(|cc| Box::new(AuroraApp::new(cc, link_session, rom_arg))),
     )
 }
 
@@ -551,6 +557,10 @@ struct AuroraApp {
     discovery: Option<discovery::Browser>,
     /// Anúncio do nosso host na LAN enquanto hospedamos. `None` = não anunciando.
     link_advertiser: Option<discovery::Advertiser>,
+    /// Ritmo do jogo normal: quantos frames rodar em cada atualização de tela.
+    pacer: pacing::Pacer,
+    /// Trace de pacing (`AURORAGBA_PACING_TRACE`). `None` = desligado.
+    pacing_trace: Option<pacing::PacingTrace>,
 }
 
 /// Ação escolhida no painel de Link, aplicada depois de fechar a UI (pra não
@@ -582,7 +592,11 @@ fn file_label(path: &std::path::Path) -> String {
 }
 
 impl AuroraApp {
-    fn new(cc: &eframe::CreationContext<'_>, link_session: Option<link::LinkSession>) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        link_session: Option<link::LinkSession>,
+        rom_arg: Option<PathBuf>,
+    ) -> Self {
         let image = egui::ColorImage::new([SCREEN_WIDTH, SCREEN_HEIGHT], egui::Color32::BLACK);
         let texture =
             cc.egui_ctx
@@ -714,6 +728,8 @@ impl AuroraApp {
                 }
             },
             link_advertiser: None,
+            pacer: pacing::Pacer::new(),
+            pacing_trace: pacing::PacingTrace::from_env(),
         };
 
         if let Some(s) = &app.link {
@@ -727,6 +743,10 @@ impl AuroraApp {
                 app.library.scan(dir);
                 app.show_library = true;
             }
+        }
+        if let Some(path) = rom_arg {
+            app.show_library = false;
+            app.open_rom(path);
         }
         app
     }
@@ -1687,24 +1707,19 @@ impl AuroraApp {
         }
     }
 
-    /// Ritmo normal pelo consumo de áudio: roda frames só até repor o buffer-alvo
-    /// (no máx. 4 por update, pra não travar se a UI ficar lenta). Como o áudio é
-    /// consumido em tempo real, isso ancora a emulação ao tempo real. Sem áudio,
-    /// roda 1 frame por update (sincroniza pelo vsync).
-    fn run_paced(&mut self) {
-        let target = self.audio.as_ref().map(|a| a.target());
-        let mut ran = 0;
-        loop {
-            let go = match (target, self.audio.as_ref()) {
-                (Some(t), Some(audio)) => audio.queued() < t && ran < 4,
-                _ => ran < 1,
-            };
-            if !go {
-                break;
-            }
-            self.step_frame(false);
-            ran += 1;
+    /// Ritmo normal, guiado pelo monitor: o [`pacing::Pacer`] diz quantos frames
+    /// rodar nesta atualização de tela (normalmente 0 ou 1, em cadência
+    /// uniforme) e o áudio reamostra na velocidade resultante. Devolve quantos
+    /// frames rodou.
+    fn run_paced(&mut self) -> u32 {
+        let frames = self.pacer.tick(Instant::now());
+        if let Some(audio) = &mut self.audio {
+            audio.set_speed(self.pacer.speed());
         }
+        for _ in 0..frames {
+            self.step_frame(false);
+        }
+        frames
     }
 
     /// Aplica o remapeamento em andamento: Esc cancela; senão grava a primeira
@@ -1957,6 +1972,7 @@ impl eframe::App for AuroraApp {
             // Modo caça: o Hunter dirige a emulação (amassa A/Start, reseta entre
             // tentativas). Roda um lote de frames por update pra não travar a UI.
             self.hunt_step();
+            self.pacer.reset();
             if self.shader.is_none() {
                 self.refresh_texture();
             }
@@ -1971,6 +1987,7 @@ impl eframe::App for AuroraApp {
                     // Volta no tempo consumindo o anel de snapshots.
                     self.rewind_step();
                     self.gba.bus.apu.buffer.clear();
+                    self.pacer.reset();
                 } else if fast_forward {
                     // Acelera: roda frames (sem o gate de áudio) até gastar o
                     // orçamento de tempo desta janela de update. Assim o ganho não
@@ -1984,8 +2001,13 @@ impl eframe::App for AuroraApp {
                             break;
                         }
                     }
+                    self.pacer.reset();
                 } else {
-                    self.run_paced();
+                    let ran = self.run_paced();
+                    if let Some(trace) = &mut self.pacing_trace {
+                        let audio_ms = self.audio.as_ref().map(|a| a.queued_ms());
+                        trace.record(Instant::now(), ran, &self.pacer, audio_ms);
+                    }
                 }
             }
             // Alimenta o detector de cursor (debug) com o estado da RAM deste
