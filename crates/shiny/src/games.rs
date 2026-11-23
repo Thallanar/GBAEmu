@@ -398,6 +398,25 @@ const RS_STARTER_MENU: StarterMenu = StarterMenu {
     input_funcs: &[0x0810_A179, 0x0810_A199],
 };
 
+/// `gMain.inBattle` do R/S: `gMain` fica em 0x03001774 e o `struct Main` tem o
+/// mesmo layout do Emerald (`inBattle` = bit 1 do byte em +0x439). Achado
+/// empiricamente no Ruby (o `vblankCounter1` em +0x20 soma 1 por frame e o bit
+/// liga só em batalha) e validado com 40 fugas seguidas do Hunter.
+const RS_BATTLE_FLAG: (u32, u8) = (0x0300_1BAD, 0x02);
+
+/// `gActionSelectionCursor` do R/S — achado empiricamente no Ruby (► ▼ ◄ ▲ no
+/// menu ⇒ 0,1,3,2,0, candidato único).
+const RS_ACTION_CURSOR: u32 = 0x0202_4E60;
+
+/// Selvagem na grama (qualquer espécie) — mesmo WildSpin do Emerald/FRLG.
+const WILD_ANY_RS: TargetDef = TargetDef {
+    name: "Selvagem (qualquer)",
+    species: 0,
+    slot: Slot::Enemy,
+    method: HuntMethod::WildSpin,
+    cursor: StarterCursor::Center,
+};
+
 /// Pokémon Ruby (AXVE). Mascote: Groudon (Caverna Ancestral, nv. 45); Rayquaza
 /// fica no Pilar Celeste (pós-game). Kyogre não existe nesta versão. O roamer
 /// (Latios) fica de fora pelo mesmo motivo do Emerald: o PID dele é fixado no
@@ -409,11 +428,8 @@ const RUBY: GameProfile = GameProfile {
     enemy_party: 0x0300_45C0,
     rng_addr: Some(0x0300_4818),
     starter_menu: Some(RS_STARTER_MENU),
-    // Flag de batalha do R/S ainda não mapeado (sem caça de selvagem aqui por ora).
-    battle_flag: None,
-    // Confirmado na ROM real do Ruby (► ▼ ◄ ▲ ⇒ 0,1,3,2,0). Só vale quando o R/S
-    // ganhar caça de selvagem (falta o `battle_flag`).
-    action_cursor: Some(0x0202_4E60),
+    battle_flag: Some(RS_BATTLE_FLAG),
+    action_cursor: Some(RS_ACTION_CURSOR),
     targets: &[
         TargetDef {
             name: "Groudon",
@@ -427,6 +443,7 @@ const RUBY: GameProfile = GameProfile {
         TREECKO_RS,
         TORCHIC_RS,
         MUDKIP_RS,
+        WILD_ANY_RS,
     ],
 };
 
@@ -439,9 +456,8 @@ const SAPPHIRE: GameProfile = GameProfile {
     enemy_party: 0x0300_45C0,
     rng_addr: Some(0x0300_4818),
     starter_menu: Some(RS_STARTER_MENU),
-    battle_flag: None,
-    // Provavelmente igual ao Ruby (0x02024E60), mas não confirmado no Sapphire.
-    action_cursor: None,
+    battle_flag: Some(RS_BATTLE_FLAG),
+    action_cursor: Some(RS_ACTION_CURSOR),
     targets: &[
         TargetDef {
             name: "Kyogre",
@@ -455,6 +471,7 @@ const SAPPHIRE: GameProfile = GameProfile {
         TREECKO_RS,
         TORCHIC_RS,
         MUDKIP_RS,
+        WILD_ANY_RS,
     ],
 };
 
@@ -716,6 +733,22 @@ mod tests {
         }
         assert_eq!(fr.player_party, lg.player_party);
         assert_ne!(fr.name, lg.name);
+    }
+
+    /// Caça de selvagem exige o flag de batalha (pra saber quando a fuga acabou)
+    /// e o cursor do menu (pra fuga não abrir a bag) — em todo jogo que a oferece.
+    #[test]
+    fn every_wild_hunt_has_battle_flag_and_action_cursor() {
+        for p in PROFILES {
+            if p.targets.iter().any(|t| t.method == HuntMethod::WildSpin) {
+                assert!(p.battle_flag.is_some(), "{}: sem battle_flag", p.name);
+                assert!(p.action_cursor.is_some(), "{}: sem action_cursor", p.name);
+            }
+        }
+        // Os cinco jogos têm caça de selvagem.
+        assert!(PROFILES
+            .iter()
+            .all(|p| p.targets.iter().any(|t| t.method == HuntMethod::WildSpin)));
     }
 
     #[test]
