@@ -196,7 +196,12 @@ auroragba/
       O boneco fica na mesma moita e o Hunter cicla as 4 direções (cada uma
       segurada o bastante pra virar **passo**, não só rotação; mudar a direção
       encarada já dispara o sorteio de encontro). Quando um selvagem carrega no
-      `gEnemyParty`, checa o shiny. Falta o Marco 2: fugir pra encadear tentativas.
+      `gEnemyParty`, checa o shiny. **Marco 2** (fuga encadeada, jun/2026):
+      não-shiny ⇒ foge e volta a girar. Desde o #75 a fuga confirma CORRER em
+      malha fechada (`action_cursor` = `gActionSelectionCursor`, achado
+      empiricamente em Emerald/FireRed/Ruby) — às cegas ela às vezes abria a bag
+      e travava. R/S: `inBattle` (0x03001BAD) e cursor já confirmados no Ruby;
+      falta só ligar o alvo selvagem no perfil.
 - [X] Método: presente estático (`HuntMethod::StaticGift`) — presentes dados por
       script onde pegar roda `CreateMon(Random())`, então soft-reset re-rola o
       PID. Diferença-chave: o presente cai no **primeiro slot livre** de
@@ -208,7 +213,7 @@ auroragba/
 - [~] Método: pesca (rod) — tentativa estacionada. A ideia é o mesmo selvagem
       sem reset, mas disparado por usar a vara em vez de andar; faltou mapear a
       máquina de estados do minigame de fisgada (mordida → A no tempo certo) e a
-      leitura confiável do encontro. Parado; retomar depois do WildSpin Marco 2.
+      leitura confiável do encontro. Parado (o WildSpin Marco 2 já está pronto).
 - [ ] (Opcional avançado) RNG manipulation
 
 ### Fase 7 — Port Android (4–6 semanas)
@@ -434,7 +439,8 @@ Otimizações estruturais do interpretador, medidas em release headless.
   varrendo os 6 slots do party) e **lendário por proximidade** (`SoftResetApproach`
   — Groudon/Kyogre do clima anormal, com passo de aproximação). Ruby/Sapphire
   também fechados. FireRed/LeafGreen com perfis prontos (falta validar em jogo).
-  Faltam a pesca (estacionada) e o Marco 2 do selvagem (fuga encadeada).
+  Selvagem com fuga encadeada (Marco 2) robusta desde o #75. Falta a pesca
+  (estacionada).
 - [~] Fase 7 — Android: ponte JNI + app Kotlin (render GL ES + controles touch +
   **áudio via AudioTrack**), build via cargo-ndk + Gradle, **validado no emulador
   rodando Pokémon Emerald**. Saves (`.sav` + estados, espelho SAF), biblioteca de
@@ -468,12 +474,11 @@ Otimizações estruturais do interpretador, medidas em release headless.
 
 ### Pendências conhecidas
 
-- **Formatação**: o repositório não passa por `cargo fmt` (commits anteriores ao
-  HLE não foram formatados); arquivos novos/reescritos já estão fmt-clean.
+- **Bugs**: os bugs pontuais conhecidos vivem em [`BUGS.md`](./BUGS.md).
 - **Timing de ciclos**: hoje cada instrução conta como 1 ciclo (placeholder);
   falta wait states por região de memória (afeta precisão fina e pitch de áudio).
-- **Faltam**: Fase 6 (validar FireRed/LeafGreen em jogo + método de pesca, estacionado + Marco 2
-  do selvagem no Shiny Hunter), mosaic afim (só BG texto + OBJ implementados),
+- **Faltam**: Fase 6 (validar FireRed/LeafGreen em jogo + método de pesca,
+  estacionado), mosaic afim (só BG texto + OBJ implementados),
   APK Android assinado, link Android↔PC sobre Wi-Fi (latência) e o relay de
   internet (Fase Link L4).
 

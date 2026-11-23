@@ -814,6 +814,10 @@ mod android_impl {
     /// prontos pra um `Bitmap` do Kotlin. Array vazio se não der (sem perfil/gfx,
     /// espécie fora da tabela). `shiny` escolhe a paleta normal ou a shiny.
     ///
+    /// Alvo selvagem "qualquer" (espécie 0) usa a espécie do **último
+    /// encontro** (`hunter.last_species`), como o painel do desktop; vazio até o
+    /// 1º encontro.
+    ///
     /// # Safety
     /// `handle` válido.
     #[no_mangle]
@@ -841,8 +845,15 @@ mod android_impl {
         let Some(gfx) = emu.rom_gfx else {
             return empty();
         };
-        let Some(sprite) = gfx.decode_front(&emu.gba.bus.cartridge.rom, t.species, shiny != 0)
-        else {
+        let species = if t.species != 0 {
+            t.species
+        } else {
+            emu.hunter.last_species
+        };
+        if species == 0 {
+            return empty();
+        }
+        let Some(sprite) = gfx.decode_front(&emu.gba.bus.cartridge.rom, species, shiny != 0) else {
             return empty();
         };
         // RGBA (bytes) → ARGB (i32 por pixel) pro Bitmap.ARGB_8888 do Android.

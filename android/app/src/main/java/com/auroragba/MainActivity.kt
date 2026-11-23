@@ -278,6 +278,10 @@ class MainActivity : Activity() {
     // caça e lidos pela UI ao montar o painel do retrato.
     @Volatile private var spriteNormal: IntArray? = null
     @Volatile private var spriteShiny: IntArray? = null
+    // Alvo da caça em andamento e espécie cujos sprites estão decodificados
+    // (thread GL). No selvagem "qualquer" a espécie muda a cada encontro.
+    private var huntTarget = -1
+    private var spriteSpecies = -1
 
     // Views persistentes (reaproveitadas entre paisagem/retrato em [applyLayout]).
     private lateinit var controls: ControlsView
@@ -1319,8 +1323,10 @@ class MainActivity : Activity() {
 
     /** Atualiza o painel do retrato (sprites + stats). */
     private fun updateHunterPanel() {
-        spriteNormal?.let { panelSpriteNormal.setImageBitmap(spriteBitmap(it)) }
-        spriteShiny?.let { panelSpriteShiny.setImageBitmap(spriteBitmap(it)) }
+        // Sem sprite (selvagem antes do 1º encontro) limpa a imagem, em vez de
+        // deixar a da caça anterior.
+        panelSpriteNormal.setImageBitmap(spriteNormal?.let { spriteBitmap(it) })
+        panelSpriteShiny.setImageBitmap(spriteShiny?.let { spriteBitmap(it) })
         panelStats.text = huntPanelText()
     }
 
@@ -1602,6 +1608,21 @@ class MainActivity : Activity() {
         statAttempts = NativeBridge.huntAttempts(handle)
         statSpecies = NativeBridge.huntLastSpecies(handle)
         statBestSV = NativeBridge.huntBestShinyValue(handle)
+        // Selvagem "qualquer": o sprite acompanha a espécie do último encontro.
+        if (statSpecies != spriteSpecies) refreshHuntSprites()
+    }
+
+    /**
+     * Decodifica os sprites (normal + shiny) do painel na thread GL (dona do
+     * ponteiro). Alvo de espécie fixa → a própria espécie; selvagem "qualquer" →
+     * a do último encontro (vazio até o 1º encontro), como no desktop.
+     */
+    private fun refreshHuntSprites() {
+        spriteSpecies = NativeBridge.huntLastSpecies(handle)
+        spriteNormal = NativeBridge.huntTargetSprite(handle, huntTarget, false)
+            .takeIf { it.isNotEmpty() }
+        spriteShiny = NativeBridge.huntTargetSprite(handle, huntTarget, true)
+            .takeIf { it.isNotEmpty() }
     }
 
     /** Chamado na thread GL quando a caça acha o shiny: para e avisa a UI. */
@@ -1786,8 +1807,18 @@ class MainActivity : Activity() {
                 ext.contains("GL_EXT_color_buffer_half_float")
             Log.i(TAG, "meio-float (RGBA16F FBO): ${if (halfFloatSupported) "ok" else "ausente"}")
 
+            // Contexto GL novo (a rotação re-parenta a GLSurfaceView, o que recria
+            // o contexto): os nomes GL guardados são do contexto morto. Esquece-os
+            // sem deletar — deletar aqui poderia apagar objetos novos que recebam
+            // o mesmo nome.
+            program = 0
+            multipass = null
             rebuildProgram()
             texId = createTexture()
+            // createTexture aloca 240×160 (fator 1). Sem isto o texFactor antigo
+            // (ex.: 4 com HQ4x) sobrevivia e o upload ampliado caía num
+            // glTexSubImage2D maior que a textura → tela preta até trocar o filtro.
+            texFactor = 1
             GLES20.glClearColor(0f, 0f, 0f, 1f)
         }
 
@@ -1826,11 +1857,8 @@ class MainActivity : Activity() {
             // Comandos da caça (menu).
             val startTarget = pendingHuntStart.getAndSet(-1)
             if (startTarget >= 0 && romLoaded && NativeBridge.huntStart(handle, startTarget)) {
-                // Decodifica os sprites do alvo (thread do ponteiro) pro painel.
-                spriteNormal = NativeBridge.huntTargetSprite(handle, startTarget, false)
-                    .takeIf { it.isNotEmpty() }
-                spriteShiny = NativeBridge.huntTargetSprite(handle, startTarget, true)
-                    .takeIf { it.isNotEmpty() }
+                huntTarget = startTarget
+                refreshHuntSprites()
                 hunting = true
                 runOnUiThread { startHuntUI() }
             }

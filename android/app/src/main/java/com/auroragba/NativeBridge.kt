@@ -117,7 +117,8 @@ object NativeBridge {
 
     /**
      * Sprite de frente do alvo (64×64) em ARGB8888, pronto pra `Bitmap`. Array
-     * vazio se não der. `shiny` escolhe a paleta normal ou shiny.
+     * vazio se não der. `shiny` escolhe a paleta normal ou shiny. No selvagem
+     * "qualquer" usa a espécie do último encontro (vazio antes do 1º).
      */
     external fun huntTargetSprite(handle: Long, target: Int, shiny: Boolean): IntArray
 
