@@ -13,7 +13,6 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.SeekBar
-import android.widget.Switch
 import android.widget.TextView
 
 /** Paleta do app (a mesma do canvas de design). */
@@ -147,14 +146,11 @@ class Ui(val ctx: Context) {
         }
     }
 
-    /** Switch no visual do app (azul ligado, cinza desligado). */
-    fun switch(checked: Boolean, onChange: (Boolean) -> Unit) = Switch(ctx).apply {
-        isChecked = checked
-        val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
-        thumbTintList = ColorStateList(states, intArrayOf(Pal.ACCENT, Pal.TEXT))
-        trackTintList = ColorStateList(states, intArrayOf(0x8078C8FF.toInt(), Pal.OFF))
-        setOnCheckedChangeListener { _, on -> onChange(on) }
-    }
+    /**
+     * Switch no visual do app (azul ligado, cinza desligado). Desenhado aqui: o
+     * `Switch` do Android não tem aparência no tema antigo do app (`Theme.Black`).
+     */
+    fun switch(checked: Boolean, onChange: (Boolean) -> Unit) = Toggle(this, checked, onChange)
 
     /** Cartão com título/subtítulo e um switch à direita. */
     fun switchRow(title: String, sub: String?, checked: Boolean, onChange: (Boolean) -> Unit) =
@@ -235,5 +231,48 @@ class Ui(val ctx: Context) {
     companion object {
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+    }
+}
+
+/** Switch próprio (pílula 52×32 com pino), ver [Ui.switch]. */
+class Toggle(private val ui: Ui, checked: Boolean, private val onChange: (Boolean) -> Unit) :
+    FrameLayout(ui.ctx) {
+    private val knob = View(ui.ctx)
+
+    var isChecked = checked
+        private set
+
+    init {
+        addView(knob, LayoutParams(ui.dp(26), ui.dp(26)))
+        layoutParams = LinearLayout.LayoutParams(ui.dp(52), ui.dp(32))
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { toggle() }
+        paint()
+    }
+
+    fun toggle() {
+        isChecked = !isChecked
+        paint()
+        onChange(isChecked)
+    }
+
+    private fun paint() {
+        background = ui.rounded(if (isChecked) Pal.ACCENT else Pal.OFF, 16)
+        knob.background = ui.rounded(if (isChecked) Pal.ON_ACCENT else Pal.TEXT, 13)
+        knob.layoutParams = (knob.layoutParams as LayoutParams).apply {
+            gravity = (if (isChecked) Gravity.END else Gravity.START) or Gravity.CENTER_VERTICAL
+            setMargins(ui.dp(3), 0, ui.dp(3), 0)
+        }
+        contentDescription = null
+        // Leitor de tela: anuncia como switch ligado/desligado.
+        accessibilityDelegate = object : AccessibilityDelegate() {
+            override fun onInitializeAccessibilityNodeInfo(host: View, info: android.view.accessibility.AccessibilityNodeInfo) {
+                super.onInitializeAccessibilityNodeInfo(host, info)
+                info.className = "android.widget.Switch"
+                info.isCheckable = true
+                info.isChecked = isChecked
+            }
+        }
     }
 }

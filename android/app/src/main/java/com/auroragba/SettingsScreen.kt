@@ -205,7 +205,7 @@ class SettingsScreen(private val act: Activity, private val host: Host) {
                     gravity = Gravity.CENTER
                     minimumHeight = ui.dp(96)
                     addView(ui.icon(iconRes, Pal.TEXT, 40))
-                    addView(ui.text(t(label), 14f, bold = true))
+                    addView(ui.text(t(label), 14f, bold = true).apply { gravity = Gravity.CENTER })
                 }
             }
             fun paint() = cards.forEachIndexed { i, c ->
