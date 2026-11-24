@@ -1773,6 +1773,7 @@ class MainActivity : Activity() {
     private inner class GbaRenderer : GLSurfaceView.Renderer {
         private lateinit var buf: ByteBuffer
         private lateinit var quad: FloatBuffer
+        private lateinit var quadFbo: FloatBuffer
         private var program = 0
         private var texId = 0
         private var posLoc = 0
@@ -1818,6 +1819,21 @@ class MainActivity : Activity() {
                 .order(ByteOrder.nativeOrder())
                 .asFloatBuffer()
                 .apply { put(verts); position(0) }
+            // Quad dos passes intermediários do multipass (render em FBO): v=0 em
+            // y=-1. A linha 0 de um FBO fica em y=-1, então a linha 0 da imagem cai
+            // na linha 0 da textura — mesma orientação da fonte. Com o quad da tela
+            // cada FBO invertia a imagem (BLUR saía de cabeça pra baixo; no ScaleFX
+            // as texturas de passes diferentes ficavam desalinhadas).
+            val vertsFbo = floatArrayOf(
+                -1f, 1f, 0f, 1f,
+                -1f, -1f, 0f, 0f,
+                1f, 1f, 1f, 1f,
+                1f, -1f, 1f, 0f,
+            )
+            quadFbo = ByteBuffer.allocateDirect(vertsFbo.size * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer()
+                .apply { put(vertsFbo); position(0) }
 
             // Sonda o suporte a framebuffer meio-float (gate do ScaleFX & cia): precisa
             // criar a textura RGBA16F (OES_texture_half_float) E renderizar nela
@@ -2320,11 +2336,12 @@ class MainActivity : Activity() {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, prevTex)
                 GLES20.glUniform1i(pass.frameLoc, frames)
-                quad.position(0)
-                GLES20.glVertexAttribPointer(pass.posLoc, 2, GLES20.GL_FLOAT, false, 16, quad)
+                val q = if (isLast) quad else quadFbo
+                q.position(0)
+                GLES20.glVertexAttribPointer(pass.posLoc, 2, GLES20.GL_FLOAT, false, 16, q)
                 GLES20.glEnableVertexAttribArray(pass.posLoc)
-                quad.position(2)
-                GLES20.glVertexAttribPointer(pass.texLoc, 2, GLES20.GL_FLOAT, false, 16, quad)
+                q.position(2)
+                GLES20.glVertexAttribPointer(pass.texLoc, 2, GLES20.GL_FLOAT, false, 16, q)
                 GLES20.glEnableVertexAttribArray(pass.texLoc)
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inTex)

@@ -285,6 +285,8 @@ fn parse_manifest(src: &str) -> Result<Vec<PassSpec>, String> {
 pub struct ShaderRenderer {
     tex: glow::Texture,
     vao: glow::VertexArray,
+    /// Quad com v invertido, pros passes multipass que renderizam em FBO.
+    vao_fbo: glow::VertexArray,
     programs: Vec<(ShaderKind, Program)>,
     /// Efeitos multipass compilados (passes + alvos intermediários).
     multipass: Vec<(MultipassKind, MultipassEffect)>,
@@ -345,20 +347,21 @@ impl ShaderRenderer {
                  1.0,  1.0, 1.0, 0.0,
                  1.0, -1.0, 1.0, 1.0,
             ];
-            let vao = gl.create_vertex_array().expect("create_vertex_array");
-            let vbo = gl.create_buffer().expect("create_buffer");
-            gl.bind_vertex_array(Some(vao));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-            let bytes = core::slice::from_raw_parts(
-                verts.as_ptr() as *const u8,
-                std::mem::size_of_val(&verts),
-            );
-            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STATIC_DRAW);
-            gl.enable_vertex_attrib_array(0);
-            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 16, 0);
-            gl.enable_vertex_attrib_array(1);
-            gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, 16, 8);
-            gl.bind_vertex_array(None);
+            // Quad dos passes intermediários do multipass (render em FBO): v=0 em
+            // y=-1. A linha 0 de um FBO fica em y=-1, então assim a linha 0 da
+            // imagem cai na linha 0 da textura — mesma orientação da fonte enviada
+            // por `upload`. Com o quad da tela, cada FBO invertia a imagem: um
+            // número ímpar de passes intermediários (BLUR) saía de cabeça pra
+            // baixo, e no ScaleFX texturas de passes diferentes ficavam desalinhadas.
+            #[rustfmt::skip]
+            let verts_fbo: [f32; 16] = [
+                -1.0,  1.0, 0.0, 1.0,
+                -1.0, -1.0, 0.0, 0.0,
+                 1.0,  1.0, 1.0, 1.0,
+                 1.0, -1.0, 1.0, 0.0,
+            ];
+            let vao = make_quad(gl, &verts);
+            let vao_fbo = make_quad(gl, &verts_fbo);
 
             let mut programs = Vec::new();
             for kind in ShaderKind::ALL {
@@ -379,6 +382,7 @@ impl ShaderRenderer {
             Self {
                 tex,
                 vao,
+                vao_fbo,
                 programs,
                 multipass,
                 custom: None,
@@ -491,7 +495,7 @@ impl ShaderRenderer {
         viewport: [i32; 4],
         frame_count: i32,
     ) {
-        let (tex, vao) = (self.tex, self.vao);
+        let (tex, vao, vao_fbo) = (self.tex, self.vao, self.vao_fbo);
         // Fonte = a textura já carregada por `upload` (240×160, ou maior com HQx/xBRZ).
         let (src_w, src_h) = (self.tex_w, self.tex_h);
         let Some((_, effect)) = self.multipass.iter_mut().find(|(k, _)| *k == kind) else {
@@ -513,7 +517,6 @@ impl ShaderRenderer {
             let scissor_was_on = gl.is_enabled(glow::SCISSOR_TEST);
             gl.disable(glow::SCISSOR_TEST);
 
-            gl.bind_vertex_array(Some(vao));
             // A textura original (fonte da cadeia) fica fixa na unit 1 o tempo todo.
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -523,11 +526,13 @@ impl ShaderRenderer {
             for i in 0..n {
                 let is_last = i == n - 1;
                 let (out_w, out_h) = if is_last {
+                    gl.bind_vertex_array(Some(vao));
                     gl.bind_framebuffer(glow::FRAMEBUFFER, prev_fbo);
                     gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
                     (viewport[2], viewport[3])
                 } else {
                     let t = &effect.targets[i];
+                    gl.bind_vertex_array(Some(vao_fbo));
                     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(t.fbo));
                     gl.viewport(0, 0, t.w, t.h);
                     (t.w, t.h)
@@ -574,6 +579,23 @@ impl ShaderRenderer {
             }
         }
     }
+}
+
+/// Cria um VAO com o quad `verts` (triangle strip; pos.xy + uv.xy por vértice).
+unsafe fn make_quad(gl: &glow::Context, verts: &[f32; 16]) -> glow::VertexArray {
+    let vao = gl.create_vertex_array().expect("create_vertex_array");
+    let vbo = gl.create_buffer().expect("create_buffer");
+    gl.bind_vertex_array(Some(vao));
+    gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+    let bytes =
+        core::slice::from_raw_parts(verts.as_ptr() as *const u8, std::mem::size_of_val(verts));
+    gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STATIC_DRAW);
+    gl.enable_vertex_attrib_array(0);
+    gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 16, 0);
+    gl.enable_vertex_attrib_array(1);
+    gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, 16, 8);
+    gl.bind_vertex_array(None);
+    vao
 }
 
 /// Garante que `effect` tem N-1 alvos com o tamanho certo (`fonte × scale` por
