@@ -64,4 +64,18 @@ interface Host {
 
     /** Configurações fechou; [toMenu] = voltou pela seta (reabre o menu). */
     fun onSettingsClosed(toMenu: Boolean)
+
+    // ── Estados ──────────────────────────────────────────────────────────────
+    /** Os 8 slots do jogo atual. */
+    fun stateSlots(): List<SlotInfo>
+    /** Salva no [slot] (0-indexado) no próximo frame, com miniatura. */
+    fun saveSlot(slot: Int)
+    fun loadSlot(slot: Int)
+    /** Data de um slot no idioma do app ("Hoje, 14:32", "12/11, 09:45"). */
+    fun slotDate(millis: Long): String
+    /** Tela de estados fechou; [toMenu] = voltou pela seta (reabre o menu). */
+    fun onStatesClosed(toMenu: Boolean)
 }
+
+/** Um slot de save state: se existe, quando foi salvo e a miniatura (se houver). */
+class SlotInfo(val exists: Boolean, val modified: Long, val thumb: java.io.File?)

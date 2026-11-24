@@ -276,3 +276,15 @@ class Toggle(private val ui: Ui, checked: Boolean, private val onChange: (Boolea
         }
     }
 }
+
+/** FrameLayout com altura = largura × [ratio] (ex.: 2/3 pra miniatura 3:2 do GBA). */
+class AspectFrame(ctx: Context, private val ratio: Float) : FrameLayout(ctx) {
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val w = MeasureSpec.getSize(widthMeasureSpec)
+        val h = (w * ratio).toInt()
+        super.onMeasure(
+            MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(h, MeasureSpec.EXACTLY),
+        )
+    }
+}

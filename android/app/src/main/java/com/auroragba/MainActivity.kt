@@ -189,6 +189,7 @@ class MainActivity : Activity(), Host {
     // link ativo o jogo segue rodando: o parceiro depende do nosso ritmo.
     @Volatile private var menuPaused = false
     private var settings: SettingsScreen? = null
+    private var states: StatesScreen? = null
     // Nome da ROM carregada (sem `.gba`), pro cabeçalho do menu.
     private var currentRomName: String? = null
 
@@ -1105,8 +1106,8 @@ class MainActivity : Activity(), Host {
     }
 
     override fun onHunter() = startShinyHunter()
-    override fun onSaveState() = saveStateFromMenu()
-    override fun onLoadState() = loadStateFromMenu()
+    override fun onSaveState() = openStates(load = false)
+    override fun onLoadState() = openStates(load = true)
     override fun onLoadRom() = chooseRom()
     override fun onResetRom() = resetFromMenu()
     override fun onScreenshot() = takeScreenshot()
@@ -1118,8 +1119,8 @@ class MainActivity : Activity(), Host {
     }
 
     override fun onMenuClosed() {
-        // Indo pras Configurações a pausa continua (onSettings já pausou de novo).
-        if (settings == null) resumeFromMenu()
+        // Indo pras Configurações/Estados a pausa continua (já pausaram de novo).
+        if (settings == null && states == null) resumeFromMenu()
     }
 
     // ── Host: Configurações ──────────────────────────────────────────────────
@@ -1245,6 +1246,44 @@ class MainActivity : Activity(), Host {
         } else {
             resumeFromMenu()
         }
+    }
+
+    // ── Host: estados ────────────────────────────────────────────────────────
+
+    override fun stateSlots(): List<SlotInfo> {
+        val code = currentGameCode ?: return List(SAVE_SLOTS) { SlotInfo(false, 0L, null) }
+        return List(SAVE_SLOTS) { i ->
+            val f = stateFile(code, i)
+            SlotInfo(f.exists(), f.lastModified(), thumbFile(code, i))
+        }
+    }
+
+    override fun saveSlot(slot: Int) = pendingSaveState.set(slot)
+
+    override fun loadSlot(slot: Int) {
+        val code = currentGameCode ?: return
+        val f = stateFile(code, slot)
+        if (f.exists()) pendingLoadState.set(f.readBytes())
+    }
+
+    override fun slotDate(millis: Long): String {
+        val loc = L10n.locale(l10n)
+        val time = android.text.format.DateFormat.getBestDateTimePattern(loc, "HHmm")
+        val clock = SimpleDateFormat(time, loc).format(Date(millis))
+        val day = java.util.Calendar.getInstance()
+        val then = java.util.Calendar.getInstance().apply { timeInMillis = millis }
+        fun same(c: java.util.Calendar) = c.get(java.util.Calendar.YEAR) == then.get(java.util.Calendar.YEAR) &&
+            c.get(java.util.Calendar.DAY_OF_YEAR) == then.get(java.util.Calendar.DAY_OF_YEAR)
+        if (same(day)) return tr(R.string.date_today, clock)
+        day.add(java.util.Calendar.DAY_OF_YEAR, -1)
+        if (same(day)) return tr(R.string.date_yesterday, clock)
+        val date = android.text.format.DateFormat.getBestDateTimePattern(loc, "ddMMHHmm")
+        return SimpleDateFormat(date, loc).format(Date(millis))
+    }
+
+    override fun onStatesClosed(toMenu: Boolean) {
+        states = null
+        if (toMenu) MenuSheet(this, this).show() else resumeFromMenu()
     }
 
     // ── Áudio ────────────────────────────────────────────────────────────────
@@ -1582,56 +1621,17 @@ class MainActivity : Activity(), Host {
     /** Arquivo do save state do `slot` (0-indexado: `.ss1`..`.ss8`), em `filesDir`. */
     private fun stateFile(code: String, slot: Int) = File(filesDir, stateName(code, slot))
 
-    /** Rótulo de um slot pro seletor: "Slot N — vazio" ou "Slot N — dd/MM HH:mm". */
-    private fun slotLabel(code: String, slot: Int): String {
-        val f = stateFile(code, slot)
-        val when_ = if (f.exists()) {
-            val loc = L10n.locale(l10n)
-            val pattern = android.text.format.DateFormat.getBestDateTimePattern(loc, "ddMMHHmm")
-            SimpleDateFormat(pattern, loc).format(Date(f.lastModified()))
-        } else {
-            tr(R.string.slot_empty)
-        }
-        return tr(R.string.slot_label, slot + 1, when_)
-    }
+    /** Miniatura do save state do `slot`: PNG 240×160 ao lado do estado, em `filesDir`. */
+    private fun thumbFile(code: String, slot: Int) = File(filesDir, stateName(code, slot) + ".png")
 
-    /** Seletor de slot pra salvar: todos os 8 (sobrescreve), com data dos ocupados. */
-    private fun saveStateFromMenu() {
-        val code = currentGameCode
-        if (!romLoaded || code == null) {
-            toast(tr(R.string.state_need_rom_save))
+    /** Abre a tela de estados na aba Salvar ou Carregar (pausa o jogo). */
+    private fun openStates(load: Boolean) {
+        if (!romLoaded || currentGameCode == null) {
+            toast(tr(if (load) R.string.state_need_rom_load else R.string.state_need_rom_save))
             return
         }
-        val labels = Array(SAVE_SLOTS) { slotLabel(code, it) }
-        AlertDialog.Builder(this)
-            .setTitle(tr(R.string.state_save_title))
-            .setItems(labels) { _, slot -> pendingSaveState.set(slot) }
-            .show()
-    }
-
-    /** Seletor de slot pra carregar: vazios ficam desabilitados. */
-    private fun loadStateFromMenu() {
-        val code = currentGameCode
-        if (!romLoaded || code == null) {
-            toast(tr(R.string.state_need_rom_load))
-            return
-        }
-        val exists = BooleanArray(SAVE_SLOTS) { stateFile(code, it).exists() }
-        if (exists.none { it }) {
-            toast(tr(R.string.state_none))
-            return
-        }
-        val labels = Array(SAVE_SLOTS) { slotLabel(code, it) }
-        AlertDialog.Builder(this)
-            .setTitle(tr(R.string.state_load_title))
-            .setItems(labels) { _, slot ->
-                if (exists[slot]) {
-                    pendingLoadState.set(stateFile(code, slot).readBytes())
-                } else {
-                    toast(tr(R.string.slot_is_empty, slot + 1))
-                }
-            }
-            .show()
+        pauseForMenu()
+        states = StatesScreen(this, this, load).also { it.show() }
     }
 
     /** Pede pra thread GL capturar o frame atual (o encode/gravação vêm depois). */
@@ -1812,6 +1812,7 @@ class MainActivity : Activity(), Host {
             if (local.exists() && bytes.contentEquals(local.readBytes())) continue
             try {
                 local.writeBytes(bytes)
+                thumbFile(code, slot).delete() // era do estado antigo
                 imported++
                 Log.i(TAG, "estado importado da pasta (saves/$name, ${bytes.size} bytes)")
             } catch (e: Exception) {
@@ -1901,8 +1902,36 @@ class MainActivity : Activity(), Host {
             toast(tr(R.string.state_save_failed))
             return // sem o estado de trabalho, não adianta espelhar
         }
+        saveThumb(code, slot)
         // Cópia visível pra backup/portabilidade (best-effort), como o .sav.
         mirrorState(code, slot, bytes)
+    }
+
+    /**
+     * Grava a miniatura do estado: copia o quadro exibido (thread GL, sem avançar
+     * a emulação), e o encode PNG roda numa thread à parte. Com upscale ligado o
+     * quadro vem ampliado e é reduzido de volta a 240×160. Best-effort.
+     */
+    private fun saveThumb(code: String, slot: Int) {
+        val f = upscaleFactor
+        val buf = ByteBuffer.allocateDirect(W * f * H * f * 4).order(ByteOrder.nativeOrder())
+        NativeBridge.copyFramebuffer(handle, buf)
+        buf.rewind()
+        val px = ByteArray(buf.capacity())
+        buf.get(px)
+        val out = thumbFile(code, slot)
+        Thread {
+            try {
+                val bmp = Bitmap.createBitmap(W * f, H * f, Bitmap.Config.ARGB_8888)
+                bmp.copyPixelsFromBuffer(ByteBuffer.wrap(px))
+                val small = if (f == 1) bmp else Bitmap.createScaledBitmap(bmp, W, H, false)
+                out.outputStream().use { small.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                if (small !== bmp) small.recycle()
+                bmp.recycle()
+            } catch (e: Exception) {
+                Log.w(TAG, "miniatura do estado falhou: $e")
+            }
+        }.start()
     }
 
     private fun doLoadState(bytes: ByteArray) {
