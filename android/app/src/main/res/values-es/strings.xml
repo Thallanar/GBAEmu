@@ -109,7 +109,7 @@
     <string name="set_speed">Velocidad de emulación</string>
     <string name="set_speed_sub">Velocidad acelerada: %1$d×</string>
     <string name="set_interface">Interfaz</string>
-    <string name="set_interface_sub">Vídeo y mando físico</string>
+    <string name="set_interface_sub">Mando, vídeo y mando físico</string>
     <string name="set_about">Acerca de</string>
     <string name="set_about_sub">Versión, código fuente y licencias</string>
     <string name="roms_current">Carpeta actual</string>
@@ -142,6 +142,17 @@
     <string name="about_all">Ver todas las licencias</string>
     <string name="about_all_msg">ScaleFX — Sp00kyFox — MIT\nHQx — LGPL-2.1 o posterior\nxBRZ — GPL-3.0 o posterior\n\nLas bibliotecas Rust que usa AuroraGBA, con sus licencias, figuran en el código fuente (Cargo.lock).</string>
     <string name="about_disclaimer">AuroraGBA no incluye juegos ni la BIOS de GBA. Usa solo ROMs de cartuchos que tengas.</string>
+    <string name="iface_onscreen">Controles en pantalla</string>
+    <string name="pad_model">Modelo del mando</string>
+    <string name="pad_classic">Clásico</string>
+    <string name="pad_stick">Joystick</string>
+    <string name="pad_arrows">Flechas</string>
+    <string name="pad_size">Tamaño de los botones</string>
+    <string name="pad_opacity">Opacidad</string>
+    <string name="pad_haptics">Vibrar al tocar</string>
+    <string name="pad_haptics_sub">Un toque corto en cada pulsación</string>
+    <string name="pad_hide">Ocultar con mando físico</string>
+    <string name="pad_hide_sub">Se ocultan mientras haya un mando conectado; el botón Menú se queda</string>
     <plurals name="roms_count">
         <item quantity="one">%d juego .gba encontrado</item>
         <item quantity="many">%d juegos .gba encontrados</item>

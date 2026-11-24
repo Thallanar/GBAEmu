@@ -87,6 +87,12 @@ class MainActivity : Activity(), Host {
         const val KEY_VOLUME = "volume"
         const val KEY_FF_MUTED = "ff_muted"
         const val KEY_FF_MULT = "ff_multiplier"
+        // Controles na tela (Configurações › Interface).
+        const val KEY_PAD_MODEL = "pad_model"
+        const val KEY_PAD_SIZE = "pad_size"
+        const val KEY_PAD_OPACITY = "pad_opacity"
+        const val KEY_PAD_HAPTICS = "pad_haptics"
+        const val KEY_PAD_HIDE = "pad_hide_with_controller"
 
         // Filtros de upscale. `Triple(key, fator, rótulo)`: `key` casa com
         // `Upscale::key` do nativo (carrega algoritmo + fator); `fator` dimensiona
@@ -185,6 +191,15 @@ class MainActivity : Activity(), Host {
     private var settings: SettingsScreen? = null
     // Nome da ROM carregada (sem `.gba`), pro cabeçalho do menu.
     private var currentRomName: String? = null
+
+    // Controles na tela: esconder quando há controle físico conectado (o botão
+    // Menu fica). O listener acompanha conectar/desconectar.
+    private var padHidePref = true
+    private val inputDeviceListener = object : android.hardware.input.InputManager.InputDeviceListener {
+        override fun onInputDeviceAdded(deviceId: Int) = updatePadHidden()
+        override fun onInputDeviceRemoved(deviceId: Int) = updatePadHidden()
+        override fun onInputDeviceChanged(deviceId: Int) = updatePadHidden()
+    }
 
     // Efeito de shader atual (key de SHADERS, ou "custom"). Escrito pela UI, lido
     // pela thread GL ao (re)compilar o programa. Persiste nas prefs.
@@ -356,6 +371,7 @@ class MainActivity : Activity(), Host {
             onMask = { touchMask = it; syncButtons() }
             onMenu = { showMenu() }
         }
+        loadPadPrefs()
 
         // Overlay compacto de status da caça (paisagem): topo, abaixo do ☰.
         huntStatus = TextView(this).apply {
@@ -766,6 +782,9 @@ class MainActivity : Activity(), Host {
         super.onResume()
         glView.onResume()
         if (!menuPaused) audio?.play()
+        getSystemService(android.hardware.input.InputManager::class.java)
+            ?.registerInputDeviceListener(inputDeviceListener, uiHandler)
+        updatePadHidden()
     }
 
     override fun onPause() {
@@ -775,6 +794,8 @@ class MainActivity : Activity(), Host {
         glView.queueEvent { flushBackup() }
         audio?.pause()
         glView.onPause()
+        getSystemService(android.hardware.input.InputManager::class.java)
+            ?.unregisterInputDeviceListener(inputDeviceListener)
     }
 
     override fun onDestroy() {
@@ -1139,6 +1160,61 @@ class MainActivity : Activity(), Host {
     override fun openShader(onDone: () -> Unit) = shaderMenu(onDone)
     override fun openUpscale(onDone: () -> Unit) = upscaleMenu(onDone)
     override fun openRemap() = remapMenu()
+
+    override var padModel: PadModel
+        get() = controls.model
+        set(v) { controls.model = v; savePadPrefs() }
+    override var padSize: Int
+        get() = (controls.scale * 100).toInt()
+        set(v) { controls.scale = v / 100f; savePadPrefs() }
+    override var padOpacity: Int
+        get() = Math.round(controls.opacity * 100)
+        set(v) { controls.opacity = v / 100f; savePadPrefs() }
+    override var padHaptics: Boolean
+        get() = controls.haptics
+        set(v) { controls.haptics = v; savePadPrefs() }
+    override var padHideWithController: Boolean
+        get() = padHidePref
+        set(v) { padHidePref = v; savePadPrefs(); updatePadHidden() }
+
+    // ── Controles na tela ────────────────────────────────────────────────────
+
+    private fun loadPadPrefs() {
+        val p = getSharedPreferences(PREFS, MODE_PRIVATE)
+        controls.model = PadModel.from(p.getString(KEY_PAD_MODEL, null))
+        controls.scale = p.getInt(KEY_PAD_SIZE, 100).coerceIn(70, 130) / 100f
+        // Padrão = a opacidade de sempre (alpha 70/255 ≈ 27%).
+        controls.opacity = p.getInt(KEY_PAD_OPACITY, 27).coerceIn(10, 60) / 100f
+        controls.haptics = p.getBoolean(KEY_PAD_HAPTICS, false)
+        padHidePref = p.getBoolean(KEY_PAD_HIDE, true)
+    }
+
+    private fun savePadPrefs() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putString(KEY_PAD_MODEL, controls.model.key)
+            .putInt(KEY_PAD_SIZE, Math.round(controls.scale * 100))
+            .putInt(KEY_PAD_OPACITY, Math.round(controls.opacity * 100))
+            .putBoolean(KEY_PAD_HAPTICS, controls.haptics)
+            .putBoolean(KEY_PAD_HIDE, padHidePref)
+            .apply()
+    }
+
+    /**
+     * Há um controle físico conectado? Conta dispositivos de gamepad/joystick
+     * reais (não virtuais) e, no Android 10+, externos — alguns aparelhos
+     * declaram botões internos como "gamepad".
+     */
+    private fun controllerConnected(): Boolean = InputDevice.getDeviceIds().any { id ->
+        val dev = InputDevice.getDevice(id) ?: return@any false
+        val src = dev.sources
+        val pad = (src and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
+            (src and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+        pad && !dev.isVirtual && (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || dev.isExternal)
+    }
+
+    private fun updatePadHidden() {
+        controls.padHidden = padHidePref && controllerConnected()
+    }
 
     override fun languageTag(): String = L10n.load(this)
 

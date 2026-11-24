@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Mantém o Wi-Fi em baixa latência durante o link (WifiLock). -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- "Vibrar ao tocar" dos controles na tela (permissão normal, sem pedido). -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- Suporta gamepad, mas não exige (touch é o padrão). -->
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />

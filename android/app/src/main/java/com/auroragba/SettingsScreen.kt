@@ -191,6 +191,45 @@ class SettingsScreen(private val act: Activity, private val host: Host) {
 
     private fun iface() {
         title.text = t(R.string.set_interface)
+        body.addView(ui.sectionLabel(t(R.string.iface_onscreen)))
+        body.addView(ui.card(14).apply {
+            addView(ui.text(t(R.string.pad_model), 16f, bold = true))
+            val models = listOf(
+                Triple(PadModel.CLASSIC, R.drawable.ic_pad_classic, R.string.pad_classic),
+                Triple(PadModel.STICK, R.drawable.ic_pad_stick, R.string.pad_stick),
+                Triple(PadModel.ARROWS, R.drawable.ic_pad_arrows, R.string.pad_arrows),
+            )
+            val row = ui.box(false, 8)
+            val cards = models.map { (_, iconRes, label) ->
+                ui.box(true, 8).apply {
+                    gravity = Gravity.CENTER
+                    minimumHeight = ui.dp(96)
+                    addView(ui.icon(iconRes, Pal.TEXT, 40))
+                    addView(ui.text(t(label), 14f, bold = true).apply { gravity = Gravity.CENTER })
+                }
+            }
+            fun paint() = cards.forEachIndexed { i, c ->
+                val on = models[i].first == host.padModel
+                c.background = ui.touchable(ui.rounded(if (on) Pal.ACCENT_SOFT else Pal.SURFACE2, 14, if (on) Pal.ACCENT else 0xFF33333D.toInt(), 2))
+                val color = if (on) Pal.ACCENT else Pal.TEXT
+                (c.getChildAt(0) as android.widget.ImageView).imageTintList = android.content.res.ColorStateList.valueOf(color)
+                (c.getChildAt(1) as android.widget.TextView).setTextColor(color)
+            }
+            cards.forEachIndexed { i, c ->
+                c.setOnClickListener { host.padModel = models[i].first; paint() }
+                row.addView(c, ui.lp(0, Ui.WRAP, 1f))
+            }
+            paint()
+            addView(row)
+        })
+        body.addView(ui.sliderRow(t(R.string.pad_size), host.padSize, 70, 130, 5, "%") { host.padSize = it })
+        body.addView(ui.sliderRow(t(R.string.pad_opacity), host.padOpacity, 10, 60, 1, "%") { host.padOpacity = it })
+        body.addView(ui.switchRow(t(R.string.pad_haptics), t(R.string.pad_haptics_sub), host.padHaptics) {
+            host.padHaptics = it
+        })
+        body.addView(ui.switchRow(t(R.string.pad_hide), t(R.string.pad_hide_sub), host.padHideWithController) {
+            host.padHideWithController = it
+        })
         body.addView(ui.sectionLabel(t(R.string.iface_video)))
         body.addView(ui.group(
             ui.valueRow(t(R.string.shader_title), host.shaderLabel()) { host.openShader(::refresh) },
