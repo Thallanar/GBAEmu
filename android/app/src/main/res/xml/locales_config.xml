@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Idiomas do app: o Android 13+ oferece a escolha por app nas configurações
+     do sistema. O padrão (values/) é inglês; o app também tem o seletor próprio. -->
+<locale-config xmlns:android="http://schemas.android.com/apk/res/android">
+    <locale android:name="en" />
+    <locale android:name="pt-BR" />
+    <locale android:name="es" />
+</locale-config>
