@@ -209,6 +209,10 @@ auroragba/
       `gPlayerParty` (não no slot 0), então a caça **varre os 6 slots** pela
       espécie. Roteiro é A-mash puro (sem cursor) e **exige um slot de time
       livre** (com time cheio o presente vai pro PC e a varredura não acha).
+      Desde o #77 a caça fotografa o time quando o save carrega: time cheio ⇒
+      para na hora com aviso (antes o A-mash ia até a tela de apelido e batizava
+      o presente de `AAAAAAA`), e o presente só conta num slot que estava vazio
+      (um Beldum que já estava no time não é confundido com ele).
       Cobre o **Beldum** na casa do Steven pós-E4 e os **iniciais de Johto**
       (presente do Birch pós-National Dex).
 - [~] Método: pesca (rod) — tentativa estacionada. A ideia é o mesmo selvagem

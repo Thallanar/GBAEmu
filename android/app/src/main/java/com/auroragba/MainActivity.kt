@@ -1639,6 +1639,26 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * Chamado na thread GL quando um presente esbarra no time cheio: o presente
+     * iria pro PC (invisível pra caça). Para e explica o que fazer.
+     */
+    private fun onHuntPartyFull() {
+        hunting = false
+        runOnUiThread {
+            stopHuntUI()
+            AlertDialog.Builder(this)
+                .setTitle("Time cheio")
+                .setMessage(
+                    "O presente iria para o PC, onde a caça não consegue vê-lo. " +
+                        "Libere um espaço no time, salve o jogo em frente ao presente " +
+                        "e comece a caça de novo."
+                )
+                .setPositiveButton("OK", null)
+                .show()
+        }
+    }
+
     /** Grava o `.sav` em disco se houve alteração desde a última gravação. */
     private fun flushBackup() {
         val code = currentGameCode ?: return
@@ -1908,12 +1928,15 @@ class MainActivity : Activity() {
                 if (hunting) {
                     // O Hunter dirige os inputs e roda os frames por dentro; só
                     // copiamos o framebuffer resultante (sem avançar de novo).
-                    val found = NativeBridge.huntStep(handle, HUNT_BATCH)
+                    val step = NativeBridge.huntStep(handle, HUNT_BATCH)
                     buf.clear()
                     NativeBridge.copyFramebuffer(handle, buf)
                     buf.rewind()
                     publishHuntStats()
-                    if (found) onHuntFinished()
+                    when (step) {
+                        NativeBridge.HUNT_SHINY -> onHuntFinished()
+                        NativeBridge.HUNT_PARTY_FULL -> onHuntPartyFull()
+                    }
                 } else {
                     val speed = ffSpeed
                     NativeBridge.setButtons(handle, buttonMask.get())

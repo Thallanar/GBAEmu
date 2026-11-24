@@ -16,18 +16,7 @@
 - **Suspeita:** flip de coordenadas de textura (origem Y) entre os passes de
   FBO — o passe do blur não compensa a inversão de eixo Y do ping-pong de FBO.
 
-### 2. Shiny Hunter no Beldum trava na pergunta do apelido
-- **Onde:** Shiny Hunter, método StaticGift (Beldum pós-E4).
-- **Sintoma:** ao pegar o Beldum, aparecem duas perguntas em sequência: (1) se
-  quer pegar o Pokémon — o A repetido do ciclo resolve bem; (2) se quer dar um
-  apelido ao Pokémon — aqui o ciclo quebra, porque os A's caem na tela de
-  nomeação e acabam batizando o Pokémon como `AAAAAAA`.
-- **Suspeita:** a automação não trata a caixa de diálogo de apelido — precisa
-  detectar/dispensar a pergunta do apelido (escolher "Não", ou navegar para
-  confirmar o nome vazio/padrão) em vez de só marteladar A. Falta um estado no
-  fluxo do StaticGift para o prompt de nickname.
-
-### 3. Desktop perde vsyncs (~130 de 144 atualizações/s)
+### 2. Desktop perde vsyncs (~130 de 144 atualizações/s)
 - **Onde:** desktop, monitor de 144 Hz (medido com `AURORAGBA_PACING_TRACE=1`).
 - **Sintoma:** a janela atualiza ~130 vezes/s em vez de 144; cada vsync perdido
   vira um intervalo fora do padrão 2/3 entre frames do jogo (judder leve).
@@ -39,6 +28,12 @@
 _(vazio)_
 
 ## Resolvidos
+
+- **Beldum batizado de `AAAAAAA`** (StaticGift) — #77. Acontecia com o **time
+  cheio**: o presente ia pro PC, a caça (que procura no time) nunca o via e o
+  A-mash seguia até a tela de apelido. Agora a caça fotografa o time quando o
+  save carrega e para com aviso se estiver cheio; e o presente só conta num
+  slot que estava vazio.
 
 - **Rotação com upscale/shader ligado → tela preta** (Android) — #75. A rotação
   recria o contexto GL e o `texFactor` antigo sobrevivia: o frame ampliado era

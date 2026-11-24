@@ -512,6 +512,9 @@ struct AuroraApp {
     sprite_cache: HashMap<(u16, bool), Option<egui::TextureHandle>>,
     /// Instante em que a caça atual começou (pra tempo decorrido e taxa).
     hunt_started: Option<Instant>,
+    /// Aviso que parou a caça (ex.: time cheio num presente). Fica no painel até
+    /// a próxima caça começar.
+    hunt_warning: Option<String>,
     /// Detector (debug) do byte do cursor do inicial na RAM. Ver [`CursorFinder`].
     cursor_finder: CursorFinder,
     /// Localizador (debug) do bit de estado de batalha. Ver [`BattleStateFinder`].
@@ -690,6 +693,7 @@ impl AuroraApp {
             gfx: None,
             sprite_cache: HashMap::new(),
             hunt_started: None,
+            hunt_warning: None,
             cursor_finder: CursorFinder::default(),
             battle_finder: BattleStateFinder::default(),
             current_slot: 0,
@@ -946,6 +950,7 @@ impl AuroraApp {
     fn start_hunt(&mut self) {
         if self.profile.is_some() {
             self.hunter = Hunter::new();
+            self.hunt_warning = None;
             self.hunting = true;
             self.running = false;
             self.hunt_started = Some(Instant::now());
@@ -1064,6 +1069,10 @@ impl AuroraApp {
             );
             ui.label("tentativas");
         });
+
+        if let Some(w) = &self.hunt_warning {
+            ui.label(egui::RichText::new(w).color(egui::Color32::from_rgb(0xE0, 0x80, 0x40)));
+        }
 
         // Tempo decorrido + taxa.
         if let Some(start) = self.hunt_started {
@@ -1270,6 +1279,17 @@ impl AuroraApp {
             .tick(&mut self.gba, profile, target, batch, 60 * 60);
         // Descarta o áudio gerado durante a caça (não toca; evita crescer o buffer).
         self.gba.bus.apu.buffer.clear();
+        if result == CheckResult::PartyFull {
+            // Presente com o time cheio: ele iria pro PC (invisível pra caça) e o
+            // A-mash seguiria até a tela de apelido. Para e explica.
+            self.hunting = false;
+            self.running = true;
+            let msg = "⚠ Time cheio: o presente iria para o PC, onde a caça não o vê. \
+                       Libere um espaço no time, salve em frente ao presente e comece \
+                       a caça de novo.";
+            self.set_status(msg);
+            self.hunt_warning = Some(msg.into());
+        }
         if result == CheckResult::Shiny {
             // Achou! Devolve o controle no momento pós-seleção: o jogo entra na
             // batalha sozinho e o inicial shiny aparece (com os sparkles). O

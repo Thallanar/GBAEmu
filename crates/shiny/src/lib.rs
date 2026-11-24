@@ -126,17 +126,29 @@ const PARTY_SLOT_SIZE: u32 = 100;
 /// Número de slots numa party.
 const PARTY_SIZE: u32 = 6;
 
-/// Varre os [`PARTY_SIZE`] slots de uma party procurando um Pokémon **válido** da
-/// espécie dada; retorna o endereço-base do primeiro slot que casar. Usado pelo
-/// [`HuntMethod::StaticGift`], em que o presente cai no 1º slot livre do time (não
-/// necessariamente o slot 0, ocupado pelo líder). O reset zera a EWRAM, então não
-/// há presente "fantasma" de uma tentativa anterior — só casa quando o novo é gerado.
-fn find_party_mon(gba: &mut Gba, party_base: u32, species: u16) -> Option<u32> {
-    (0..PARTY_SIZE).find_map(|i| {
-        let base = party_base + i * PARTY_SLOT_SIZE;
-        let mon = read_mon(gba, base);
-        (mon.valid && mon.species == species).then_some(base)
-    })
+/// Quais slots da party têm um Pokémon válido (checksum ok).
+fn party_occupancy(gba: &mut Gba, party_base: u32) -> [bool; PARTY_SIZE as usize] {
+    std::array::from_fn(|i| read_mon(gba, party_base + i as u32 * PARTY_SLOT_SIZE).valid)
+}
+
+/// Varre a party pela espécie dada, mas só nos slots que estavam **vazios** em
+/// `baseline`; retorna o endereço-base do primeiro que casar. Usado pelo
+/// [`HuntMethod::StaticGift`]: o presente cai no 1º slot livre do time, e um
+/// Pokémon da mesma espécie que o jogador já tinha não é confundido com ele. O
+/// reset zera a EWRAM, então não há presente "fantasma" de uma tentativa anterior.
+fn find_new_party_mon(
+    gba: &mut Gba,
+    party_base: u32,
+    species: u16,
+    baseline: &[bool; PARTY_SIZE as usize],
+) -> Option<u32> {
+    (0..PARTY_SIZE)
+        .filter(|&i| !baseline[i as usize])
+        .find_map(|i| {
+            let base = party_base + i * PARTY_SLOT_SIZE;
+            let mon = read_mon(gba, base);
+            (mon.valid && mon.species == species).then_some(base)
+        })
 }
 
 /// Lê e descriptografa o Pokémon no endereço-base dado.
@@ -187,6 +199,10 @@ pub enum CheckResult {
     NotShiny,
     /// ✨ Shiny!
     Shiny,
+    /// Presente estático com o **time cheio**: o presente iria pro PC, onde a
+    /// caça não o enxerga, e o A-mash seguiria até a tela de apelido. A caça
+    /// deve parar e pedir pro jogador liberar um slot.
+    PartyFull,
 }
 
 /// Driver da caça. Mantém o estado entre tentativas para a UI exibir.
@@ -231,6 +247,10 @@ pub struct Hunter {
     spin_frames: u32,
     /// Frames decorridos na fuga em andamento (dirige o `drive_flee`).
     flee_frames: u32,
+    /// [`HuntMethod::StaticGift`]: slots do time ocupados quando o save carregou
+    /// nesta tentativa (`None` até o time aparecer na RAM). O presente só conta
+    /// num slot que estava vazio aqui.
+    gift_baseline: Option<[bool; PARTY_SIZE as usize]>,
 }
 
 /// Frame (contado desde o reset) em que injetamos a seed do RNG do jogo. Tem que
@@ -386,6 +406,7 @@ impl Hunter {
             wild_phase: WildPhase::Spinning,
             spin_frames: 0,
             flee_frames: 0,
+            gift_baseline: None,
         };
         // Sorteia a seed da 1ª tentativa já no boot (a 1ª caça não passa por
         // soft_reset antes do primeiro encontro).
@@ -481,6 +502,7 @@ impl Hunter {
         self.clear_inputs(gba);
         gba.reset();
         self.frames_this_attempt = 0;
+        self.gift_baseline = None;
         self.reroll_seed();
     }
 
@@ -496,6 +518,7 @@ impl Hunter {
     ) -> bool {
         self.frames_this_attempt = 0;
         self.seed_injected = false;
+        self.gift_baseline = None;
         for _ in 0..max_frames {
             self.maybe_inject_seed(gba, profile);
             // Força o cursor do inicial pro alvo quando a bag está aberta (no-op
@@ -510,6 +533,10 @@ impl Hunter {
             gba.run_frame();
             self.frames_this_attempt += 1;
 
+            if self.observe_gift_party(gba, profile, target) == Some(CheckResult::PartyFull) {
+                self.clear_inputs(gba);
+                return false;
+            }
             if self.ready_base(gba, profile, target).is_some() {
                 self.clear_inputs(gba);
                 return true;
@@ -518,16 +545,43 @@ impl Hunter {
         false
     }
 
+    /// [`HuntMethod::StaticGift`]: fotografa quais slots do time estão ocupados
+    /// assim que o time aparece na RAM (save carregado, ou já em jogo na 1ª
+    /// tentativa) — o presente só vai contar num slot que estava vazio. Time
+    /// cheio ⇒ `Some(PartyFull)`: o presente iria pro PC, invisível pra caça, e o
+    /// A-mash seguiria até a tela de apelido. No-op nos demais métodos.
+    fn observe_gift_party(
+        &mut self,
+        gba: &mut Gba,
+        profile: &GameProfile,
+        target: &TargetDef,
+    ) -> Option<CheckResult> {
+        if target.method != HuntMethod::StaticGift || self.gift_baseline.is_some() {
+            return None;
+        }
+        let occ = party_occupancy(gba, profile.player_party);
+        if !occ[0] {
+            return None; // time ainda não carregou (título/menu de arquivo)
+        }
+        if occ.iter().all(|&v| v) {
+            return Some(CheckResult::PartyFull);
+        }
+        self.gift_baseline = Some(occ);
+        None
+    }
+
     /// Resolve o endereço-base do Pokémon-alvo **se** o encontro está pronto,
     /// senão `None`. É também o teste de "encontro pronto" (`.is_some()`):
     ///
-    /// - [`HuntMethod::StaticGift`]: varre `gPlayerParty` pela espécie — o presente
-    ///   cai num slot livre qualquer, então o endereço não é fixo.
+    /// - [`HuntMethod::StaticGift`]: varre `gPlayerParty` pela espécie, só nos
+    ///   slots que estavam livres quando o save carregou — o presente cai no 1º
+    ///   slot livre, e um da mesma espécie que já estava no time não conta.
     /// - Demais métodos: lê o slot fixo (player/enemy slot 0) e exige checksum
     ///   válido e, se o alvo especificar espécie, que ela bata.
     fn ready_base(&self, gba: &mut Gba, profile: &GameProfile, target: &TargetDef) -> Option<u32> {
         if target.method == HuntMethod::StaticGift {
-            return find_party_mon(gba, profile.player_party, target.species);
+            let baseline = self.gift_baseline?;
+            return find_new_party_mon(gba, profile.player_party, target.species, &baseline);
         }
         let base = profile.target_base(target);
         let mon = read_mon(gba, base);
@@ -620,6 +674,11 @@ impl Hunter {
             gba.bus.io.joypad.set_button(Button::A, press);
             gba.run_frame();
             self.frames_this_attempt += 1;
+
+            if self.observe_gift_party(gba, profile, target) == Some(CheckResult::PartyFull) {
+                self.clear_inputs(gba);
+                return CheckResult::PartyFull;
+            }
 
             if let Some(base) = self.ready_base(gba, profile, target) {
                 self.clear_inputs(gba);
@@ -1156,23 +1215,81 @@ mod tests {
         );
     }
 
-    /// [`find_party_mon`] acha a espécie em QUALQUER slot do time (o presente cai
-    /// num slot livre, não no 0), e ignora slots zerados/sem a espécie.
+    /// [`find_new_party_mon`] acha a espécie em qualquer slot que estava LIVRE
+    /// no baseline (o presente cai no 1º slot livre, não no 0) e ignora os que já
+    /// estavam ocupados — mesmo que sejam da espécie-alvo.
     #[test]
-    fn find_party_mon_scans_for_species_in_any_slot() {
+    fn find_new_party_mon_only_looks_at_slots_free_in_baseline() {
         let mut gba = Gba::new();
         let party = 0x0200_0000;
-        // slot 0 = líder (espécie 1); slot 1 = "presente" (espécie 398).
+        // slot 0 = líder (espécie 1); slot 1 = Beldum que o jogador JÁ tinha.
         write_synthetic_mon(&mut gba, party, 0xAAAA_0001, 0x2222_1111, 1);
         let slot1 = party + PARTY_SLOT_SIZE;
         write_synthetic_mon(&mut gba, slot1, 0xBBBB_0002, 0x2222_1111, 398);
+        let baseline = party_occupancy(&mut gba, party);
+        assert_eq!(baseline, [true, true, false, false, false, false]);
 
-        // Acha 398 no slot 1, pulando o líder no slot 0.
-        assert_eq!(find_party_mon(&mut gba, party, 398), Some(slot1));
-        // Espécie ausente no time → None.
-        assert_eq!(find_party_mon(&mut gba, party, 999), None);
-        // Time todo zerado (slots inválidos) → None.
-        assert_eq!(find_party_mon(&mut gba, 0x0200_2000, 1), None);
+        // O Beldum antigo não conta como presente.
+        assert_eq!(find_new_party_mon(&mut gba, party, 398, &baseline), None);
+        // O presente cai no slot 2 (1º livre) → achado.
+        let slot2 = party + 2 * PARTY_SLOT_SIZE;
+        write_synthetic_mon(&mut gba, slot2, 0xCCCC_0003, 0x2222_1111, 398);
+        assert_eq!(
+            find_new_party_mon(&mut gba, party, 398, &baseline),
+            Some(slot2)
+        );
+        // Espécie ausente → None.
+        assert_eq!(find_new_party_mon(&mut gba, party, 999, &baseline), None);
+    }
+
+    /// Presente estático com o time cheio: o `observe_gift_party` acusa
+    /// `PartyFull` (o presente iria pro PC e a caça nunca o veria); com um slot
+    /// livre, grava o baseline e segue.
+    #[test]
+    fn static_gift_with_full_party_reports_party_full() {
+        let mut gba = Gba::new();
+        let profile = GameProfile {
+            code: "TEST",
+            name: "test",
+            player_party: 0x0200_0000,
+            enemy_party: 0x0200_1000,
+            rng_addr: None,
+            starter_menu: None,
+            battle_flag: None,
+            action_cursor: None,
+            targets: &[],
+        };
+        let target = TargetDef {
+            name: "Beldum",
+            species: 398,
+            slot: Slot::Player,
+            method: HuntMethod::StaticGift,
+            cursor: StarterCursor::Center,
+        };
+        let mut hunter = Hunter::new();
+        // Time ainda não carregou (título): nada a dizer.
+        assert_eq!(hunter.observe_gift_party(&mut gba, &profile, &target), None);
+        assert!(hunter.gift_baseline.is_none());
+
+        for i in 0..5 {
+            let base = profile.player_party + i * PARTY_SLOT_SIZE;
+            write_synthetic_mon(&mut gba, base, 0x1000 + i, 0x2222_1111, 1);
+        }
+        // 5 de 6: grava o baseline e segue.
+        assert_eq!(hunter.observe_gift_party(&mut gba, &profile, &target), None);
+        assert_eq!(
+            hunter.gift_baseline,
+            Some([true, true, true, true, true, false])
+        );
+
+        // Time cheio (caça nova): PartyFull.
+        let mut hunter = Hunter::new();
+        let base = profile.player_party + 5 * PARTY_SLOT_SIZE;
+        write_synthetic_mon(&mut gba, base, 0x1005, 0x2222_1111, 1);
+        assert_eq!(
+            hunter.observe_gift_party(&mut gba, &profile, &target),
+            Some(CheckResult::PartyFull)
+        );
     }
 
     /// O [`HuntMethod::StaticGift`] só fica "pronto" quando o presente aparece num
@@ -1205,6 +1322,8 @@ mod tests {
         write_synthetic_mon(&mut gba, profile.player_party, 0xAAAA_BBBB, otid, 1);
 
         let mut hunter = Hunter::new();
+        // Time carregou com só o líder: o baseline grava o slot 0 ocupado.
+        assert_eq!(hunter.observe_gift_party(&mut gba, &profile, &target), None);
         // Sem o presente ainda: encontro não está pronto.
         assert_eq!(hunter.ready_base(&mut gba, &profile, &target), None);
 
