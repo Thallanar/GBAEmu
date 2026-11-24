@@ -63,7 +63,7 @@ import javax.microedition.khronos.opengles.GL10
  * escalando na CPU 60×/s); a GPU fazia nada e o aparelho esquentava. Agora a
  * escala 240×160→tela sai de graça na GPU.
  */
-class MainActivity : Activity() {
+class MainActivity : Activity(), Host {
 
     private companion object {
         const val W = 240
@@ -82,6 +82,11 @@ class MainActivity : Activity() {
         const val KEY_SHADER_SRC = "shader_src"
         const val KEY_SHADER_NAME = "shader_name"
         const val KEY_UPSCALE = "upscale"
+        // Áudio e velocidade (Configurações).
+        const val KEY_SOUND = "sound_on"
+        const val KEY_VOLUME = "volume"
+        const val KEY_FF_MUTED = "ff_muted"
+        const val KEY_FF_MULT = "ff_multiplier"
 
         // Filtros de upscale. `Triple(key, fator, rótulo)`: `key` casa com
         // `Upscale::key` do nativo (carrega algoritmo + fator); `fator` dimensiona
@@ -164,6 +169,22 @@ class MainActivity : Activity() {
     // (☰ menu), lido pela thread GL a cada draw. Não persiste: o app sempre
     // abre em velocidade normal.
     @Volatile private var ffSpeed = 1
+
+    // Áudio (Configurações): som ligado, volume 0–100 e se a velocidade acelerada
+    // fica muda. Viram o ganho do AudioTrack em [applyAudioGain]; o `write`
+    // bloqueante segue igual, então o pacing não muda.
+    private var soundOnPref = true
+    private var volumePref = 100
+    private var ffMutedPref = false
+    // Multiplicador da velocidade acelerada (2/4/8×), ligada/desligada pelo menu.
+    private var fastMultiplierPref = 2
+
+    // Menu/Configurações abertos pausam a emulação (lido pela thread GL). Com o
+    // link ativo o jogo segue rodando: o parceiro depende do nosso ritmo.
+    @Volatile private var menuPaused = false
+    private var settings: SettingsScreen? = null
+    // Nome da ROM carregada (sem `.gba`), pro cabeçalho do menu.
+    private var currentRomName: String? = null
 
     // Efeito de shader atual (key de SHADERS, ou "custom"). Escrito pela UI, lido
     // pela thread GL ao (re)compilar o programa. Persiste nas prefs.
@@ -297,8 +318,9 @@ class MainActivity : Activity() {
     // Textos no idioma escolhido (ver [L10n]); refeito ao trocar o idioma.
     private lateinit var l10n: android.content.Context
 
-    /** Texto traduzido de [id], formatado com [args] no idioma do app. */
-    private fun tr(id: Int, vararg args: Any): String = l10n.getString(id, *args)
+    override fun tr(id: Int, vararg args: Any): String = l10n.getString(id, *args)
+
+    override fun plural(id: Int, n: Int): String = l10n.resources.getQuantityString(id, n, n)
 
     /** Rótulo de shader/upscale: `""` é o "nenhum", traduzido na hora. */
     private fun noneOr(label: String) = label.ifEmpty { tr(R.string.none) }
@@ -320,6 +342,7 @@ class MainActivity : Activity() {
         loadLinkAddr()
         loadShader()
         loadUpscale()
+        loadAudioPrefs()
 
         glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(2)
@@ -411,7 +434,7 @@ class MainActivity : Activity() {
     }
 
     /** Menu de seleção de shader: troca o efeito, persiste e recompila na thread GL. */
-    private fun shaderMenu() {
+    private fun shaderMenu(onDone: () -> Unit = {}) {
         // Embutidos single-pass + multipass + (se importado) a entrada "Custom".
         val entries = SHADERS.toMutableList()
         // Esconde os multipass que exigem meio-float quando o device não suporta.
@@ -427,6 +450,7 @@ class MainActivity : Activity() {
                 glView.queueEvent { renderer.rebuildProgram() }
                 toast(tr(R.string.shader_toast, labels[which]))
                 dialog.dismiss()
+                onDone()
             }
             .setNeutralButton(tr(R.string.shader_import)) { _, _ -> openShaderPicker() }
             .setNegativeButton(tr(R.string.cancel), null)
@@ -458,6 +482,7 @@ class MainActivity : Activity() {
         saveShader()
         glView.queueEvent { renderer.rebuildProgram() }
         toast(tr(R.string.shader_toast, customShaderName))
+        settings?.refresh()
     }
 
     /** Nome de exibição de um documento SAF (coluna _display_name), ou `null`. */
@@ -497,7 +522,7 @@ class MainActivity : Activity() {
     }
 
     /** Menu do filtro de upscale: troca o algoritmo, persiste e avisa o nativo. */
-    private fun upscaleMenu() {
+    private fun upscaleMenu(onDone: () -> Unit = {}) {
         val labels = UPSCALES.map { noneOr(it.third) }.toTypedArray()
         val cur = UPSCALES.indexOfFirst { it.first == currentUpscale }.coerceAtLeast(0)
         AlertDialog.Builder(this)
@@ -508,6 +533,7 @@ class MainActivity : Activity() {
                 glView.queueEvent { NativeBridge.setUpscale(handle, currentUpscale) }
                 toast(tr(R.string.upscale_toast, labels[which]))
                 dialog.dismiss()
+                onDone()
             }
             .setNegativeButton(tr(R.string.cancel), null)
             .show()
@@ -739,7 +765,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         glView.onResume()
-        audio?.play()
+        if (!menuPaused) audio?.play()
     }
 
     override fun onPause() {
@@ -770,7 +796,7 @@ class MainActivity : Activity() {
     private fun chooseRom() {
         val folder = romFolderUri
         if (folder == null) {
-            pickRomFolder()
+            pickRomFolderIntent()
             return
         }
         val roms = listRoms(folder)
@@ -783,7 +809,7 @@ class MainActivity : Activity() {
             .setItems(labels.toTypedArray()) { _, which ->
                 when {
                     which < roms.size -> loadRomFromUri(roms[which].second)
-                    which == roms.size -> pickRomFolder()
+                    which == roms.size -> pickRomFolderIntent()
                     else -> openSingleFilePicker()
                 }
             }
@@ -791,7 +817,7 @@ class MainActivity : Activity() {
     }
 
     /** Abre o seletor de PASTA (SAF tree). A permissão é persistida no resultado. */
-    private fun pickRomFolder() {
+    private fun pickRomFolderIntent() {
         startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), OPEN_TREE)
     }
 
@@ -837,6 +863,7 @@ class MainActivity : Activity() {
         }
         if (bytes != null) {
             lastRom = bytes // guardado pro 🔄 Resetar (recarrega a mesma ROM)
+            currentRomName = displayName(uri)?.removeSuffix(".gba")?.removeSuffix(".GBA")
             pendingRom.set(bytes)
         } else {
             toast(tr(R.string.rom_read_failed))
@@ -1026,53 +1053,151 @@ class MainActivity : Activity() {
                 .show()
             return
         }
-        val shaderLabel = if (currentShader == "custom") {
-            tr(R.string.shader_custom, customShaderName)
-        } else {
-            noneOr((SHADERS + MULTIPASS).firstOrNull { it.first == currentShader }?.second ?: "")
+        pauseForMenu()
+        MenuSheet(this, this).show()
+    }
+
+    /** Pausa a emulação (e o som) enquanto menu/Configurações estão abertos. */
+    private fun pauseForMenu() {
+        if (!menuPauses || menuPaused) return
+        menuPaused = true
+        audio?.pause()
+    }
+
+    private fun resumeFromMenu() {
+        if (!menuPaused) return
+        menuPaused = false
+        audio?.play()
+    }
+
+    // ── Host: menu ───────────────────────────────────────────────────────────
+
+    override val gameTitle: String?
+        get() = if (!romLoaded) null else currentRomName ?: huntGameName.ifEmpty { currentGameCode }
+    override val menuPauses: Boolean get() = linkStatePub.get() == 0
+    override val hunterAvailable: Boolean get() = romLoaded && huntSupported
+    override val fastOn: Boolean get() = ffSpeed > 1
+
+    override fun setFast(on: Boolean) {
+        ffSpeed = if (on) fastMultiplierPref else 1
+        applyAudioGain()
+    }
+
+    override fun onHunter() = startShinyHunter()
+    override fun onSaveState() = saveStateFromMenu()
+    override fun onLoadState() = loadStateFromMenu()
+    override fun onLoadRom() = chooseRom()
+    override fun onResetRom() = resetFromMenu()
+    override fun onScreenshot() = takeScreenshot()
+    override fun onLink() = linkMenu()
+
+    override fun onSettings() {
+        pauseForMenu()
+        settings = SettingsScreen(this, this).also { it.show() }
+    }
+
+    override fun onMenuClosed() {
+        // Indo pras Configurações a pausa continua (onSettings já pausou de novo).
+        if (settings == null) resumeFromMenu()
+    }
+
+    // ── Host: Configurações ──────────────────────────────────────────────────
+
+    override fun romFolderName(): String? {
+        val folder = romFolderUri ?: return null
+        val doc = DocumentsContract.buildDocumentUriUsingTree(folder, DocumentsContract.getTreeDocumentId(folder))
+        return displayName(doc) ?: folder.lastPathSegment
+    }
+
+    override fun romCount(): Int = romFolderUri?.let { listRoms(it).size } ?: 0
+    override fun pickRomFolder() = pickRomFolderIntent()
+
+    override var soundOn: Boolean
+        get() = soundOnPref
+        set(v) { soundOnPref = v; saveAudioPrefs(); applyAudioGain() }
+    override var volume: Int
+        get() = volumePref
+        set(v) { volumePref = v.coerceIn(0, 100); saveAudioPrefs(); applyAudioGain() }
+    override var ffMuted: Boolean
+        get() = ffMutedPref
+        set(v) { ffMutedPref = v; saveAudioPrefs(); applyAudioGain() }
+    override var fastMultiplier: Int
+        get() = fastMultiplierPref
+        set(v) {
+            fastMultiplierPref = v
+            saveAudioPrefs()
+            if (ffSpeed > 1) ffSpeed = v // já acelerado: passa a valer na hora
         }
-        val upscaleLabel = noneOr(UPSCALES.firstOrNull { it.first == currentUpscale }?.third ?: "")
-        // Rótulo → ação (a ordem da lista é a do menu).
-        val items = mutableListOf<Pair<String, () -> Unit>>(
-            tr(R.string.menu_load_rom) to ::chooseRom,
-            tr(R.string.menu_reset) to ::resetFromMenu,
-            tr(R.string.menu_save_state) to ::saveStateFromMenu,
-            tr(R.string.menu_load_state) to ::loadStateFromMenu,
-            tr(R.string.menu_screenshot) to ::takeScreenshot,
-            tr(R.string.menu_speed, ffSpeed) to ::speedMenu,
-            tr(R.string.menu_shader, shaderLabel) to ::shaderMenu,
-            tr(R.string.menu_upscale, upscaleLabel) to ::upscaleMenu,
-            tr(R.string.menu_remap) to ::remapMenu,
-            tr(R.string.menu_link) to ::linkMenu,
-            tr(R.string.menu_language) to ::languageMenu,
-        )
-        if (huntSupported) items.add(tr(R.string.menu_hunter) to ::startShinyHunter)
-        AlertDialog.Builder(this)
-            .setTitle(tr(R.string.menu_title))
-            .setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }
-            .show()
+
+    override fun shaderLabel(): String = if (currentShader == "custom") {
+        tr(R.string.shader_custom, customShaderName)
+    } else {
+        noneOr((SHADERS + MULTIPASS).firstOrNull { it.first == currentShader }?.second ?: "")
+    }
+
+    override fun upscaleLabel(): String = noneOr(UPSCALES.firstOrNull { it.first == currentUpscale }?.third ?: "")
+    override fun openShader(onDone: () -> Unit) = shaderMenu(onDone)
+    override fun openUpscale(onDone: () -> Unit) = upscaleMenu(onDone)
+    override fun openRemap() = remapMenu()
+
+    override fun languageTag(): String = L10n.load(this)
+
+    override fun setLanguage(tag: String) {
+        L10n.save(this, tag)
+        l10n = L10n.context(this, tag)
+        relabelHunterPanel()
+    }
+
+    override fun versionName(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+    } catch (e: Exception) {
+        ""
+    }
+
+    override fun openUrl(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (e: Exception) {
+            Log.w(TAG, "sem app pra abrir $url: $e")
+        }
+    }
+
+    override fun onSettingsClosed(toMenu: Boolean) {
+        settings = null
+        if (toMenu) {
+            MenuSheet(this, this).show() // ainda pausado
+        } else {
+            resumeFromMenu()
+        }
+    }
+
+    // ── Áudio ────────────────────────────────────────────────────────────────
+
+    private fun loadAudioPrefs() {
+        val p = getSharedPreferences(PREFS, MODE_PRIVATE)
+        soundOnPref = p.getBoolean(KEY_SOUND, true)
+        volumePref = p.getInt(KEY_VOLUME, 100).coerceIn(0, 100)
+        ffMutedPref = p.getBoolean(KEY_FF_MUTED, false)
+        fastMultiplierPref = p.getInt(KEY_FF_MULT, 2).takeIf { it in intArrayOf(2, 4, 8) } ?: 2
+    }
+
+    private fun saveAudioPrefs() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putBoolean(KEY_SOUND, soundOnPref)
+            .putInt(KEY_VOLUME, volumePref)
+            .putBoolean(KEY_FF_MUTED, ffMutedPref)
+            .putInt(KEY_FF_MULT, fastMultiplierPref)
+            .apply()
     }
 
     /**
-     * Escolha do idioma do app (provisório no menu; vai para Configurações no
-     * redesign). Aplica na hora, sem recriar a Activity: os próximos textos já
-     * saem no idioma novo e o painel da caça é re-rotulado.
+     * Ganho do AudioTrack conforme as Configurações: mudo se o som está
+     * desligado ou se a velocidade acelerada está ligada e configurada como
+     * muda. O áudio continua sendo escrito (o `write` bloqueante é o pacing).
      */
-    private fun languageMenu() {
-        val current = L10n.load(this)
-        val labels = L10n.OPTIONS.map { (tag, name) -> if (tag.isEmpty()) tr(R.string.language_auto) else name }
-        val cur = L10n.OPTIONS.indexOfFirst { it.first == current }.coerceAtLeast(0)
-        AlertDialog.Builder(this)
-            .setTitle(tr(R.string.language_title))
-            .setSingleChoiceItems(labels.toTypedArray(), cur) { dialog, which ->
-                val tag = L10n.OPTIONS[which].first
-                L10n.save(this, tag)
-                l10n = L10n.context(this, tag)
-                relabelHunterPanel()
-                dialog.dismiss()
-            }
-            .setNegativeButton(tr(R.string.cancel), null)
-            .show()
+    private fun applyAudioGain() {
+        val mute = !soundOnPref || (ffMutedPref && ffSpeed > 1)
+        audio?.setVolume(if (mute) 0f else volumePref / 100f)
     }
 
     /**
@@ -1194,22 +1319,6 @@ class MainActivity : Activity() {
         } catch (e: Throwable) {
             Log.w(TAG, "WifiLock release falhou: $e")
         }
-    }
-
-    /** Escolha do multiplicador de velocidade (1x volta ao normal). */
-    private fun speedMenu() {
-        val speeds = intArrayOf(1, 2, 4, 8)
-        val labels = Array(speeds.size) { i ->
-            val s = speeds[i]
-            (if (s == 1) tr(R.string.speed_normal_item) else tr(R.string.speed_item, s)) + if (s == ffSpeed) "  ✓" else ""
-        }
-        AlertDialog.Builder(this)
-            .setTitle(tr(R.string.speed_title))
-            .setItems(labels) { _, i ->
-                ffSpeed = speeds[i]
-                toast(if (speeds[i] == 1) tr(R.string.speed_normal_toast) else tr(R.string.speed_ff_toast, speeds[i]))
-            }
-            .show()
     }
 
     /**
@@ -1530,7 +1639,9 @@ class MainActivity : Activity() {
                 saveRomFolder(uri)
                 savMirrorUri = null // a subpasta saves/ vive na pasta antiga; re-resolve
                 savMirrorCode = null
-                chooseRom() // já abre a lista da pasta recém-escolhida
+                // Pelas Configurações: só atualiza a página. Senão, já abre a
+                // lista da pasta recém-escolhida.
+                if (settings != null) settings?.refresh() else chooseRom()
             }
         }
     }
@@ -1827,7 +1938,11 @@ class MainActivity : Activity() {
 
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             if (handle == 0L) handle = NativeBridge.create()
-            if (audio == null) audio = createAudioTrack()
+            if (audio == null) {
+                audio = createAudioTrack()
+                applyAudioGain()
+                if (menuPaused) audio?.pause()
+            }
             // Dimensionado pro fator máximo (HQ4x): o nativo escreve o frame já
             // ampliado aqui; a textura acompanha o fator atual.
             buf = ByteBuffer.allocateDirect(W * H * 4 * MAX_UPSCALE * MAX_UPSCALE)
@@ -1967,7 +2082,10 @@ class MainActivity : Activity() {
                 pendingLoadState.getAndSet(null)?.let { if (romLoaded) doLoadState(it) }
             }
 
-            if (romLoaded) {
+            // Menu/Configurações abertos: não emula (a textura guarda o último
+            // frame); a caça segue rodando, ela tem a tela dela.
+            val frozen = menuPaused && !hunting
+            if (romLoaded && !frozen) {
                 if (hunting) {
                     // O Hunter dirige os inputs e roda os frames por dentro; só
                     // copiamos o framebuffer resultante (sem avançar de novo).
@@ -2059,7 +2177,7 @@ class MainActivity : Activity() {
             val a = audio
             if (hunting) {
                 // sem pacing extra
-            } else if (romLoaded && a != null) {
+            } else if (romLoaded && a != null && !frozen) {
                 val n = NativeBridge.drainAudio(handle, audioBuf)
                 if (n > 0) a.write(audioBuf, 0, n) else Thread.sleep(2)
             } else {
