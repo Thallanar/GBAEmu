@@ -89,7 +89,7 @@ class MainActivity : Activity() {
         // chaves distintas — por isso a seleção é pela chave, não pelo fator.
         // `MAX_UPSCALE` dimensiona o ByteBuffer/textura pro fator máximo.
         val UPSCALES = arrayOf(
-            Triple("off", 1, "Nenhum"),
+            Triple("off", 1, ""),
             Triple("hq2x", 2, "HQ2x"),
             Triple("hq3x", 3, "HQ3x"),
             Triple("hq4x", 4, "HQ4x"),
@@ -103,7 +103,7 @@ class MainActivity : Activity() {
         // espelhadas de assets/shaders/ na raiz do repo). `key` casa com o arquivo
         // `<key>.frag`; `label` é o rótulo na UI.
         val SHADERS = arrayOf(
-            "none" to "Nenhum",
+            "none" to "",
             "scanlines" to "Scanlines",
             "lcd-grid" to "LCD grid",
             "lcd3x" to "LCD3x",
@@ -176,7 +176,7 @@ class MainActivity : Activity() {
     // Fonte do shader importado de arquivo (corpo `effect(...)`, mesmo contrato dos
     // embutidos) e nome do arquivo pra rótulo na UI. `null` = nenhum importado.
     @Volatile private var customShaderSrc: String? = null
-    private var customShaderName = "arquivo"
+    private var customShaderName = ""
 
     // Chave do filtro de upscale atual ("off"/"hq2x"/"xbrz2x"/…). Estado
     // primário (carrega algoritmo + fator); é o que vai pro nativo e persiste.
@@ -289,10 +289,23 @@ class MainActivity : Activity() {
     private lateinit var panelSpriteNormal: ImageView
     private lateinit var panelSpriteShiny: ImageView
     private lateinit var panelStats: TextView
+    private lateinit var panelLabelNormal: TextView
+    private lateinit var panelLabelShiny: TextView
+    private lateinit var panelStop: Button
     private var portrait = false
+
+    // Textos no idioma escolhido (ver [L10n]); refeito ao trocar o idioma.
+    private lateinit var l10n: android.content.Context
+
+    /** Texto traduzido de [id], formatado com [args] no idioma do app. */
+    private fun tr(id: Int, vararg args: Any): String = l10n.getString(id, *args)
+
+    /** Rótulo de shader/upscale: `""` é o "nenhum", traduzido na hora. */
+    private fun noneOr(label: String) = label.ifEmpty { tr(R.string.none) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        l10n = L10n.context(this, L10n.load(this))
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         // Pacing (Etapa 2, raso — zero toque no áudio/loop): avisa o sistema que
@@ -403,20 +416,20 @@ class MainActivity : Activity() {
         val entries = SHADERS.toMutableList()
         // Esconde os multipass que exigem meio-float quando o device não suporta.
         entries.addAll(MULTIPASS.filter { it.first !in MULTIPASS_NEEDS_FLOAT || halfFloatSupported })
-        if (customShaderSrc != null) entries.add("custom" to "Custom: $customShaderName")
-        val labels = entries.map { it.second }.toTypedArray()
+        if (customShaderSrc != null) entries.add("custom" to tr(R.string.shader_custom, customShaderName))
+        val labels = entries.map { noneOr(it.second) }.toTypedArray()
         val cur = entries.indexOfFirst { it.first == currentShader }.coerceAtLeast(0)
         AlertDialog.Builder(this)
-            .setTitle("Shader")
+            .setTitle(tr(R.string.shader_title))
             .setSingleChoiceItems(labels, cur) { dialog, which ->
                 currentShader = entries[which].first
                 saveShader()
                 glView.queueEvent { renderer.rebuildProgram() }
-                toast("Shader: ${entries[which].second}")
+                toast(tr(R.string.shader_toast, labels[which]))
                 dialog.dismiss()
             }
-            .setNeutralButton("Importar .frag…") { _, _ -> openShaderPicker() }
-            .setNegativeButton("Cancelar", null)
+            .setNeutralButton(tr(R.string.shader_import)) { _, _ -> openShaderPicker() }
+            .setNegativeButton(tr(R.string.cancel), null)
             .show()
     }
 
@@ -437,14 +450,14 @@ class MainActivity : Activity() {
             Log.w(TAG, "falha ao ler .frag: $e"); null
         }
         if (src.isNullOrBlank()) {
-            toast("Não consegui ler o shader"); return
+            toast(tr(R.string.shader_read_failed)); return
         }
         customShaderSrc = src
-        customShaderName = displayName(uri) ?: "arquivo"
+        customShaderName = displayName(uri) ?: tr(R.string.shader_file_default)
         currentShader = "custom"
         saveShader()
         glView.queueEvent { renderer.rebuildProgram() }
-        toast("Shader: $customShaderName")
+        toast(tr(R.string.shader_toast, customShaderName))
     }
 
     /** Nome de exibição de um documento SAF (coluna _display_name), ou `null`. */
@@ -485,18 +498,18 @@ class MainActivity : Activity() {
 
     /** Menu do filtro de upscale: troca o algoritmo, persiste e avisa o nativo. */
     private fun upscaleMenu() {
-        val labels = UPSCALES.map { it.third }.toTypedArray()
+        val labels = UPSCALES.map { noneOr(it.third) }.toTypedArray()
         val cur = UPSCALES.indexOfFirst { it.first == currentUpscale }.coerceAtLeast(0)
         AlertDialog.Builder(this)
-            .setTitle("Upscale")
+            .setTitle(tr(R.string.upscale_title))
             .setSingleChoiceItems(labels, cur) { dialog, which ->
                 applyUpscale(UPSCALES[which].first)
                 saveUpscale()
                 glView.queueEvent { NativeBridge.setUpscale(handle, currentUpscale) }
-                toast("Upscale: ${UPSCALES[which].third}")
+                toast(tr(R.string.upscale_toast, labels[which]))
                 dialog.dismiss()
             }
-            .setNegativeButton("Cancelar", null)
+            .setNegativeButton(tr(R.string.cancel), null)
             .show()
     }
 
@@ -509,16 +522,16 @@ class MainActivity : Activity() {
      */
     private fun remapMenu() {
         val items = Array(PAD_BTN_BITS.size) { "${PAD_BTN_NAMES[it]} — ${keycodeName(padKeycodes[it])}" } +
-            "Restaurar padrão"
+            tr(R.string.remap_restore)
         AlertDialog.Builder(this)
-            .setTitle("Remapear controle")
+            .setTitle(tr(R.string.remap_title))
             .setItems(items) { _, which ->
                 if (which < PAD_BTN_BITS.size) {
                     captureBinding(which)
                 } else {
                     padKeycodes = PAD_DEFAULT_KEYCODES.copyOf()
                     savePadMap()
-                    toast("Mapeamento padrão restaurado")
+                    toast(tr(R.string.remap_restored))
                 }
             }
             .show()
@@ -532,8 +545,8 @@ class MainActivity : Activity() {
      */
     private fun captureBinding(idx: Int) {
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Remapear ${PAD_BTN_NAMES[idx]}")
-            .setMessage("Pressione um botão no controle…\n(Voltar cancela)")
+            .setTitle(tr(R.string.remap_button_title, PAD_BTN_NAMES[idx]))
+            .setMessage(tr(R.string.remap_press))
             .create()
         dialog.setOnKeyListener { d, keyCode, event ->
             if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
@@ -612,21 +625,21 @@ class MainActivity : Activity() {
         val sprites = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            fun labeled(label: String, img: ImageView) = LinearLayout(this@MainActivity).apply {
+            fun label() = TextView(this@MainActivity).apply {
+                setTextColor(Color.LTGRAY)
+                gravity = Gravity.CENTER
+            }
+            fun labeled(label: TextView, img: ImageView) = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
                 setPadding((16 * dp).toInt(), 0, (16 * dp).toInt(), 0)
                 addView(img)
-                addView(
-                    TextView(this@MainActivity).apply {
-                        text = label
-                        setTextColor(Color.LTGRAY)
-                        gravity = Gravity.CENTER
-                    },
-                )
+                addView(label)
             }
-            addView(labeled("Normal", panelSpriteNormal))
-            addView(labeled("✨ Shiny", panelSpriteShiny))
+            panelLabelNormal = label()
+            panelLabelShiny = label()
+            addView(labeled(panelLabelNormal, panelSpriteNormal))
+            addView(labeled(panelLabelShiny, panelSpriteShiny))
         }
 
         panelStats = TextView(this).apply {
@@ -636,10 +649,10 @@ class MainActivity : Activity() {
             setPadding(0, (12 * dp).toInt(), 0, (12 * dp).toInt())
         }
 
-        val stop = Button(this).apply {
-            text = "⏹ Parar caça"
+        panelStop = Button(this).apply {
             setOnClickListener { pendingHuntStop.set(true) }
         }
+        relabelHunterPanel()
 
         hunterPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -648,7 +661,7 @@ class MainActivity : Activity() {
             setPadding(0, (16 * dp).toInt(), 0, (16 * dp).toInt())
             addView(sprites)
             addView(panelStats)
-            addView(stop)
+            addView(panelStop)
             visibility = View.GONE
         }
     }
@@ -762,9 +775,9 @@ class MainActivity : Activity() {
         }
         val roms = listRoms(folder)
         val labels = roms.map { it.first }.toMutableList()
-        labels.add("📁 Trocar pasta de ROMs…")
-        labels.add("📄 Abrir arquivo avulso…")
-        val title = if (roms.isEmpty()) "Pasta vazia (sem .gba)" else "ROMs (${roms.size})"
+        labels.add(tr(R.string.rom_change_folder))
+        labels.add(tr(R.string.rom_open_file))
+        val title = if (roms.isEmpty()) tr(R.string.rom_folder_empty) else tr(R.string.rom_list_title, roms.size)
         AlertDialog.Builder(this)
             .setTitle(title)
             .setItems(labels.toTypedArray()) { _, which ->
@@ -826,7 +839,7 @@ class MainActivity : Activity() {
             lastRom = bytes // guardado pro 🔄 Resetar (recarrega a mesma ROM)
             pendingRom.set(bytes)
         } else {
-            toast("Não consegui ler a ROM")
+            toast(tr(R.string.rom_read_failed))
         }
     }
 
@@ -838,14 +851,14 @@ class MainActivity : Activity() {
     private fun resetFromMenu() {
         val rom = lastRom
         if (!romLoaded || rom == null) {
-            toast("Carregue uma ROM antes de resetar")
+            toast(tr(R.string.reset_need_rom))
             return
         }
         AlertDialog.Builder(this)
-            .setTitle("Resetar")
-            .setMessage("Reiniciar o jogo? O progresso desde o último save in-game será perdido.")
-            .setPositiveButton("Resetar") { _, _ -> pendingRom.set(rom) }
-            .setNegativeButton("Cancelar", null)
+            .setTitle(tr(R.string.reset_title))
+            .setMessage(tr(R.string.reset_message))
+            .setPositiveButton(tr(R.string.reset_title)) { _, _ -> pendingRom.set(rom) }
+            .setNegativeButton(tr(R.string.cancel), null)
             .show()
     }
 
@@ -1008,43 +1021,57 @@ class MainActivity : Activity() {
     private fun showMenu() {
         if (hunting) {
             AlertDialog.Builder(this)
-                .setTitle("Shiny Hunter")
-                .setItems(arrayOf("Parar caça")) { _, _ -> pendingHuntStop.set(true) }
+                .setTitle(tr(R.string.hunter_title))
+                .setItems(arrayOf(tr(R.string.hunt_stop_plain))) { _, _ -> pendingHuntStop.set(true) }
                 .show()
             return
         }
-        val speedItem = "⏩ Velocidade (${ffSpeed}x)"
         val shaderLabel = if (currentShader == "custom") {
-            "Custom"
+            tr(R.string.shader_custom, customShaderName)
         } else {
-            (SHADERS + MULTIPASS).firstOrNull { it.first == currentShader }?.second ?: "Nenhum"
+            noneOr((SHADERS + MULTIPASS).firstOrNull { it.first == currentShader }?.second ?: "")
         }
-        val shaderItem = "🎨 Shader ($shaderLabel)"
-        val upscaleLabel = UPSCALES.firstOrNull { it.first == currentUpscale }?.third ?: "Nenhum"
-        val upscaleItem = "🔍 Upscale ($upscaleLabel)"
-        val items = mutableListOf(
-            "Carregar ROM", "🔄 Resetar", "Salvar estado", "Carregar estado",
-            "📸 Captura de tela", speedItem, shaderItem, upscaleItem,
-            "🎮 Remapear controle", "🔗 Link",
+        val upscaleLabel = noneOr(UPSCALES.firstOrNull { it.first == currentUpscale }?.third ?: "")
+        // Rótulo → ação (a ordem da lista é a do menu).
+        val items = mutableListOf<Pair<String, () -> Unit>>(
+            tr(R.string.menu_load_rom) to ::chooseRom,
+            tr(R.string.menu_reset) to ::resetFromMenu,
+            tr(R.string.menu_save_state) to ::saveStateFromMenu,
+            tr(R.string.menu_load_state) to ::loadStateFromMenu,
+            tr(R.string.menu_screenshot) to ::takeScreenshot,
+            tr(R.string.menu_speed, ffSpeed) to ::speedMenu,
+            tr(R.string.menu_shader, shaderLabel) to ::shaderMenu,
+            tr(R.string.menu_upscale, upscaleLabel) to ::upscaleMenu,
+            tr(R.string.menu_remap) to ::remapMenu,
+            tr(R.string.menu_link) to ::linkMenu,
+            tr(R.string.menu_language) to ::languageMenu,
         )
-        if (huntSupported) items.add("✨ Shiny Hunter")
+        if (huntSupported) items.add(tr(R.string.menu_hunter) to ::startShinyHunter)
         AlertDialog.Builder(this)
-            .setTitle("Menu")
-            .setItems(items.toTypedArray()) { _, which ->
-                when (items[which]) {
-                    "Carregar ROM" -> chooseRom()
-                    "🔄 Resetar" -> resetFromMenu()
-                    "Salvar estado" -> saveStateFromMenu()
-                    "Carregar estado" -> loadStateFromMenu()
-                    "📸 Captura de tela" -> takeScreenshot()
-                    speedItem -> speedMenu()
-                    shaderItem -> shaderMenu()
-                    upscaleItem -> upscaleMenu()
-                    "🎮 Remapear controle" -> remapMenu()
-                    "🔗 Link" -> linkMenu()
-                    "✨ Shiny Hunter" -> startShinyHunter()
-                }
+            .setTitle(tr(R.string.menu_title))
+            .setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }
+            .show()
+    }
+
+    /**
+     * Escolha do idioma do app (provisório no menu; vai para Configurações no
+     * redesign). Aplica na hora, sem recriar a Activity: os próximos textos já
+     * saem no idioma novo e o painel da caça é re-rotulado.
+     */
+    private fun languageMenu() {
+        val current = L10n.load(this)
+        val labels = L10n.OPTIONS.map { (tag, name) -> if (tag.isEmpty()) tr(R.string.language_auto) else name }
+        val cur = L10n.OPTIONS.indexOfFirst { it.first == current }.coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle(tr(R.string.language_title))
+            .setSingleChoiceItems(labels.toTypedArray(), cur) { dialog, which ->
+                val tag = L10n.OPTIONS[which].first
+                L10n.save(this, tag)
+                l10n = L10n.context(this, tag)
+                relabelHunterPanel()
+                dialog.dismiss()
             }
+            .setNegativeButton(tr(R.string.cancel), null)
             .show()
     }
 
@@ -1056,30 +1083,30 @@ class MainActivity : Activity() {
     private fun linkMenu() {
         when (linkStatePub.get()) {
             2 -> {
-                val papel = if (linkRolePub.get() == 0) "host" else "convidado"
+                val papel = tr(if (linkRolePub.get() == 0) R.string.link_role_host else R.string.link_role_guest)
                 AlertDialog.Builder(this)
-                    .setTitle("🔗 Link — conectado")
-                    .setMessage("Somos o $papel. A troca acontece dentro do jogo.")
-                    .setPositiveButton("Desconectar") { _, _ -> pendingLinkDisconnect.set(true) }
-                    .setNegativeButton("Fechar", null)
+                    .setTitle(tr(R.string.link_connected_title))
+                    .setMessage(tr(R.string.link_connected_msg, papel))
+                    .setPositiveButton(tr(R.string.link_disconnect)) { _, _ -> pendingLinkDisconnect.set(true) }
+                    .setNegativeButton(tr(R.string.close), null)
                     .show()
             }
             1 -> {
                 AlertDialog.Builder(this)
-                    .setTitle("🔗 Link — conectando…")
-                    .setMessage("Aguardando o parceiro.")
-                    .setPositiveButton("Cancelar") { _, _ -> pendingLinkCancel.set(true) }
-                    .setNegativeButton("Fechar", null)
+                    .setTitle(tr(R.string.link_connecting_title))
+                    .setMessage(tr(R.string.link_waiting))
+                    .setPositiveButton(tr(R.string.cancel)) { _, _ -> pendingLinkCancel.set(true) }
+                    .setNegativeButton(tr(R.string.close), null)
                     .show()
             }
             else -> {
                 AlertDialog.Builder(this)
-                    .setTitle("🔗 Link")
-                    .setItems(arrayOf("Hospedar (porta $LINK_PORT)", "Conectar a um host…")) { _, which ->
+                    .setTitle(tr(R.string.link_title))
+                    .setItems(arrayOf(tr(R.string.link_host, LINK_PORT), tr(R.string.link_join))) { _, which ->
                         when (which) {
                             0 -> {
                                 pendingLinkHost.set(LINK_PORT)
-                                toast("Aguardando parceiro na porta $LINK_PORT…")
+                                toast(tr(R.string.link_host_waiting, LINK_PORT))
                             }
                             1 -> linkJoinDialog()
                         }
@@ -1097,13 +1124,13 @@ class MainActivity : Activity() {
             setSingleLine()
         }
         AlertDialog.Builder(this)
-            .setTitle("Conectar a um host")
-            .setMessage("IP do parceiro na rede (porta $LINK_PORT por padrão):")
+            .setTitle(tr(R.string.link_join_title))
+            .setMessage(tr(R.string.link_join_msg, LINK_PORT))
             .setView(input)
-            .setPositiveButton("Conectar") { _, _ ->
+            .setPositiveButton(tr(R.string.link_connect)) { _, _ ->
                 val raw = input.text.toString().trim()
                 if (raw.isEmpty()) {
-                    toast("Endereço vazio")
+                    toast(tr(R.string.link_empty_addr))
                     return@setPositiveButton
                 }
                 lastLinkAddr = raw
@@ -1111,9 +1138,9 @@ class MainActivity : Activity() {
                 // Sem porta explícita → usa a padrão.
                 val addr = if (raw.contains(':')) raw else "$raw:$LINK_PORT"
                 pendingLinkJoin.set(addr)
-                toast("Conectando em $addr…")
+                toast(tr(R.string.link_connecting_to, addr))
             }
-            .setNegativeButton("Cancelar", null)
+            .setNegativeButton(tr(R.string.cancel), null)
             .show()
     }
 
@@ -1149,13 +1176,15 @@ class MainActivity : Activity() {
             val held = wifiLock?.isHeld == true
             val lowLat = Build.VERSION.SDK_INT >= 29
             toast(
-                if (held && lowLat) "Wi-Fi: baixa latência ✓"
-                else if (held) "Wi-Fi: alta performance ✓"
-                else "Wi-Fi lock não pegou (segue normal)"
+                tr(
+                    if (held && lowLat) R.string.wifi_low_latency
+                    else if (held) R.string.wifi_high_perf
+                    else R.string.wifi_lock_missed
+                )
             )
         } catch (e: Throwable) {
             Log.w(TAG, "WifiLock indisponível (segue sem): $e")
-            toast("Wi-Fi lock falhou (segue normal)")
+            toast(tr(R.string.wifi_lock_failed))
         }
     }
 
@@ -1172,13 +1201,13 @@ class MainActivity : Activity() {
         val speeds = intArrayOf(1, 2, 4, 8)
         val labels = Array(speeds.size) { i ->
             val s = speeds[i]
-            (if (s == 1) "1x (normal)" else "${s}x") + if (s == ffSpeed) "  ✓" else ""
+            (if (s == 1) tr(R.string.speed_normal_item) else tr(R.string.speed_item, s)) + if (s == ffSpeed) "  ✓" else ""
         }
         AlertDialog.Builder(this)
-            .setTitle("Velocidade")
+            .setTitle(tr(R.string.speed_title))
             .setItems(labels) { _, i ->
                 ffSpeed = speeds[i]
-                toast(if (speeds[i] == 1) "Velocidade normal" else "Fast-forward ${speeds[i]}x")
+                toast(if (speeds[i] == 1) tr(R.string.speed_normal_toast) else tr(R.string.speed_ff_toast, speeds[i]))
             }
             .show()
     }
@@ -1190,19 +1219,19 @@ class MainActivity : Activity() {
      */
     private fun startShinyHunter() {
         if (!romLoaded || !huntSupported) {
-            toast("Jogo não suportado pelo Shiny Hunter")
+            toast(tr(R.string.hunt_unsupported))
             return
         }
         val targets = huntTargets
         if (targets.isEmpty()) {
-            toast("Sem alvos para este jogo")
+            toast(tr(R.string.hunt_no_targets))
             return
         }
         AlertDialog.Builder(this)
-            .setTitle("Alvo — $huntGameName")
+            .setTitle(tr(R.string.hunt_target_title, huntGameName))
             .setItems(targets) { _, i -> beginHunt(i) }
             // "Como usar" no lado oposto aos botões de ação, como no desktop.
-            .setNeutralButton("❓ Como usar") { _, _ -> chooseHelpTarget() }
+            .setNeutralButton(tr(R.string.hunt_how_to)) { _, _ -> chooseHelpTarget() }
             .show()
     }
 
@@ -1220,9 +1249,9 @@ class MainActivity : Activity() {
         val targets = huntTargets
         if (targets.isEmpty()) return
         AlertDialog.Builder(this)
-            .setTitle("❓ Como usar — qual alvo?")
+            .setTitle(tr(R.string.hunt_how_to_which))
             .setItems(targets) { _, i -> showHuntHelp(i) }
-            .setNegativeButton("Voltar") { _, _ -> startShinyHunter() }
+            .setNegativeButton(tr(R.string.back)) { _, _ -> startShinyHunter() }
             .show()
     }
 
@@ -1266,19 +1295,19 @@ class MainActivity : Activity() {
         } else {
             column.addView(TextView(this).apply {
                 text = if (help.video.isNotEmpty()) {
-                    "Não foi possível abrir o vídeo de exemplo."
+                    tr(R.string.hunt_video_failed)
                 } else {
-                    "🎬 Ainda não há vídeo de exemplo para este modo."
+                    tr(R.string.hunt_no_video)
                 }
                 alpha = 0.7f
                 setPadding(0, 0, 0, pad / 2)
             })
         }
         AlertDialog.Builder(this)
-            .setTitle("❓ Como usar — ${help.title}")
+            .setTitle(tr(R.string.hunt_how_to_title, help.title))
             .setView(ScrollView(this).apply { addView(column) })
-            .setPositiveButton("▶ Iniciar caça") { _, _ -> beginHunt(i) }
-            .setNegativeButton("Fechar", null)
+            .setPositiveButton(tr(R.string.hunt_start)) { _, _ -> beginHunt(i) }
+            .setNegativeButton(tr(R.string.close), null)
             .setOnDismissListener { video?.stopPlayback() }
             .show()
     }
@@ -1305,20 +1334,22 @@ class MainActivity : Activity() {
     /** Texto do overlay de status da caça (lido das stats publicadas). */
     private fun huntStatusText(): String {
         val best = if (statBestSV == 0xFFFF) "—" else statBestSV.toString()
-        return "✨ Caçando $currentTargetName\n" +
-            "Tentativas: $statAttempts    melhor SV: $best\n" +
-            "Espécie lida: $statSpecies    (☰ para parar)"
+        return tr(R.string.hunt_status, currentTargetName, statAttempts, best, statSpecies)
     }
 
     /** Texto detalhado do painel do retrato (sprites à parte). */
     private fun huntPanelText(): String {
         val best = if (statBestSV == 0xFFFF) "—" else statBestSV.toString()
         val prob = 1.0 - Math.pow(1.0 - 1.0 / 8192.0, statAttempts.toDouble())
-        return "✨ Caçando $currentTargetName\n\n" +
-            "Tentativas: $statAttempts\n" +
-            "Melhor SV: $best   (shiny < 8)\n" +
-            "Espécie lida: $statSpecies\n" +
-            "Chance acumulada: ${"%.1f".format(prob * 100)}%"
+        return tr(R.string.hunt_panel, currentTargetName, statAttempts, best, statSpecies, prob * 100)
+    }
+
+    /** (Re)aplica os textos fixos do painel da caça no idioma atual. */
+    private fun relabelHunterPanel() {
+        panelLabelNormal.text = tr(R.string.hunt_normal)
+        panelLabelShiny.text = tr(R.string.hunt_shiny)
+        panelStop.text = tr(R.string.hunt_stop)
+        if (hunting) updateHunterPanel()
     }
 
     /** Atualiza o painel do retrato (sprites + stats). */
@@ -1370,23 +1401,25 @@ class MainActivity : Activity() {
     private fun slotLabel(code: String, slot: Int): String {
         val f = stateFile(code, slot)
         val when_ = if (f.exists()) {
-            SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()).format(Date(f.lastModified()))
+            val loc = L10n.locale(l10n)
+            val pattern = android.text.format.DateFormat.getBestDateTimePattern(loc, "ddMMHHmm")
+            SimpleDateFormat(pattern, loc).format(Date(f.lastModified()))
         } else {
-            "vazio"
+            tr(R.string.slot_empty)
         }
-        return "Slot ${slot + 1} — $when_"
+        return tr(R.string.slot_label, slot + 1, when_)
     }
 
     /** Seletor de slot pra salvar: todos os 8 (sobrescreve), com data dos ocupados. */
     private fun saveStateFromMenu() {
         val code = currentGameCode
         if (!romLoaded || code == null) {
-            toast("Carregue uma ROM antes de salvar estado")
+            toast(tr(R.string.state_need_rom_save))
             return
         }
         val labels = Array(SAVE_SLOTS) { slotLabel(code, it) }
         AlertDialog.Builder(this)
-            .setTitle("Salvar no slot")
+            .setTitle(tr(R.string.state_save_title))
             .setItems(labels) { _, slot -> pendingSaveState.set(slot) }
             .show()
     }
@@ -1395,22 +1428,22 @@ class MainActivity : Activity() {
     private fun loadStateFromMenu() {
         val code = currentGameCode
         if (!romLoaded || code == null) {
-            toast("Carregue uma ROM antes de carregar estado")
+            toast(tr(R.string.state_need_rom_load))
             return
         }
         val exists = BooleanArray(SAVE_SLOTS) { stateFile(code, it).exists() }
         if (exists.none { it }) {
-            toast("Nenhum estado salvo")
+            toast(tr(R.string.state_none))
             return
         }
         val labels = Array(SAVE_SLOTS) { slotLabel(code, it) }
         AlertDialog.Builder(this)
-            .setTitle("Carregar do slot")
+            .setTitle(tr(R.string.state_load_title))
             .setItems(labels) { _, slot ->
                 if (exists[slot]) {
                     pendingLoadState.set(stateFile(code, slot).readBytes())
                 } else {
-                    toast("Slot ${slot + 1} está vazio")
+                    toast(tr(R.string.slot_is_empty, slot + 1))
                 }
             }
             .show()
@@ -1419,7 +1452,7 @@ class MainActivity : Activity() {
     /** Pede pra thread GL capturar o frame atual (o encode/gravação vêm depois). */
     private fun takeScreenshot() {
         if (!romLoaded || currentGameCode == null) {
-            toast("Carregue uma ROM antes de capturar a tela")
+            toast(tr(R.string.screenshot_need_rom))
             return
         }
         pendingScreenshot.set(true)
@@ -1449,7 +1482,7 @@ class MainActivity : Activity() {
                     contentResolver.openOutputStream(uri)!!.use {
                         bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
                     }
-                    "galeria (Pictures/AuroraGBA)"
+                    tr(R.string.screenshot_gallery)
                 } else {
                     val dir = getExternalFilesDir(Environment.DIRECTORY_PICTURES)
                     val f = File(dir, name)
@@ -1457,10 +1490,10 @@ class MainActivity : Activity() {
                     f.absolutePath
                 }
                 bmp.recycle()
-                toast("Screenshot salva em $where")
+                toast(tr(R.string.screenshot_saved, where))
             } catch (e: Exception) {
                 Log.e(TAG, "falha ao salvar screenshot: $e")
-                toast("Falha ao salvar screenshot")
+                toast(tr(R.string.screenshot_failed))
             }
         }.start()
     }
@@ -1551,9 +1584,8 @@ class MainActivity : Activity() {
             when {
                 differ && mirrorWins -> try {
                     f.writeBytes(mBytes)
-                    val msg = if (local == null) "Save importado da pasta" else "Save mais novo importado da pasta"
-                    Log.i(TAG, "$msg (saves/$code.sav, ${mBytes.size} bytes, mtime=$mTime)")
-                    toast(msg)
+                    Log.i(TAG, "save importado da pasta (saves/$code.sav, ${mBytes.size} bytes, mtime=$mTime)")
+                    toast(tr(if (local == null) R.string.sav_imported else R.string.sav_newer_imported))
                 } catch (e: Exception) {
                     Log.w(TAG, "falha ao importar .sav do espelho: $e")
                 }
@@ -1599,8 +1631,7 @@ class MainActivity : Activity() {
                 Log.w(TAG, "falha ao importar saves/$name: $e")
             }
         }
-        if (imported == 1) toast("Estado importado da pasta")
-        else if (imported > 1) toast("$imported estados importados da pasta")
+        if (imported > 0) toast(l10n.resources.getQuantityString(R.plurals.states_imported, imported, imported))
     }
 
     /** Copia as stats da caça (Hunter) pros campos voláteis lidos pela UI. */
@@ -1633,7 +1664,7 @@ class MainActivity : Activity() {
             stopHuntUI()
             Toast.makeText(
                 this,
-                "✨ Shiny encontrado em $n tentativas! Controle devolvido.",
+                tr(R.string.hunt_found, n),
                 Toast.LENGTH_LONG,
             ).show()
         }
@@ -1648,13 +1679,9 @@ class MainActivity : Activity() {
         runOnUiThread {
             stopHuntUI()
             AlertDialog.Builder(this)
-                .setTitle("Time cheio")
-                .setMessage(
-                    "O presente iria para o PC, onde a caça não consegue vê-lo. " +
-                        "Libere um espaço no time, salve o jogo em frente ao presente " +
-                        "e comece a caça de novo."
-                )
-                .setPositiveButton("OK", null)
+                .setTitle(tr(R.string.party_full_title))
+                .setMessage(tr(R.string.party_full_msg))
+                .setPositiveButton(tr(R.string.ok), null)
                 .show()
         }
     }
@@ -1681,10 +1708,10 @@ class MainActivity : Activity() {
         val bytes = NativeBridge.saveState(handle)
         try {
             stateFile(code, slot).writeBytes(bytes)
-            toast("Estado salvo no slot ${slot + 1}")
+            toast(tr(R.string.state_saved, slot + 1))
         } catch (e: Exception) {
             Log.e(TAG, "falha ao salvar estado: $e")
-            toast("Falha ao salvar estado")
+            toast(tr(R.string.state_save_failed))
             return // sem o estado de trabalho, não adianta espelhar
         }
         // Cópia visível pra backup/portabilidade (best-effort), como o .sav.
@@ -1692,8 +1719,8 @@ class MainActivity : Activity() {
     }
 
     private fun doLoadState(bytes: ByteArray) {
-        if (NativeBridge.loadState(handle, bytes)) toast("Estado carregado")
-        else toast("Falha ao carregar estado")
+        if (NativeBridge.loadState(handle, bytes)) toast(tr(R.string.state_loaded))
+        else toast(tr(R.string.state_load_failed))
     }
 
     /** Cria o AudioTrack 32768 Hz estéreo PCM16 em streaming, ou null se falhar. */
@@ -1921,8 +1948,8 @@ class MainActivity : Activity() {
                 lastLinkState = ls
                 runOnUiThread {
                     when {
-                        ls == 2 -> toast("🔗 Link conectado")
-                        ls == 0 && prev == 2 -> toast("Link encerrado")
+                        ls == 2 -> toast(tr(R.string.link_connected_toast))
+                        ls == 0 && prev == 2 -> toast(tr(R.string.link_ended))
                     }
                     // Segura o Wi-Fi em baixa latência enquanto há link (conectando
                     // ou conectado); solta ao voltar pro solo.
@@ -1931,7 +1958,7 @@ class MainActivity : Activity() {
             }
             // Mostra a causa de uma falha de conexão (ex.: permissão, porta ocupada).
             val linkErr = NativeBridge.linkTakeError(handle)
-            if (linkErr.isNotEmpty()) runOnUiThread { toast("Link falhou: $linkErr") }
+            if (linkErr.isNotEmpty()) runOnUiThread { toast(tr(R.string.link_failed, linkErr)) }
 
             // Save states só fora da caça (o menu durante o hunt nem os oferece).
             if (!hunting) {
