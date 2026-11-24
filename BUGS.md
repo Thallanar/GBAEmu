@@ -5,18 +5,11 @@
 > quando resolvido (referenciando o PR que fechou). Ao descobrir um bug novo,
 > adicione aqui.
 >
-> _Última atualização: 2026-11-23_
+> _Última atualização: 2026-11-24_
 
 ## Abertos
 
-### 1. Shader BLUR deixa a imagem de cabeça pra baixo
-- **Onde:** shader BLUR (motor multipass).
-- **Sintoma:** com o BLUR ativo o emulador renderiza a imagem invertida
-  verticalmente (de cabeça pra baixo).
-- **Suspeita:** flip de coordenadas de textura (origem Y) entre os passes de
-  FBO — o passe do blur não compensa a inversão de eixo Y do ping-pong de FBO.
-
-### 2. Desktop perde vsyncs (~130 de 144 atualizações/s)
+### 1. Desktop perde vsyncs (~130 de 144 atualizações/s)
 - **Onde:** desktop, monitor de 144 Hz (medido com `AURORAGBA_PACING_TRACE=1`).
 - **Sintoma:** a janela atualiza ~130 vezes/s em vez de 144; cada vsync perdido
   vira um intervalo fora do padrão 2/3 entre frames do jogo (judder leve).
@@ -28,6 +21,13 @@
 _(vazio)_
 
 ## Resolvidos
+
+- **BLUR de cabeça pra baixo** (multipass, desktop e Android) — #PR. Os passes
+  em FBO usavam o quad da tela (v=0 no topo), mas a linha 0 de um FBO fica
+  embaixo: cada passe intermediário invertia a imagem. O BLUR (1 intermediário)
+  saía invertido; o ScaleFX (4) saía em pé por sorte, mas o passe 2 lia as
+  saídas dos passes 0 e 1 desalinhadas. Agora os passes em FBO usam um quad com
+  v invertido.
 
 - **Beldum batizado de `AAAAAAA`** (StaticGift) — #77. Acontecia com o **time
   cheio**: o presente ia pro PC, a caça (que procura no time) nunca o via e o
