@@ -75,6 +75,19 @@ interface Host {
     fun slotDate(millis: Long): String
     /** Tela de estados fechou; [toMenu] = voltou pela seta (reabre o menu). */
     fun onStatesClosed(toMenu: Boolean)
+
+    // ── Shiny Hunter ─────────────────────────────────────────────────────────
+    /** Nome do jogo no perfil do Hunter (ex.: "Pokémon Emerald"). */
+    val huntGame: String
+    /** Alvos do jogo atual, já no idioma do app. */
+    fun huntTargetList(): List<HuntTarget>
+    fun startHunt(i: Int)
+    /** "Como usar" do alvo [i]; [onStart] inicia a caça a partir da ajuda. */
+    fun huntHelp(i: Int, onStart: () -> Unit)
+    /** Escolha de alvo fechou; [toMenu] = voltou pela seta (reabre o menu). */
+    fun onHunterClosed(toMenu: Boolean)
+    /** Aviso de time cheio fechou; [pickOther] = quer escolher outro alvo. */
+    fun onPartyFullClosed(pickOther: Boolean)
 }
 
 /** Um slot de save state: se existe, quando foi salvo e a miniatura (se houver). */
