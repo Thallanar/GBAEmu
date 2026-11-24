@@ -22,7 +22,7 @@ _(vazio)_
 
 ## Resolvidos
 
-- **BLUR de cabeça pra baixo** (multipass, desktop e Android) — #PR. Os passes
+- **BLUR de cabeça pra baixo** (multipass, desktop e Android) — #78. Os passes
   em FBO usavam o quad da tela (v=0 no topo), mas a linha 0 de um FBO fica
   embaixo: cada passe intermediário invertia a imagem. O BLUR (1 intermediário)
   saía invertido; o ScaleFX (4) saía em pé por sorte, mas o passe 2 lia as
