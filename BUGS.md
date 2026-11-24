@@ -9,18 +9,21 @@
 
 ## Abertos
 
-### 1. Desktop perde vsyncs (~130 de 144 atualizações/s)
-- **Onde:** desktop, monitor de 144 Hz (medido com `AURORAGBA_PACING_TRACE=1`).
-- **Sintoma:** a janela atualiza ~130 vezes/s em vez de 144; cada vsync perdido
-  vira um intervalo fora do padrão 2/3 entre frames do jogo (judder leve).
-- **Suspeita:** alguma atualização passa de ~6,9 ms (emulação + upload da
-  textura + UI do egui). Medir o tempo de cada parte antes de mexer.
+_(nenhum)_
 
 ## Em progresso
 
 _(vazio)_
 
 ## Resolvidos
+
+- **Desktop preso em 48 Hz num monitor de 144 Hz** (pacing) — #79. Anotado
+  como "~130 de 144", mas o trace mostrou o app preso em 1 atualização a cada
+  3 vsyncs: um vsync perdido fazia o pacer rodar 2 frames na atualização
+  seguinte (~10 ms), que perdia também. Agora o monitor rápido roda 1 frame
+  por atualização e paga o atraso nas vazias, o período do vsync vem de um
+  percentil baixo dos intervalos recentes, e o upscale/envio da textura é
+  pulado sem frame novo. Medido: 142–145 atualizações/s.
 
 - **BLUR de cabeça pra baixo** (multipass, desktop e Android) — #78. Os passes
   em FBO usavam o quad da tela (v=0 no topo), mas a linha 0 de um FBO fica
