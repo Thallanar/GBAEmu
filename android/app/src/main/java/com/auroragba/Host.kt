@@ -47,6 +47,15 @@ interface Host {
     fun openUpscale(onDone: () -> Unit)
     fun openRemap()
 
+    // Controles na tela.
+    var padModel: PadModel
+    /** Tamanho em % (70–130). */
+    var padSize: Int
+    /** Opacidade em % (10–60). */
+    var padOpacity: Int
+    var padHaptics: Boolean
+    var padHideWithController: Boolean
+
     fun languageTag(): String
     fun setLanguage(tag: String)
 
