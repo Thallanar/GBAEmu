@@ -564,6 +564,9 @@ struct AuroraApp {
     pacer: pacing::Pacer,
     /// Trace de pacing (`AURORAGBA_PACING_TRACE`). `None` = desligado.
     pacing_trace: Option<pacing::PacingTrace>,
+    /// Upscale e tamanho do último envio da textura. Numa atualização sem frame
+    /// novo (em 144 Hz, ~58% delas) a textura já está certa e o envio é pulado.
+    last_upload: Option<(Upscale, usize, usize)>,
 }
 
 /// Ação escolhida no painel de Link, aplicada depois de fechar a UI (pra não
@@ -734,6 +737,7 @@ impl AuroraApp {
             link_advertiser: None,
             pacer: pacing::Pacer::new(),
             pacing_trace: pacing::PacingTrace::from_env(),
+            last_upload: None,
         };
 
         if let Some(s) = &app.link {
@@ -1939,6 +1943,12 @@ impl AuroraApp {
 
 impl eframe::App for AuroraApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Custo das partes desta atualização, pro trace de pacing.
+        let t_update = Instant::now();
+        let mut cost = pacing::UpdateCost::default();
+        // `false` só quando o ritmo normal não rodou frame nenhum: aí o
+        // framebuffer é o mesmo da textura e o envio pode ser pulado.
+        let mut fresh_frame = true;
         // Contexto GL do backend glow (pra subir o framebuffer e desenhar com
         // shader). `None` em backends sem glow — aí caímos na textura egui.
         let gl = frame.gl().cloned();
@@ -2023,10 +2033,14 @@ impl eframe::App for AuroraApp {
                     }
                     self.pacer.reset();
                 } else {
+                    let t_emu = Instant::now();
                     let ran = self.run_paced();
+                    cost.emu = t_emu.elapsed().as_secs_f64();
+                    fresh_frame = ran > 0;
                     if let Some(trace) = &mut self.pacing_trace {
                         let audio_ms = self.audio.as_ref().map(|a| a.queued_ms());
-                        trace.record(Instant::now(), ran, &self.pacer, audio_ms);
+                        let prev_cpu = frame.info().cpu_usage.map(f64::from);
+                        trace.record(t_emu, ran, &self.pacer, audio_ms, prev_cpu);
                     }
                 }
             }
@@ -2235,21 +2249,33 @@ impl eframe::App for AuroraApp {
 
                 match (&self.shader, gl.as_ref()) {
                     (Some(renderer), Some(gl)) => {
-                        // Filtro de upscale (HQx) antes do shader: amplia o
-                        // framebuffer na CPU; sem filtro, `scale` só copia.
-                        let (iw, ih) = self.scaler.scale(
-                            self.upscale,
-                            &self.gba.bus.ppu.framebuffer[..],
-                            SCREEN_WIDTH,
-                            SCREEN_HEIGHT,
-                            &mut self.scaled,
-                        );
-                        // Caminho glow: sobe o buffer (já ampliado) e desenha com
-                        // o shader por cima.
-                        renderer
-                            .lock()
-                            .unwrap()
-                            .upload(gl, iw as i32, ih as i32, &self.scaled);
+                        let t_upload = Instant::now();
+                        let (iw, ih) = match self.last_upload {
+                            // Sem frame novo e mesmo upscale: a textura já está certa.
+                            Some((u, iw, ih)) if !fresh_frame && u == self.upscale => (iw, ih),
+                            _ => {
+                                // Filtro de upscale (HQx) antes do shader: amplia o
+                                // framebuffer na CPU; sem filtro, `scale` só copia.
+                                let (iw, ih) = self.scaler.scale(
+                                    self.upscale,
+                                    &self.gba.bus.ppu.framebuffer[..],
+                                    SCREEN_WIDTH,
+                                    SCREEN_HEIGHT,
+                                    &mut self.scaled,
+                                );
+                                // Caminho glow: sobe o buffer (já ampliado) e desenha
+                                // com o shader por cima.
+                                renderer.lock().unwrap().upload(
+                                    gl,
+                                    iw as i32,
+                                    ih as i32,
+                                    &self.scaled,
+                                );
+                                self.last_upload = Some((self.upscale, iw, ih));
+                                (iw, ih)
+                            }
+                        };
+                        cost.upload = t_upload.elapsed().as_secs_f64();
                         let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                         let cb = shader::callback(
                             rect,
@@ -2281,6 +2307,11 @@ impl eframe::App for AuroraApp {
                 ));
             });
         });
+
+        if let Some(trace) = &mut self.pacing_trace {
+            cost.update = t_update.elapsed().as_secs_f64();
+            trace.end_update(cost);
+        }
     }
 
     /// Persiste a configuração de controles no storage do eframe (chamado

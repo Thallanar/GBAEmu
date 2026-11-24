@@ -23,6 +23,14 @@
 //! histograma de intervalos fica concentrado (ex.: só 2 em 120 Hz; só 2 e 3 em
 //! 144 Hz); rajadas aparecem como intervalos 0 (2+ frames na mesma atualização)
 //! e saltos grandes.
+//!
+//! O trace também mede o **custo de cada atualização** (média/máximo em ms):
+//! `emu` (frames do GBA), `upload` (upscale na CPU + envio da textura),
+//! `update` (o `update` inteiro do egui, inclusive a UI) e `cpu` (o frame todo
+//! segundo o eframe: `update` + tessellation + desenho, sem a espera do vsync).
+//! Uma atualização que **perdeu vsync** (a seguinte veio > 1,5 período depois)
+//! entra também numa segunda linha, `perdidos`, pra comparar o perfil delas com
+//! o geral e achar o culpado.
 
 use std::time::Instant;
 
@@ -38,6 +46,22 @@ const MAX_LOCK_N: u32 = 4;
 const MAX_FRAMES: u32 = 4;
 /// Pausa acima disto (janela minimizada, diálogo…) reinicia o pacing.
 const RESYNC_GAP: f64 = 0.25;
+/// Quantos intervalos recentes entram na estimativa do vsync (~1 s a 144 Hz).
+const RECENT: usize = 120;
+/// Percentil dos intervalos recentes tomado como o período do vsync. Perder
+/// vsync só gera intervalos **longos**, então um percentil baixo continua no
+/// período certo mesmo com até ~80% das atualizações atrasadas — e se ajusta
+/// em ~1 s a uma mudança real (rajada sem vsync na abertura da janela, monitor
+/// trocou de Hz).
+const PERIOD_PERCENTILE: f64 = 0.2;
+/// Monitor "rápido" (≥ 1,1 × GBA, ex.: 75/144 Hz em modo livre): sobram
+/// atualizações vazias, então o atraso de um vsync perdido é pago nelas, 1
+/// frame por vez, em vez de rodar 2 frames de uma vez — o que custa o dobro,
+/// perde o vsync seguinte também e prende o app num ciclo (48 Hz em 144 Hz).
+const FAST_DISPLAY: f64 = 1.1;
+/// No monitor rápido, 2 frames na mesma atualização só com dívida ≥ isto
+/// (o app realmente não está dando conta de 1 frame por atualização).
+const CATCH_UP_DEBT: f64 = 2.5;
 
 /// Decide quantos frames do GBA rodar em cada atualização de tela.
 pub struct Pacer {
@@ -48,9 +72,8 @@ pub struct Pacer {
     acc: f64,
     /// `Some(n)`: travado em 1 frame a cada `n` vsyncs.
     lock: Option<u32>,
-    /// Intervalos seguidos descartados como fora da média. Muitos seguidos =
-    /// a média é que está errada (ex.: 1ª amostra ruim, monitor trocou de Hz).
-    outliers: u32,
+    /// Últimos [`RECENT`] intervalos entre atualizações (s).
+    recent: std::collections::VecDeque<f64>,
 }
 
 impl Default for Pacer {
@@ -66,7 +89,7 @@ impl Pacer {
             period: None,
             acc: 0.0,
             lock: None,
-            outliers: 0,
+            recent: std::collections::VecDeque::with_capacity(RECENT),
         }
     }
 
@@ -110,21 +133,25 @@ impl Pacer {
             return 1;
         }
 
-        // Estima o período do vsync. Atualizações que perderam vsync (dt bem
-        // maior que a média) não entram na média, só contam como vários ticks.
+        // Estima o período do vsync: a base robusta é um percentil baixo dos
+        // intervalos recentes; a média móvel (precisa, usada no `speed()` do
+        // modo travado) só recebe intervalos perto dela. Atualizações que
+        // perderam vsync ficam de fora e só contam como vários ticks.
+        if self.recent.len() == RECENT {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(dt.max(1e-4));
+        let base = self.base_period();
         let period = match self.period {
-            Some(p) if (dt > p * 1.5 || dt < p * 0.5) && self.outliers < 30 => {
-                self.outliers += 1;
-                p
+            Some(p) if (p - base).abs() <= base * 0.1 => {
+                if (dt - base).abs() <= base * 0.25 {
+                    p * 0.95 + dt * 0.05
+                } else {
+                    p
+                }
             }
-            Some(p) if self.outliers < 30 => {
-                self.outliers = 0;
-                p * 0.95 + dt * 0.05
-            }
-            _ => {
-                self.outliers = 0;
-                dt.max(1e-4)
-            }
+            // Sem estimativa, ou a média se afastou da base: recomeça dela.
+            _ => base,
         };
         self.period = Some(period);
         self.update_lock(period);
@@ -138,13 +165,33 @@ impl Pacer {
             None => dt * GBA_FPS,
         };
 
-        let frames = (self.acc.floor() as u32).min(MAX_FRAMES);
+        let fast = self.lock.is_none() && period * GBA_FPS * FAST_DISPLAY < 1.0;
+        let whole = self.acc.floor() as u32;
+        let frames = if fast && whole >= 2 {
+            // Monitor rápido: 1 frame por vez; 2 só com dívida grande.
+            if self.acc >= CATCH_UP_DEBT {
+                2
+            } else {
+                1
+            }
+        } else {
+            whole.min(MAX_FRAMES)
+        };
         self.acc -= frames as f64;
-        if self.acc >= 1.0 {
+        // No monitor rápido a dívida (< 1,5 frame) fica pra próxima atualização.
+        let keep = if fast { CATCH_UP_DEBT - 1.0 } else { 1.0 };
+        if self.acc >= keep {
             // Atrasado demais: descarta o excesso em vez de rodar em rajada.
             self.acc = self.acc.fract();
         }
         frames
+    }
+
+    /// O [`PERIOD_PERCENTILE`] dos intervalos recentes.
+    fn base_period(&self) -> f64 {
+        let mut v: Vec<f64> = self.recent.iter().copied().collect();
+        v.sort_by(f64::total_cmp);
+        v[((v.len() - 1) as f64 * PERIOD_PERCENTILE) as usize]
     }
 
     fn update_lock(&mut self, period: f64) {
@@ -160,6 +207,78 @@ impl Pacer {
             .contains(&n)
             .then_some(n)
             .filter(|&n| err(n) <= LOCK_ENTER);
+    }
+}
+
+/// Custo (s) das partes de uma atualização de tela, medido no `update`.
+#[derive(Clone, Copy, Default)]
+pub struct UpdateCost {
+    /// Frames do GBA rodados (`step_frame`).
+    pub emu: f64,
+    /// Upscale na CPU + envio da textura pro GL.
+    pub upload: f64,
+    /// O `update` inteiro do egui (inclui emu, upload e a montagem da UI).
+    pub update: f64,
+}
+
+/// Soma/máximo de uma métrica numa janela do trace.
+#[derive(Clone, Copy, Default)]
+struct Stat {
+    sum: f64,
+    max: f64,
+}
+
+impl Stat {
+    fn add(&mut self, v: f64) {
+        self.sum += v;
+        self.max = self.max.max(v);
+    }
+
+    /// "média/máx" em ms sobre `n` amostras.
+    fn fmt(&self, n: u32) -> String {
+        if n == 0 {
+            return "—".into();
+        }
+        format!("{:.2}/{:.2}", self.sum / n as f64 * 1e3, self.max * 1e3)
+    }
+}
+
+/// Custos acumulados (emu, upload, update, cpu) de um grupo de atualizações.
+#[derive(Clone, Copy, Default)]
+struct CostStats {
+    n: u32,
+    /// Quantas dessas atualizações rodaram ≥1 frame do GBA.
+    with_frame: u32,
+    emu: Stat,
+    upload: Stat,
+    update: Stat,
+    cpu: Stat,
+}
+
+impl CostStats {
+    fn add(&mut self, c: &UpdateCost, frames: u32, cpu: Option<f64>) {
+        self.n += 1;
+        if frames > 0 {
+            self.with_frame += 1;
+        }
+        self.emu.add(c.emu);
+        self.upload.add(c.upload);
+        self.update.add(c.update);
+        if let Some(cpu) = cpu {
+            self.cpu.add(cpu);
+        }
+    }
+
+    fn fmt(&self) -> String {
+        format!(
+            "{} (c/ frame {}) · emu {} · upload {} · update {} · cpu {}",
+            self.n,
+            self.with_frame,
+            self.emu.fmt(self.n),
+            self.upload.fmt(self.n),
+            self.update.fmt(self.n),
+            self.cpu.fmt(self.n),
+        )
     }
 }
 
@@ -180,6 +299,15 @@ pub struct PacingTrace {
     gaps: [u32; 6],
     /// Fila de áudio (ms) mínima/máxima na janela.
     audio_ms: Option<(f64, f64)>,
+    /// Custo e frames da atualização anterior (fechada por [`Self::end_update`]).
+    prev: Option<(UpdateCost, u32)>,
+    /// Frames rodados na atualização corrente (do `record`).
+    cur_frames: u32,
+    /// `record` rodou nesta atualização (então `end_update` deve fechá-la).
+    recorded: bool,
+    /// Custos de todas as atualizações da janela e só das que perderam vsync.
+    cost_all: CostStats,
+    cost_missed: CostStats,
 }
 
 impl PacingTrace {
@@ -196,15 +324,42 @@ impl PacingTrace {
             since_frame: 0,
             gaps: [0; 6],
             audio_ms: None,
+            prev: None,
+            cur_frames: 0,
+            recorded: false,
+            cost_all: CostStats::default(),
+            cost_missed: CostStats::default(),
         })
     }
 
     /// Registra uma atualização de tela que rodou `frames` frames do GBA.
     /// `audio_ms` é a fila de áudio no fim da atualização (se houver áudio).
-    pub fn record(&mut self, now: Instant, frames: u32, pacer: &Pacer, audio_ms: Option<f64>) {
+    /// `prev_cpu` é o `cpu_usage` do eframe (s): o custo do frame **anterior**.
+    pub fn record(
+        &mut self,
+        now: Instant,
+        frames: u32,
+        pacer: &Pacer,
+        audio_ms: Option<f64>,
+        prev_cpu: Option<f64>,
+    ) {
         if let Some(last) = self.last_update {
-            self.dt_sum += now.duration_since(last).as_secs_f64();
+            let dt = now.duration_since(last).as_secs_f64();
+            self.dt_sum += dt;
+            // O intervalo até agora diz se a atualização anterior perdeu vsync;
+            // os custos dela (e o cpu_usage, que é dela) vão pro grupo certo.
+            if let Some((cost, f)) = self.prev.take() {
+                self.cost_all.add(&cost, f, prev_cpu);
+                let missed = pacer.display_hz().is_some_and(|hz| dt * hz > 1.5);
+                if missed {
+                    self.cost_missed.add(&cost, f, prev_cpu);
+                }
+            }
+        } else {
+            self.prev = None;
         }
+        self.cur_frames = frames;
+        self.recorded = true;
         self.last_update = Some(now);
         self.updates += 1;
         self.frames += frames;
@@ -255,6 +410,13 @@ impl PacingTrace {
                 self.gaps[4],
                 self.gaps[5],
             );
+            eprintln!(
+                "  custo ms (média/máx): todas {}\n  custo ms (média/máx): perdidos {}",
+                self.cost_all.fmt(),
+                self.cost_missed.fmt(),
+            );
+            self.cost_all = CostStats::default();
+            self.cost_missed = CostStats::default();
             self.window_start = now;
             self.updates = 0;
             self.dt_sum = 0.0;
@@ -262,6 +424,18 @@ impl PacingTrace {
             self.per_update = [0; 4];
             self.gaps = [0; 6];
             self.audio_ms = None;
+        }
+    }
+}
+
+impl PacingTrace {
+    /// Fecha a atualização corrente com os custos medidos. Só vale depois de um
+    /// [`Self::record`] na mesma atualização (ritmo normal); senão é ignorado.
+    pub fn end_update(&mut self, cost: UpdateCost) {
+        if std::mem::take(&mut self.recorded) {
+            self.prev = Some((cost, self.cur_frames));
+        } else {
+            self.prev = None;
         }
     }
 }
@@ -328,6 +502,74 @@ mod tests {
         // Pula um vsync: a próxima atualização compensa com 2 frames.
         assert_eq!(p.tick(t0 + period * 121), 2);
         assert_eq!(p.lock(), Some(1));
+    }
+
+    /// Em 144 Hz, se toda atualização que roda um frame perde 1 vsync (dura 2),
+    /// o atraso é pago nas vazias: nunca 2 frames juntos, velocidade = GBA, e a
+    /// estimativa do monitor continua em 144 Hz.
+    #[test]
+    fn em_144hz_vsync_perdido_nao_vira_rajada() {
+        let mut p = Pacer::new();
+        let start = Instant::now();
+        let period = Duration::from_secs_f64(1.0 / 144.0);
+        let mut t = start;
+        for _ in 0..300 {
+            p.tick(t);
+            t += period;
+        }
+        let (mut frames, mut doubles) = (0, 0);
+        let t0 = t;
+        while t - t0 < Duration::from_secs(10) {
+            let f = p.tick(t);
+            frames += f;
+            doubles += (f >= 2) as u32;
+            t += period * if f > 0 { 2 } else { 1 };
+        }
+        assert_eq!(doubles, 0);
+        let fps = frames as f64 / 10.0;
+        assert!((fps - GBA_FPS).abs() < 0.5, "{fps}");
+        assert!((p.display_hz().unwrap() - 144.0).abs() < 1.0);
+    }
+
+    /// Se nem 1 frame por atualização cabe (toda atualização dura 3 vsyncs = 48
+    /// Hz efetivos), o pacer ainda roda 2 frames de vez em quando pra manter a
+    /// velocidade do jogo.
+    #[test]
+    fn em_144hz_app_lento_ainda_mantem_a_velocidade() {
+        let mut p = Pacer::new();
+        let start = Instant::now();
+        let period = Duration::from_secs_f64(1.0 / 144.0);
+        let mut t = start;
+        for _ in 0..300 {
+            p.tick(t);
+            t += period;
+        }
+        let mut frames = 0;
+        let t0 = t;
+        while t - t0 < Duration::from_secs(4) {
+            frames += p.tick(t);
+            t += period * 3;
+        }
+        let fps = frames as f64 / 4.0;
+        assert!((fps - GBA_FPS).abs() < 1.0, "{fps}");
+    }
+
+    /// Na abertura da janela o app pode rodar atualizações sem vsync (rápidas
+    /// demais); a estimativa não pode ficar presa nelas.
+    #[test]
+    fn rajada_sem_vsync_na_abertura_nao_engana_a_estimativa() {
+        let mut p = Pacer::new();
+        let mut t = Instant::now();
+        for _ in 0..300 {
+            p.tick(t);
+            t += Duration::from_secs_f64(1.0 / 400.0);
+        }
+        for _ in 0..288 {
+            p.tick(t);
+            t += Duration::from_secs_f64(1.0 / 144.0);
+        }
+        let hz = p.display_hz().unwrap();
+        assert!((hz - 144.0).abs() < 1.0, "{hz}");
     }
 
     #[test]
