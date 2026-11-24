@@ -59,6 +59,7 @@ class ControlsView(context: Context) : View(context) {
         // Até onde (em raios da base) o dedo ainda conta como stick: dá pra
         // passar um pouco da borda sem soltar a direção.
         const val STICK_REACH = 1.6f
+        const val STICK_DIRS = Btn.UP or Btn.DOWN or Btn.LEFT or Btn.RIGHT
     }
 
     var onMask: (Int) -> Unit = {}
@@ -141,9 +142,11 @@ class ControlsView(context: Context) : View(context) {
 
     private val dpadCx get() = pad + (if (portrait) 62 else 96) * s
     private val dpadCy get() = height - (if (portrait) 120 * s else pad + 96 * s)
-    private val aCx get() = width - pad - (if (portrait) 62 else 64) * s
+    // Retrato: A/B encostados mais à direita (folga pro stick, que é mais largo
+    // que o D-pad).
+    private val aCx get() = width - pad - (if (portrait) 48 else 64) * s
     private val aCy get() = height - (if (portrait) 105 * s else pad + 120 * s)
-    private val bCx get() = width - pad - (if (portrait) 168 else 152) * s
+    private val bCx get() = width - pad - (if (portrait) 150 else 152) * s
     private val bCy get() = height - (if (portrait) 105 * s else pad + 64 * s)
     private val startCx get() = width / 2f + (if (portrait) 70 else 60) * s
     private val selCx get() = width / 2f - (if (portrait) 70 else 60) * s
@@ -167,10 +170,21 @@ class ControlsView(context: Context) : View(context) {
         return m
     }
 
-    /** Botões pressionados por um ponteiro na posição (x, y). */
+    /**
+     * Botões pressionados por um ponteiro na posição (x, y). Os botões têm
+     * prioridade: um toque que cai em A/B/Start/Select/L/R não vira direção —
+     * o alcance do stick passa da borda da base e não pode roubar a beirada do B.
+     */
     private fun hit(x: Float, y: Float): Int {
         if (padHidden) return 0
         var m = 0
+        if (dist(x, y, aCx, aCy) <= abR) m = m or Btn.A
+        if (dist(x, y, bCx, bCy) <= abR) m = m or Btn.B
+        if (inPill(x, y, startCx, seCy)) m = m or Btn.START
+        if (inPill(x, y, selCx, seCy)) m = m or Btn.SELECT
+        if (lRect().contains(x, y)) m = m or Btn.L
+        if (rRect().contains(x, y)) m = m or Btn.R
+        if (m != 0) return m
         val dx = x - dpadCx
         val dy = y - dpadCy
         when (model) {
@@ -184,22 +198,16 @@ class ControlsView(context: Context) : View(context) {
                 if (kotlin.math.abs(dx) <= reach && kotlin.math.abs(dy) <= reach &&
                     kotlin.math.hypot(dx.toDouble(), dy.toDouble()) >= 24 * s
                 ) {
-                    m = m or directions(dx, dy, DIAG_RATIO)
+                    m = directions(dx, dy, DIAG_RATIO)
                 }
             }
             PadModel.STICK -> {
                 val dist = kotlin.math.hypot(dx.toDouble(), dy.toDouble()).toFloat()
                 if (dist <= stickR * STICK_REACH && dist >= stickR * STICK_DEADZONE) {
-                    m = m or directions(dx, dy, STICK_DIAG_RATIO)
+                    m = directions(dx, dy, STICK_DIAG_RATIO)
                 }
             }
         }
-        if (dist(x, y, aCx, aCy) <= abR) m = m or Btn.A
-        if (dist(x, y, bCx, bCy) <= abR) m = m or Btn.B
-        if (inPill(x, y, startCx, seCy)) m = m or Btn.START
-        if (inPill(x, y, selCx, seCy)) m = m or Btn.SELECT
-        if (lRect().contains(x, y)) m = m or Btn.L
-        if (rRect().contains(x, y)) m = m or Btn.R
         return m
     }
 
@@ -239,9 +247,11 @@ class ControlsView(context: Context) : View(context) {
                         if (i == skip) continue
                         val x = event.getX(i)
                         val y = event.getY(i)
-                        m = m or hit(x, y)
-                        // Pino do stick acompanha o dedo que está nele (até a borda).
-                        if (model == PadModel.STICK && !padHidden &&
+                        val h = hit(x, y)
+                        m = m or h
+                        // Pino do stick acompanha o dedo que está nele (até a borda),
+                        // a menos que o dedo esteja num botão (os botões têm prioridade).
+                        if (model == PadModel.STICK && !padHidden && (h and STICK_DIRS.inv()) == 0 &&
                             dist(x, y, dpadCx, dpadCy) <= stickR * STICK_REACH
                         ) {
                             kx = x - dpadCx
