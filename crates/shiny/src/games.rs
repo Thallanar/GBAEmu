@@ -122,6 +122,45 @@ pub struct TargetDef {
     pub cursor: StarterCursor,
 }
 
+/// Grupo do alvo na tela de escolha (derivado do método).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetKind {
+    /// Lendários e estáticos (soft-reset na frente, ou que vêm até você).
+    Legendary,
+    /// Iniciais: menu do laboratório (Hoenn) ou Poké Ball na mesa (Kanto).
+    Starter,
+    /// Presentes por script (Beldum, Lapras, fósseis, iniciais de Johto…).
+    Gift,
+    /// Selvagem na grama.
+    Wild,
+}
+
+impl TargetDef {
+    /// Grupo do alvo. Os iniciais de Kanto são presentes por script no código
+    /// ([`HuntMethod::StaticGift`]), mas pro jogador são iniciais.
+    pub fn kind(&self) -> TargetKind {
+        match self.method {
+            HuntMethod::SoftResetLegendary | HuntMethod::SoftResetApproach(_) => {
+                TargetKind::Legendary
+            }
+            HuntMethod::Starter => TargetKind::Starter,
+            HuntMethod::StaticGift if self.name.contains("(inicial)") => TargetKind::Starter,
+            HuntMethod::StaticGift => TargetKind::Gift,
+            HuntMethod::WildSpin => TargetKind::Wild,
+        }
+    }
+
+    /// Nome pra exibir sem o sufixo de grupo ("Beldum (presente)" → "Beldum"):
+    /// o grupo já aparece no título da seção. O selvagem vira "Qualquer
+    /// selvagem" no idioma pedido.
+    pub fn display_name(&self, lang: crate::lang::Lang) -> &'static str {
+        if self.kind() == TargetKind::Wild && self.species == 0 {
+            return lang.pick(["Qualquer selvagem", "Any wild Pokémon", "Cualquier salvaje"]);
+        }
+        self.name.split(" (").next().unwrap_or(self.name)
+    }
+}
+
 /// Perfil de um jogo: endereços de RAM + lista de alvos.
 #[derive(Debug, Clone, Copy)]
 pub struct GameProfile {
@@ -657,6 +696,41 @@ pub fn detect(game_code: &str) -> Option<&'static GameProfile> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn target_kinds_and_display_names() {
+        use crate::lang::Lang;
+        let find = |code: &str, name: &str| {
+            *detect(code)
+                .unwrap()
+                .targets
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap()
+        };
+        let beldum = find("BPEE", "Beldum (presente)");
+        assert_eq!(beldum.kind(), TargetKind::Gift);
+        assert_eq!(beldum.display_name(Lang::En), "Beldum");
+        assert_eq!(find("BPEE", "Mudkip (inicial)").kind(), TargetKind::Starter);
+        // Kanto: presente por script no código, inicial pro jogador.
+        assert_eq!(
+            find("BPRE", "Bulbasaur (inicial)").kind(),
+            TargetKind::Starter
+        );
+        assert_eq!(find("BPRE", "Kabuto (fóssil)").kind(), TargetKind::Gift);
+        assert_eq!(find("BPEE", "Groudon").kind(), TargetKind::Legendary);
+        let wild = find("BPEE", "Selvagem (qualquer)");
+        assert_eq!(wild.kind(), TargetKind::Wild);
+        assert_eq!(wild.display_name(Lang::Es), "Cualquier salvaje");
+        // Todo alvo cai num grupo e tem nome não vazio nos 3 idiomas.
+        for p in PROFILES {
+            for t in p.targets {
+                for lang in [Lang::Pt, Lang::En, Lang::Es] {
+                    assert!(!t.display_name(lang).is_empty(), "{}", t.name);
+                }
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

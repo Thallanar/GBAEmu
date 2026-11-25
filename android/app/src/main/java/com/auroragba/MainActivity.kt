@@ -295,6 +295,8 @@ class MainActivity : Activity(), Host {
     @Volatile private var huntSupported = false
     @Volatile private var huntGameName = ""
     @Volatile private var huntTargets: Array<String> = emptyArray()
+    // Grupo de cada alvo (HuntTarget.LEGENDARY/STARTER/GIFT/WILD), mesmo índice.
+    @Volatile private var huntKinds: IntArray = IntArray(0)
     // Ajuda "Como usar" de cada alvo (mesmo índice de huntTargets), lida junto
     // com os alvos na thread GL pra a UI não tocar no emulador.
     @Volatile private var huntHelps: Array<HuntHelp> = emptyArray()
@@ -308,7 +310,10 @@ class MainActivity : Activity(), Host {
     @Volatile private var statBestSV = 0xFFFF
     @Volatile private var currentTargetName = ""
 
-    private lateinit var huntStatus: TextView
+    // Vistas da caça (painel do retrato, sobreposição da paisagem, aviso de shiny).
+    private lateinit var huntViews: HuntViews
+    // Tela de escolha de alvo / aviso de time cheio abertos (mantêm a pausa).
+    private var hunterOpen = false
     private val uiHandler = Handler(Looper.getMainLooper())
 
     // Sprites do alvo (ARGB8888 64×64), decodificados na thread GL ao iniciar a
@@ -322,13 +327,6 @@ class MainActivity : Activity(), Host {
 
     // Views persistentes (reaproveitadas entre paisagem/retrato em [applyLayout]).
     private lateinit var controls: ControlsView
-    private lateinit var hunterPanel: LinearLayout
-    private lateinit var panelSpriteNormal: ImageView
-    private lateinit var panelSpriteShiny: ImageView
-    private lateinit var panelStats: TextView
-    private lateinit var panelLabelNormal: TextView
-    private lateinit var panelLabelShiny: TextView
-    private lateinit var panelStop: Button
     private var portrait = false
 
     // Textos no idioma escolhido (ver [L10n]); refeito ao trocar o idioma.
@@ -374,16 +372,10 @@ class MainActivity : Activity(), Host {
         }
         loadPadPrefs()
 
-        // Overlay compacto de status da caça (paisagem): topo, abaixo do ☰.
-        huntStatus = TextView(this).apply {
-            setBackgroundColor(Color.argb(170, 0, 0, 0))
-            setTextColor(Color.WHITE)
-            textSize = 14f
-            setPadding(28, 18, 28, 18)
-            visibility = View.GONE
+        huntViews = HuntViews(this, this).apply {
+            onStop = { pendingHuntStop.set(true) }
+            onSaveState = { openStates(load = false) }
         }
-
-        buildHunterPanel()
 
         // Monta o layout conforme a orientação atual (rebuild em rotação).
         applyLayout()
@@ -656,59 +648,6 @@ class MainActivity : Activity(), Host {
     }
 
     /** Cria o painel completo do hunter (usado no retrato): sprites + stats + parar. */
-    private fun buildHunterPanel() {
-        val dp = resources.displayMetrics.density
-        fun spriteView() = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            layoutParams = LinearLayout.LayoutParams((96 * dp).toInt(), (96 * dp).toInt())
-        }
-        panelSpriteNormal = spriteView()
-        panelSpriteShiny = spriteView()
-
-        val sprites = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            fun label() = TextView(this@MainActivity).apply {
-                setTextColor(Color.LTGRAY)
-                gravity = Gravity.CENTER
-            }
-            fun labeled(label: TextView, img: ImageView) = LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
-                setPadding((16 * dp).toInt(), 0, (16 * dp).toInt(), 0)
-                addView(img)
-                addView(label)
-            }
-            panelLabelNormal = label()
-            panelLabelShiny = label()
-            addView(labeled(panelLabelNormal, panelSpriteNormal))
-            addView(labeled(panelLabelShiny, panelSpriteShiny))
-        }
-
-        panelStats = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 15f
-            gravity = Gravity.CENTER
-            setPadding(0, (12 * dp).toInt(), 0, (12 * dp).toInt())
-        }
-
-        panelStop = Button(this).apply {
-            setOnClickListener { pendingHuntStop.set(true) }
-        }
-        relabelHunterPanel()
-
-        hunterPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setBackgroundColor(Color.rgb(18, 18, 22))
-            setPadding(0, (16 * dp).toInt(), 0, (16 * dp).toInt())
-            addView(sprites)
-            addView(panelStats)
-            addView(panelStop)
-            visibility = View.GONE
-        }
-    }
-
     /**
      * (Re)monta a hierarquia conforme a orientação. Paisagem: tela cheia + controles
      * por cima (overlay) + status compacto. Retrato: tela no topo (aspecto 240:160)
@@ -720,7 +659,7 @@ class MainActivity : Activity(), Host {
         portrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
         controls.portrait = portrait
         // Solta as views dos pais antigos antes de re-parentar.
-        for (v in listOf<View>(glView, controls, huntStatus, hunterPanel)) {
+        for (v in listOf<View>(glView, controls, huntViews.panel, huntViews.overlay, huntViews.banner)) {
             (v.parent as? ViewGroup)?.removeView(v)
         }
 
@@ -736,26 +675,24 @@ class MainActivity : Activity(), Host {
                 layoutParams = LinearLayout.LayoutParams(MATCH, 0, 1f)
             }
             bottom.addView(controls, FrameLayout.LayoutParams(MATCH, MATCH))
-            bottom.addView(hunterPanel, FrameLayout.LayoutParams(MATCH, MATCH))
+            bottom.addView(huntViews.panel, FrameLayout.LayoutParams(MATCH, MATCH))
             col.addView(bottom)
             root = col
         } else {
             val frame = FrameLayout(this)
             frame.addView(glView, FrameLayout.LayoutParams(MATCH, MATCH))
             frame.addView(controls, FrameLayout.LayoutParams(MATCH, MATCH))
-            frame.addView(
-                huntStatus,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                ).apply {
-                    gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                    topMargin = 220
-                },
-            )
+            frame.addView(huntViews.overlay, FrameLayout.LayoutParams(MATCH, MATCH))
             root = frame
         }
-        setContentView(root)
+        // Aviso de shiny encontrado: por cima de tudo, no topo.
+        val top = FrameLayout(this)
+        top.addView(root, FrameLayout.LayoutParams(MATCH, MATCH))
+        val m = (12 * resources.displayMetrics.density).toInt()
+        top.addView(huntViews.banner, FrameLayout.LayoutParams(MATCH, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP).apply {
+            setMargins(m, m / 2, m, 0)
+        })
+        setContentView(top)
         refreshHuntViews()
     }
 
@@ -764,19 +701,16 @@ class MainActivity : Activity(), Host {
         applyLayout()
     }
 
-    /** Mostra/esconde controles, overlay e painel conforme caça × orientação. */
+    /**
+     * Mostra/esconde controles e vistas da caça conforme caça × orientação: durante
+     * a caça os controles somem (o Hunter dirige o input) e entra o painel
+     * (retrato) ou a sobreposição (paisagem), ambos com "Parar caça".
+     */
     private fun refreshHuntViews() {
-        if (portrait) {
-            huntStatus.visibility = View.GONE
-            controls.visibility = if (hunting) View.GONE else View.VISIBLE
-            hunterPanel.visibility = if (hunting) View.VISIBLE else View.GONE
-            if (hunting) updateHunterPanel()
-        } else {
-            controls.visibility = View.VISIBLE
-            hunterPanel.visibility = View.GONE
-            huntStatus.visibility = if (hunting) View.VISIBLE else View.GONE
-            if (hunting) huntStatus.text = huntStatusText()
-        }
+        controls.visibility = if (hunting) View.GONE else View.VISIBLE
+        huntViews.panel.visibility = if (portrait && hunting) View.VISIBLE else View.GONE
+        huntViews.overlay.visibility = if (!portrait && hunting) View.VISIBLE else View.GONE
+        if (hunting) updateHuntViews()
     }
 
     override fun onResume() {
@@ -1120,7 +1054,7 @@ class MainActivity : Activity(), Host {
 
     override fun onMenuClosed() {
         // Indo pras Configurações/Estados a pausa continua (já pausaram de novo).
-        if (settings == null && states == null) resumeFromMenu()
+        if (settings == null && states == null && !hunterOpen) resumeFromMenu()
     }
 
     // ── Host: Configurações ──────────────────────────────────────────────────
@@ -1222,7 +1156,10 @@ class MainActivity : Activity(), Host {
     override fun setLanguage(tag: String) {
         L10n.save(this, tag)
         l10n = L10n.context(this, tag)
-        relabelHunterPanel()
+        huntViews.relabel()
+        if (hunting) updateHuntViews()
+        // Nomes dos alvos e a ajuda vêm do Rust, no idioma pedido.
+        glView.queueEvent { if (romLoaded) loadHuntInfo() }
     }
 
     override fun versionName(): String = try {
@@ -1279,6 +1216,24 @@ class MainActivity : Activity(), Host {
         if (same(day)) return tr(R.string.date_yesterday, clock)
         val date = android.text.format.DateFormat.getBestDateTimePattern(loc, "ddMMHHmm")
         return SimpleDateFormat(date, loc).format(Date(millis))
+    }
+
+    override val huntGame: String get() = huntGameName
+
+    override fun huntTargetList(): List<HuntTarget> =
+        huntTargets.indices.map { HuntTarget(huntTargets[it], huntKinds.getOrElse(it) { HuntTarget.GIFT }) }
+
+    override fun startHunt(i: Int) = beginHunt(i)
+    override fun huntHelp(i: Int, onStart: () -> Unit) = showHuntHelp(i, onStart)
+
+    override fun onHunterClosed(toMenu: Boolean) {
+        hunterOpen = false
+        if (toMenu) MenuSheet(this, this).show() else resumeFromMenu()
+    }
+
+    override fun onPartyFullClosed(pickOther: Boolean) {
+        hunterOpen = false
+        if (pickOther) startShinyHunter() else resumeFromMenu()
     }
 
     override fun onStatesClosed(toMenu: Boolean) {
@@ -1446,17 +1401,13 @@ class MainActivity : Activity(), Host {
             toast(tr(R.string.hunt_unsupported))
             return
         }
-        val targets = huntTargets
-        if (targets.isEmpty()) {
+        if (huntTargets.isEmpty()) {
             toast(tr(R.string.hunt_no_targets))
             return
         }
-        AlertDialog.Builder(this)
-            .setTitle(tr(R.string.hunt_target_title, huntGameName))
-            .setItems(targets) { _, i -> beginHunt(i) }
-            // "Como usar" no lado oposto aos botões de ação, como no desktop.
-            .setNeutralButton(tr(R.string.hunt_how_to)) { _, _ -> chooseHelpTarget() }
-            .show()
+        pauseForMenu()
+        hunterOpen = true
+        HuntTargetScreen(this, this).show()
     }
 
     /** Pede à thread GL pra começar a caça no alvo `i`. */
@@ -1468,22 +1419,11 @@ class MainActivity : Activity(), Host {
         pendingHuntStart.set(i)
     }
 
-    /** "❓ Como usar": escolhe de qual alvo ver a ajuda. */
-    private fun chooseHelpTarget() {
-        val targets = huntTargets
-        if (targets.isEmpty()) return
-        AlertDialog.Builder(this)
-            .setTitle(tr(R.string.hunt_how_to_which))
-            .setItems(targets) { _, i -> showHuntHelp(i) }
-            .setNegativeButton(tr(R.string.back)) { _, _ -> startShinyHunter() }
-            .show()
-    }
-
     /**
      * Modal de ajuda do alvo `i`: passo a passo e, logo abaixo, o vídeo de exemplo
      * em loop (quando o modo tem vídeo). Daqui já dá pra iniciar a caça.
      */
-    private fun showHuntHelp(i: Int) {
+    private fun showHuntHelp(i: Int, onStart: () -> Unit) {
         val help = huntHelps.getOrNull(i) ?: return
         val dp = resources.displayMetrics.density
         val pad = (16 * dp).toInt()
@@ -1530,7 +1470,7 @@ class MainActivity : Activity(), Host {
         AlertDialog.Builder(this)
             .setTitle(tr(R.string.hunt_how_to_title, help.title))
             .setView(ScrollView(this).apply { addView(column) })
-            .setPositiveButton(tr(R.string.hunt_start)) { _, _ -> beginHunt(i) }
+            .setPositiveButton(tr(R.string.hunt_start)) { _, _ -> onStart() }
             .setNegativeButton(tr(R.string.close), null)
             .setOnDismissListener { video?.stopPlayback() }
             .show()
@@ -1555,34 +1495,35 @@ class MainActivity : Activity(), Host {
         null
     }
 
-    /** Texto do overlay de status da caça (lido das stats publicadas). */
-    private fun huntStatusText(): String {
-        val best = if (statBestSV == 0xFFFF) "—" else statBestSV.toString()
-        return tr(R.string.hunt_status, currentTargetName, statAttempts, best, statSpecies)
-    }
+    /** Contagem no formato do idioma do app ("1.284", "1,284"). */
+    private fun count(n: Long): String = java.text.NumberFormat.getIntegerInstance(L10n.locale(l10n)).format(n)
 
-    /** Texto detalhado do painel do retrato (sprites à parte). */
-    private fun huntPanelText(): String {
+    /** Atualiza painel (retrato) e sobreposição (paisagem) com as stats publicadas. */
+    private fun updateHuntViews() {
         val best = if (statBestSV == 0xFFFF) "—" else statBestSV.toString()
         val prob = 1.0 - Math.pow(1.0 - 1.0 / 8192.0, statAttempts.toDouble())
-        return tr(R.string.hunt_panel, currentTargetName, statAttempts, best, statSpecies, prob * 100)
-    }
-
-    /** (Re)aplica os textos fixos do painel da caça no idioma atual. */
-    private fun relabelHunterPanel() {
-        panelLabelNormal.text = tr(R.string.hunt_normal)
-        panelLabelShiny.text = tr(R.string.hunt_shiny)
-        panelStop.text = tr(R.string.hunt_stop)
-        if (hunting) updateHunterPanel()
-    }
-
-    /** Atualiza o painel do retrato (sprites + stats). */
-    private fun updateHunterPanel() {
+        val pct = java.text.NumberFormat.getPercentInstance(L10n.locale(l10n)).apply {
+            minimumFractionDigits = 1
+            maximumFractionDigits = 1
+        }.format(prob)
         // Sem sprite (selvagem antes do 1º encontro) limpa a imagem, em vez de
         // deixar a da caça anterior.
-        panelSpriteNormal.setImageBitmap(spriteNormal?.let { spriteBitmap(it) })
-        panelSpriteShiny.setImageBitmap(spriteShiny?.let { spriteBitmap(it) })
-        panelStats.text = huntPanelText()
+        huntViews.update(
+            currentTargetName, count(statAttempts), best, prob, pct,
+            spriteNormal?.let { spriteCache(it, true) }, spriteShiny?.let { spriteCache(it, false) },
+        )
+    }
+
+    // Bitmaps dos sprites, refeitos só quando o array muda (o updater roda a 200 ms).
+    private var cachedNormal: Pair<IntArray, Bitmap?>? = null
+    private var cachedShiny: Pair<IntArray, Bitmap?>? = null
+
+    private fun spriteCache(argb: IntArray, normal: Boolean): Bitmap? {
+        val c = if (normal) cachedNormal else cachedShiny
+        if (c != null && c.first === argb) return c.second
+        val bmp = spriteBitmap(argb)
+        if (normal) cachedNormal = argb to bmp else cachedShiny = argb to bmp
+        return bmp
     }
 
     /** Bitmap nítido (sem suavização) de um sprite ARGB 64×64, escalado 4×. */
@@ -1596,7 +1537,7 @@ class MainActivity : Activity(), Host {
     private val huntStatsUpdater = object : Runnable {
         override fun run() {
             if (!hunting) return
-            if (portrait) updateHunterPanel() else huntStatus.text = huntStatusText()
+            updateHuntViews()
             uiHandler.postDelayed(this, 200)
         }
     }
@@ -1732,23 +1673,7 @@ class MainActivity : Activity(), Host {
         // Publica o suporte do Shiny Hunter pra UI (perfil detectado no loadRom).
         hunting = false
         huntSupported = NativeBridge.huntSupported(handle)
-        if (huntSupported) {
-            huntGameName = NativeBridge.huntGameName(handle)
-            val n = NativeBridge.huntTargetCount(handle)
-            huntTargets = Array(n) { NativeBridge.huntTargetName(handle, it) }
-            huntHelps = Array(n) {
-                HuntHelp(
-                    NativeBridge.huntHelpTitle(handle, it),
-                    NativeBridge.huntHelpBody(handle, it),
-                    NativeBridge.huntHelpVideo(handle, it),
-                )
-            }
-            Log.i(TAG, "shiny hunter: $huntGameName, ${n} alvos")
-        } else {
-            huntGameName = ""
-            huntTargets = emptyArray()
-            huntHelps = emptyArray()
-        }
+        loadHuntInfo()
         runOnUiThread { stopHuntUI() }
 
         // Save states valem pra qualquer jogo (não dependem de bateria no cartucho).
@@ -1822,6 +1747,33 @@ class MainActivity : Activity(), Host {
         if (imported > 0) toast(l10n.resources.getQuantityString(R.plurals.states_imported, imported, imported))
     }
 
+    /**
+     * Lê do perfil do Hunter (thread GL) o nome do jogo, os alvos com o grupo de
+     * cada um e a ajuda "Como usar" — nomes e ajuda no idioma do app.
+     */
+    private fun loadHuntInfo() {
+        if (!huntSupported) {
+            huntGameName = ""
+            huntTargets = emptyArray()
+            huntKinds = IntArray(0)
+            huntHelps = emptyArray()
+            return
+        }
+        val lang = L10n.locale(l10n).language
+        huntGameName = NativeBridge.huntGameName(handle)
+        val n = NativeBridge.huntTargetCount(handle)
+        huntTargets = Array(n) { NativeBridge.huntTargetName(handle, it, lang) }
+        huntKinds = IntArray(n) { NativeBridge.huntTargetKind(handle, it) }
+        huntHelps = Array(n) {
+            HuntHelp(
+                NativeBridge.huntHelpTitle(handle, it, lang),
+                NativeBridge.huntHelpBody(handle, it, lang),
+                NativeBridge.huntHelpVideo(handle, it),
+            )
+        }
+        Log.i(TAG, "shiny hunter: $huntGameName, $n alvos ($lang)")
+    }
+
     /** Copia as stats da caça (Hunter) pros campos voláteis lidos pela UI. */
     private fun publishHuntStats() {
         statAttempts = NativeBridge.huntAttempts(handle)
@@ -1848,13 +1800,10 @@ class MainActivity : Activity(), Host {
     private fun onHuntFinished() {
         hunting = false
         val n = statAttempts
+        val name = currentTargetName
         runOnUiThread {
             stopHuntUI()
-            Toast.makeText(
-                this,
-                tr(R.string.hunt_found, n),
-                Toast.LENGTH_LONG,
-            ).show()
+            huntViews.showFound(name, count(n))
         }
     }
 
@@ -1864,13 +1813,12 @@ class MainActivity : Activity(), Host {
      */
     private fun onHuntPartyFull() {
         hunting = false
+        val name = currentTargetName
         runOnUiThread {
             stopHuntUI()
-            AlertDialog.Builder(this)
-                .setTitle(tr(R.string.party_full_title))
-                .setMessage(tr(R.string.party_full_msg))
-                .setPositiveButton(tr(R.string.ok), null)
-                .show()
+            pauseForMenu()
+            hunterOpen = true
+            PartyFullScreen(this, this, name).show()
         }
     }
 

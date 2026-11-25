@@ -82,14 +82,17 @@ object NativeBridge {
     /** Quantos alvos o perfil oferece. */
     external fun huntTargetCount(handle: Long): Int
 
-    /** Nome do alvo `i`. */
-    external fun huntTargetName(handle: Long, i: Int): String
+    /** Nome do alvo `i` no idioma [lang] ("pt", "en", "es"), sem o sufixo de grupo. */
+    external fun huntTargetName(handle: Long, i: Int, lang: String): String
+
+    /** Grupo do alvo `i`: 0 lendário, 1 inicial, 2 presente, 3 selvagem ([HuntTarget]). */
+    external fun huntTargetKind(handle: Long, i: Int): Int
 
     /** Título do modo de caça do alvo (ajuda "Como usar"). */
-    external fun huntHelpTitle(handle: Long, i: Int): String
+    external fun huntHelpTitle(handle: Long, i: Int, lang: String): String
 
     /** Passo a passo do alvo (ajuda "Como usar"), parágrafos separados por linha em branco. */
-    external fun huntHelpBody(handle: Long, i: Int): String
+    external fun huntHelpBody(handle: Long, i: Int, lang: String): String
 
     /** Nome-base do vídeo de exemplo (`hunter_help/<nome>.mp4` nos assets), ou vazio. */
     external fun huntHelpVideo(handle: Long, i: Int): String

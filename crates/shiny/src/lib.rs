@@ -20,6 +20,7 @@ use auroragba_core::Gba;
 pub mod games;
 pub mod gfx;
 pub mod help;
+pub mod lang;
 
 use games::{Approach, GameProfile, HuntMethod, TargetDef};
 

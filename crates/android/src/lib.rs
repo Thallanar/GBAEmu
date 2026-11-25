@@ -14,8 +14,9 @@ mod android_impl {
     use auroragba_core::{apu, Gba, SCREEN_HEIGHT, SCREEN_WIDTH};
     use auroragba_link::LinkSession;
     use auroragba_scale::{Scaler, Upscale};
-    use auroragba_shiny::games::{self, GameProfile};
+    use auroragba_shiny::games::{self, GameProfile, TargetKind};
     use auroragba_shiny::gfx::RomGfx;
+    use auroragba_shiny::lang::Lang;
     use auroragba_shiny::{CheckResult, Hunter};
     use jni::objects::{JByteArray, JByteBuffer, JClass, JShortArray, JString};
     use jni::sys::{jboolean, jbyteArray, jint, jintArray, jlong, jstring, JNI_FALSE, JNI_TRUE};
@@ -588,32 +589,63 @@ mod android_impl {
             .map_or(0, |p| p.targets.len() as jint)
     }
 
-    /// Nome do alvo `i` (vazio se fora do intervalo).
+    /// Idioma pedido pelo Kotlin (tag como `"pt"`, `"en"`, `"es"`).
+    fn lang_of(env: &mut JNIEnv, lang: &JString) -> Lang {
+        env.get_string(lang)
+            .map(|s| Lang::from_tag(&String::from(s)))
+            .unwrap_or_default()
+    }
+
+    /// Nome de exibição do alvo `i` no idioma `lang`, sem o sufixo de grupo
+    /// ("Beldum"; o selvagem vira "Qualquer selvagem"). Vazio se fora do intervalo.
     ///
     /// # Safety
     /// `handle` válido.
     #[no_mangle]
     pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntTargetName(
-        env: JNIEnv,
+        mut env: JNIEnv,
         _class: JClass,
         handle: jlong,
         i: jint,
+        lang: JString,
     ) -> jstring {
+        let lang = lang_of(&mut env, &lang);
         let name = emu(handle)
             .and_then(|e| e.profile)
             .and_then(|p| p.targets.get(i as usize))
-            .map_or("", |t| t.name);
-        env.new_string(name)
-            .map(|s| s.into_raw())
-            .unwrap_or(std::ptr::null_mut())
+            .map_or("", |t| t.display_name(lang));
+        jstr(&env, name)
     }
 
-    /// Ajuda "Como usar" do alvo `i` (mesmo conteúdo do desktop, de
-    /// `auroragba_shiny::help`). `None` se o jogo/alvo é inválido.
-    unsafe fn help_of(handle: jlong, i: jint) -> Option<auroragba_shiny::help::Help> {
+    /// Grupo do alvo `i` na tela de escolha: 0 lendário, 1 inicial, 2 presente,
+    /// 3 selvagem (-1 se fora do intervalo).
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntTargetKind(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        i: jint,
+    ) -> jint {
+        emu(handle)
+            .and_then(|e| e.profile)
+            .and_then(|p| p.targets.get(i as usize))
+            .map_or(-1, |t| match t.kind() {
+                TargetKind::Legendary => 0,
+                TargetKind::Starter => 1,
+                TargetKind::Gift => 2,
+                TargetKind::Wild => 3,
+            })
+    }
+
+    /// Ajuda "Como usar" do alvo `i` no idioma `lang` (mesmo conteúdo do
+    /// desktop, de `auroragba_shiny::help`). `None` se o jogo/alvo é inválido.
+    unsafe fn help_of(handle: jlong, i: jint, lang: Lang) -> Option<auroragba_shiny::help::Help> {
         let profile = emu(handle)?.profile?;
         let target = profile.targets.get(usize::try_from(i).ok()?)?;
-        Some(auroragba_shiny::help::help_for(profile, target))
+        Some(auroragba_shiny::help::help_for(profile, target, lang))
     }
 
     fn jstr(env: &JNIEnv, s: &str) -> jstring {
@@ -628,12 +660,14 @@ mod android_impl {
     /// `handle` válido.
     #[no_mangle]
     pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntHelpTitle(
-        env: JNIEnv,
+        mut env: JNIEnv,
         _class: JClass,
         handle: jlong,
         i: jint,
+        lang: JString,
     ) -> jstring {
-        jstr(&env, help_of(handle, i).map_or("", |h| h.title))
+        let lang = lang_of(&mut env, &lang);
+        jstr(&env, help_of(handle, i, lang).map_or("", |h| h.title))
     }
 
     /// Texto explicativo (passo a passo) do alvo `i`.
@@ -642,12 +676,14 @@ mod android_impl {
     /// `handle` válido.
     #[no_mangle]
     pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntHelpBody(
-        env: JNIEnv,
+        mut env: JNIEnv,
         _class: JClass,
         handle: jlong,
         i: jint,
+        lang: JString,
     ) -> jstring {
-        let body = help_of(handle, i).map(|h| h.body).unwrap_or_default();
+        let lang = lang_of(&mut env, &lang);
+        let body = help_of(handle, i, lang).map(|h| h.body).unwrap_or_default();
         jstr(&env, &body)
     }
 
@@ -663,7 +699,8 @@ mod android_impl {
         handle: jlong,
         i: jint,
     ) -> jstring {
-        let stem = help_of(handle, i)
+        // O vídeo não depende do idioma.
+        let stem = help_of(handle, i, Lang::Pt)
             .and_then(|h| h.video)
             .map_or("", |v| v.stem());
         jstr(&env, stem)

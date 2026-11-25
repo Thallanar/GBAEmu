@@ -1357,7 +1357,9 @@ impl AuroraApp {
             return;
         };
         let target = profile.targets[self.selected_target];
-        let help = auroragba_shiny::help::help_for(profile, &target);
+        // Desktop ainda só em português (o seletor de idioma dele vem depois).
+        let help =
+            auroragba_shiny::help::help_for(profile, &target, auroragba_shiny::lang::Lang::Pt);
 
         // Player do vídeo deste modo: cria ao abrir; troca se o alvo mudou de modo.
         match (help.video, &self.help_player) {
@@ -1388,7 +1390,9 @@ impl AuroraApp {
                         ui.label("Não foi possível iniciar o vídeo de exemplo.");
                     }
                     None => {
-                        ui.label(egui::RichText::new(auroragba_shiny::help::NO_VIDEO_NOTE).weak());
+                        ui.label(
+                            egui::RichText::new(auroragba_shiny::help::NO_VIDEO_NOTE[0]).weak(),
+                        );
                     }
                 }
             });
