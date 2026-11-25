@@ -188,6 +188,23 @@ auroragba/
       o re-seed (valor do `gRngValue` fora do alcance do LCG) e reinjeta.
       Validado sem interface no save real do FireRed (inicial Bulbasaur: PIDs
       distintos a cada reset). Falta uma caça completa em jogo (lendários/presentes).
+- [X] Método: **prêmios do cassino de Celadon** (`HuntMethod::GameCornerPrize`,
+      #91) — o prêmio nasce no "give Pokémon" do script, então funciona como
+      presente (soft-reset re-rola o PID, varredura do time, aviso de time cheio).
+      FireRed rev 1, achado com o save real no balcão: lista Abra 180 · Clefairy
+      500 · Dratini 2.800 · Scyther 5.500 · Porygon 9.999 (lida da tela); cursor
+      da lista em `0x0203ADE6`, forçado só quando o máximo (`0x0203ADE8`) é 5 (o
+      SIM/NÃO usa o mesmo struct); moedas = `u16` em `[0x03005008]+0x294` XOR
+      chave em `[0x0300500C]+0xAF8` — sem moedas pro prêmio a caça para e avisa
+      (`NotEnoughCoins`). **Armadilha**: com o A martelado, um toque no meio do
+      "Which prize…" termina o texto e o menu nasce já escolhendo o 1º item; no
+      cassino o A só toca com texto esperando (`0x0300222B == 3`), com a lista
+      aberta ou após 240 frames. **Validado em jogo** (Dratini/Abra/Clefairy).
+      LeafGreen (Pinsir no lugar do Scyther) pendente de um save no balcão.
+- [X] **Pula a retrospectiva do FireRed** ("Previously on your quest…", #91):
+      flag `0x02031DD8 == 1` enquanto ela roda; um B ≥5 frames depois de ela
+      começar a encerra (no 1º frame é ignorado). Tentativa do cassino caiu de
+      ~8,3 s pra ~3,9 s. LeafGreen pendente de conferir.
 - [X] **"❓ Como usar"** no Shiny Hunter (desktop e Android): modal com o passo a
       passo do modo do alvo e o vídeo de exemplo logo abaixo, em loop. Texto único
       em `crates/shiny/src/help.rs`; vídeos em `assets/hunter-help/` (desktop
@@ -235,12 +252,12 @@ auroragba/
 - [X] Shiny Hunter no celular: modo retrato com painel (sprite alvo + stats)
 - [X] Extras de UX: fast-forward 2x/4x/8x, captura de tela (PNG na galeria),
       botão de reset, pacing de apresentação (~59,73 fps ao compositor)
-- [ ] Empacotamento APK assinado / distribuição
-- [ ] **Redefinição da UI** (só Android; pedido em 23/nov/2026): hoje tudo vive
-      num ☰ menu de diálogos empilhados (shader, upscale, remap, link,
-      velocidade, estados, caça). Reorganizar a navegação e o visual do app.
-      A tela de configurações gerais (som/escala/interface) é das duas frentes,
-      ver Fase 8.
+- [ ] Empacotamento APK assinado / distribuição → virou a **Fase 11**
+      (lançamento no Google Play).
+- [X] **Redefinição da UI** (pedido em 23/nov/2026; desenhada antes no canvas):
+      idiomas en/pt/es (#80), menu + Configurações (#81), modelos de gamepad
+      (#82), estados com miniatura (#83), Shiny Hunter (#84) e editor de layout
+      dos controles (#85). O Desktop ganhou o mesmo redesenho (#86–#90).
 
 ### Fase 8 — ✨ Polimento & features extras (contínuo)
 
@@ -283,11 +300,11 @@ fazem sentido.
 
 **Acessibilidade & UX:**
 
-- [ ] **Configurações gerais** (desktop **e** Android; pedido em 23/nov/2026):
-      uma tela única com som (volume/mudo), escala da tela
-      (inteira/ajustada/proporção) e opções de interface — no Android também
-      layout, tamanho e opacidade dos controles touch. Tudo persistido.
-- [ ] Localização PT-BR (e estrutura i18n para outros idiomas)
+- [X] **Configurações gerais** (desktop **e** Android; pedido em 23/nov/2026):
+      Android (#81, editor de layout no #85) e Desktop (#87) — pasta de ROMs,
+      áudio, velocidade, vídeo, controles, idioma e sobre. Tudo persistido.
+- [X] Localização: **pt / en / es**, automático pelo idioma do sistema —
+      Android (#80) e Desktop (#86–#90).
 - [ ] Temas de UI além do dark (seguindo o accent holográfico/shiny)
 - [ ] Macros / turbo de botão (auto-fire configurável)
 
@@ -339,6 +356,65 @@ Otimizações estruturais do interpretador, medidas em release headless.
       vez de ramificar dentro do handler genérico.
 - [ ] JIT (recompilação dinâmica) — só se o profiling provar necessidade depois
       de esgotar o interpretador. Trabalho de semanas; mantido como último recurso.
+
+### Fase 11 — 🚀 Lançamento 1.0 (Google Play)
+
+> **Critério da 1.0.0:** é a primeira versão publicada em **produção** no
+> Google Play, depois do teste fechado. Até lá seguimos na série 0.x (a cada
+> PR: feature sobe o número do meio, correção sobe o último). Decidido em
+> 25/nov/2026, com as duas interfaces redesenhadas.
+
+**Requisitos técnicos do Play:**
+
+- [ ] Subir `compileSdk`/`targetSdk` (hoje 34) pro alvo exigido pelo Play pra
+      apps novos (conferir o número atual no Play Console) e testar as mudanças
+      de comportamento do Android novo (tela cheia/edge-to-edge, permissões, SAF).
+- [ ] Build de release: **AAB** assinado (chave de upload + Play App Signing),
+      `.so` das arquiteturas suportadas, R8/minify avaliado, e o release testado
+      no celular (não só o debug).
+- [ ] Política de privacidade publicada (URL) e formulário de **segurança de
+      dados**: o app usa internet só pro link na rede local e não coleta dados.
+- [ ] Classificação etária (questionário IARC) e categoria.
+
+**Jurídico / marcas — decidir antes de publicar:**
+
+- [ ] Ficha da loja **sem marcas de terceiros**: nada de "Pokémon", "Nintendo",
+      "Game Boy" no nome, descrição, ícone ou prints (prints com homebrew ou
+      sem jogo reconhecível).
+- [ ] Decidir como o **Shiny Hunter** aparece na versão da loja (ele é feito sob
+      medida pra Pokémon — maior risco de remoção por pedido da Nintendo/TPC).
+      Pesquisar como outros emuladores lidam com isso.
+- [ ] Revisar textos dentro do app que citam nomes de jogos/marcas e o aviso
+      "não tem relação com a Nintendo" (já existe no Sobre).
+- [ ] GPL-3.0: link do código-fonte no app (já no Sobre) e na ficha; licenças de
+      terceiros completas (ScaleFX MIT, HQx LGPL-2.1, xBRZ GPL-3.0, Inter OFL).
+
+**Compatibilidade e qualidade:**
+
+- [ ] Rodada de compatibilidade com uns **15–20 jogos populares** além de
+      Pokémon (registrar o resultado de cada um e corrigir o que travar).
+- [ ] Testar em aparelhos variados: Android antigo (minSdk 24), aparelho fraco,
+      tablet, com e sem controle físico.
+- [ ] **Relatório de travamentos** que respeite a privacidade (sem coletar dados
+      pessoais; ex.: log local que o usuário pode compartilhar).
+- [ ] Decidir o que fazer com o **link Android↔PC** no Wi-Fi (ainda engasga):
+      marcar como experimental ou esconder até a Fase Link resolver a latência.
+- [ ] LeafGreen: cassino e pulo da retrospectiva conferidos num save real.
+- [ ] Revisar `BUGS.md` (o salto de vsync a 144 Hz no desktop aparece aberto).
+
+**Ficha da loja:**
+
+- [ ] Nome, descrição curta e longa (en/pt/es), ícone 512×512, imagem de
+      destaque 1024×500 e prints do celular (e tablet, se for suportar).
+
+**Publicação:**
+
+- [ ] Conta de desenvolvedor no Play Console.
+- [ ] **Teste fechado** com testadores (contas pessoais novas precisam de um
+      teste fechado com um mínimo de testadores por ~14 dias antes da produção;
+      conferir a regra atual no Console) e correção do que aparecer.
+- [ ] Produção → **versão 1.0.0**.
+- [ ] Desktop: binários Linux/Windows da 1.0.0 nos Releases do GitHub.
 
 ### Fase Link — 🔗 Cabo de link / multiplayer
 
@@ -443,23 +519,24 @@ Otimizações estruturais do interpretador, medidas em release headless.
   **presente estático** (`StaticGift` — Beldum pós-E4 + iniciais de Johto pós-Dex,
   varrendo os 6 slots do party) e **lendário por proximidade** (`SoftResetApproach`
   — Groudon/Kyogre do clima anormal, com passo de aproximação). Ruby/Sapphire
-  também fechados. FireRed/LeafGreen com perfis prontos (falta validar em jogo).
+  também fechados. FireRed/LeafGreen com perfis prontos; FireRed validado em
+  jogo no **cassino de Celadon** (#91), com a retrospectiva pulada por B.
   Selvagem com fuga encadeada (Marco 2) robusta desde o #75 e disponível nos
   cinco jogos (R/S no #76). Falta a pesca (estacionada).
 - [~] Fase 7 — Android: ponte JNI + app Kotlin (render GL ES + controles touch +
   **áudio via AudioTrack**), build via cargo-ndk + Gradle, **validado no emulador
   rodando Pokémon Emerald**. Saves (`.sav` + estados, espelho SAF), biblioteca de
   ROMs persistente, gamepad físico remapeável, fast-forward, screenshot, reset e
-  Shiny Hunter em retrato — tudo entregue. Faltam APK assinado /
-  distribuição e a **redefinição da UI** do app.
+  Shiny Hunter em retrato — tudo entregue, e a **UI redesenhada** (#80–#85).
+  A distribuição virou a Fase 11.
 - [~] Fase 8 — Polimento/apresentação: integer scaling + aspect lock nas duas
   frentes; **shaders** (pipeline "shader-como-dado" single-pass, embutidos
   scanlines/LCD-grid/LCD3x/CRT + importar `.frag` "Custom", seletor persistido) e
   **filtros de upscale HQ2x/3x/4x + xBRZ2x/3x/4x** (crate `auroragba-scale` sobre
   `hqx` + `xbrz-rs`; seleção Android por chave de algoritmo no JNI) fechados ponta a
   ponta. **Motor multipass** (`.mpass`, ping-pong de FBO) com **blur** e **ScaleFX**
-  (5 passes, meio-float) entregues. Próximos: **configurações gerais** (som,
-  escala, interface — desktop e Android), Anime4K, cheats, i18n.
+  (5 passes, meio-float) entregues. **Configurações gerais** e idiomas
+  pt/en/es nas duas frentes (#80–#90). Próximos: Anime4K, cheats, molduras.
 - [X] Fase 9 — Performance: batch da PPU + fast-path do bus (×1,43) + batch dos
   timers ciclo-exato; fast-forward por menu no Android; **pacing uniforme no
   desktop** (ritmo pelo monitor + controle de taxa dinâmico no áudio, #74).
@@ -469,6 +546,8 @@ Otimizações estruturais do interpretador, medidas em release headless.
   validada, crate `link` portátil, painel + descoberta LAN (UDP + mDNS) no desktop
   e bindings + painel no Android. Falta link Android↔PC sobre Wi-Fi (latência) e
   o relay de internet (L4).
+- [ ] Fase 11 — Lançamento 1.0 no Google Play: checklist definido (requisitos do
+  Play, marcas, compatibilidade, teste fechado); a 1.0.0 sai na produção.
 
 ### Validação (jsmolka gba-tests)
 
@@ -482,10 +561,10 @@ Otimizações estruturais do interpretador, medidas em release headless.
 - **Bugs**: os bugs pontuais conhecidos vivem em [`BUGS.md`](./BUGS.md).
 - **Timing de ciclos**: hoje cada instrução conta como 1 ciclo (placeholder);
   falta wait states por região de memória (afeta precisão fina e pitch de áudio).
-- **Faltam**: Fase 6 (validar FireRed/LeafGreen em jogo + método de pesca,
-  estacionado), mosaic afim (só BG texto + OBJ implementados),
-  APK Android assinado, link Android↔PC sobre Wi-Fi (latência) e o relay de
-  internet (Fase Link L4).
+- **Faltam**: Fase 6 (LeafGreen em jogo + método de pesca, estacionado),
+  mosaic afim (só BG texto + OBJ implementados), a Fase 11 (lançamento no
+  Google Play), link Android↔PC sobre Wi-Fi (latência) e o relay de internet
+  (Fase Link L4).
 
 ---
 
