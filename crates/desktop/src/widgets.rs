@@ -237,6 +237,7 @@ pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
 /// Título + subtítulo empilhados (subtítulo opcional, cinza).
 pub fn titled(ui: &mut egui::Ui, title: &str, sub: Option<&str>) {
     ui.vertical(|ui| {
+        ui.set_max_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 3.0;
         ui.label(
             egui::RichText::new(title)
@@ -378,6 +379,25 @@ pub fn text_link(ui: &mut egui::Ui, label: &str) -> Response {
     .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Linha "conteúdo à esquerda, controle à direita". O controle reserva o
+/// espaço dele primeiro e o conteúdo quebra linha no que sobra, então nada se
+/// sobrepõe quando a janela é estreita. Alinhados pelo topo (centralizar
+/// esticaria a linha até a altura disponível inteira).
+pub fn split<R>(
+    ui: &mut egui::Ui,
+    left: impl FnOnce(&mut egui::Ui),
+    right: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+        let r = right(ui);
+        ui.add_space(8.0);
+        let w = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(w, 0.0), egui::Layout::top_down(egui::Align::Min), left);
+        r
+    })
+    .inner
+}
+
 /// Linha "título/subtítulo à esquerda, controle à direita" dentro de um cartão.
 pub fn row<R>(
     ui: &mut egui::Ui,
@@ -385,10 +405,72 @@ pub fn row<R>(
     sub: Option<&str>,
     control: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
-    ui.horizontal(|ui| {
-        titled(ui, title, sub);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control)
-            .inner
-    })
-    .inner
+    split(ui, |ui| titled(ui, title, sub), control)
+}
+
+/// Estilo de [`wide_button`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ButtonKind {
+    Accent,
+    Outline,
+    Danger,
+    Disabled,
+}
+
+/// Botão de tamanho fixo (os do rodapé dos painéis ocupam a largura toda).
+pub fn wide_button(ui: &mut egui::Ui, label: &str, size: egui::Vec2, kind: ButtonKind) -> Response {
+    let sense = if kind == ButtonKind::Disabled {
+        Sense::hover()
+    } else {
+        Sense::click()
+    };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
+    let hovered = resp.hovered() && kind != ButtonKind::Disabled;
+    let (bg, fg, border) = match kind {
+        ButtonKind::Accent => (
+            if hovered {
+                theme::ACCENT.gamma_multiply(0.9)
+            } else {
+                theme::ACCENT
+            },
+            theme::ON_ACCENT,
+            None,
+        ),
+        ButtonKind::Outline => (
+            if hovered {
+                theme::SURFACE2
+            } else {
+                Color32::TRANSPARENT
+            },
+            theme::TEXT,
+            Some(theme::BORDER),
+        ),
+        ButtonKind::Danger => (
+            if hovered {
+                theme::SURFACE
+            } else {
+                Color32::TRANSPARENT
+            },
+            theme::DANGER_TEXT,
+            Some(theme::DANGER),
+        ),
+        ButtonKind::Disabled => (theme::SURFACE2, theme::FAINT, None),
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, 12.0, bg);
+    if let Some(b) = border {
+        p.rect_stroke(rect.shrink(0.75), 12.0, Stroke::new(1.5_f32, b));
+    }
+    p.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        theme::bold(15.0),
+        fg,
+    );
+    if kind == ButtonKind::Disabled {
+        resp
+    } else {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    }
 }

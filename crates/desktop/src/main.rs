@@ -18,6 +18,7 @@ use eframe::egui;
 mod audio;
 mod discovery;
 mod help_video;
+mod hunter_ui;
 mod i18n;
 mod icons;
 mod library;
@@ -455,7 +456,7 @@ struct AuroraApp {
     /// Perfil do jogo detectado pelo header (None = não reconhecido / sem ROM).
     profile: Option<&'static GameProfile>,
     /// Índice do alvo selecionado dentro de `profile.targets`.
-    selected_target: usize,
+    selected_target: Option<usize>,
     /// Caça em andamento?
     hunting: bool,
     /// Estado do Shiny Hunter.
@@ -477,6 +478,12 @@ struct AuroraApp {
     /// Aviso que parou a caça (ex.: time cheio num presente). Fica no painel até
     /// a próxima caça começar.
     hunt_warning: Option<String>,
+    /// Quando a caça parou (pra congelar o tempo decorrido no painel).
+    hunt_stopped: Option<Instant>,
+    /// Aviso de shiny encontrado visível no topo do jogo.
+    shiny_banner: bool,
+    /// "Detalhes técnicos" abertos no painel da caça.
+    hunt_details: bool,
     /// Detector (debug) do byte do cursor do inicial na RAM. Ver [`CursorFinder`].
     cursor_finder: CursorFinder,
     /// Localizador (debug) do bit de estado de batalha. Ver [`BattleStateFinder`].
@@ -773,15 +780,18 @@ impl AuroraApp {
 
             frame_count: 0,
             profile: None,
-            selected_target: 0,
+            selected_target: None,
             hunting: false,
             hunter: Hunter::new(),
-            hunt_speed: 1, // começa em tempo real pra dar pra ver/validar
+            hunt_speed: *hunter_ui::HUNT_SPEEDS.last().unwrap(),
             audio: audio::AudioOut::new(),
             gfx: None,
             sprite_cache: HashMap::new(),
             hunt_started: None,
             hunt_warning: None,
+            hunt_stopped: None,
+            shiny_banner: false,
+            hunt_details: false,
             cursor_finder: CursorFinder::default(),
             battle_finder: BattleStateFinder::default(),
             current_slot: 0,
@@ -912,7 +922,10 @@ impl AuroraApp {
                 // Shiny Hunter com os endereços certos.
                 let code = self.gba.bus.cartridge.game_code();
                 self.profile = auroragba_shiny::games::detect(&code);
-                self.selected_target = 0;
+                self.selected_target = None;
+                self.hunt_warning = None;
+                self.hunt_stopped = None;
+                self.shiny_banner = false;
                 self.hunting = false;
                 self.hunter = Hunter::new();
                 self.hunt_started = None;
@@ -1158,9 +1171,11 @@ impl AuroraApp {
     /// frente do alvo** com o save carregado; a primeira tentativa amassa A até
     /// a batalha, e as seguintes resetam sozinhas.
     fn start_hunt(&mut self) {
-        if self.profile.is_some() {
+        if self.profile.is_some() && self.selected_target.is_some() {
             self.hunter = Hunter::new();
             self.hunt_warning = None;
+            self.hunt_stopped = None;
+            self.shiny_banner = false;
             self.hunting = true;
             self.running = false;
             self.hunt_started = Some(Instant::now());
@@ -1196,175 +1211,6 @@ impl AuroraApp {
         });
         self.sprite_cache.insert((species, shiny), handle.clone());
         handle
-    }
-
-    /// Desenha o painel lateral do Shiny Hunter: sprite do alvo + estatísticas
-    /// da caça em tempo real + controles.
-    fn shiny_panel(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        ui.heading("✨ Shiny Hunter");
-        let Some(profile) = self.profile else {
-            ui.label("Jogo não reconhecido.");
-            ui.label("(carregue uma ROM Gen 3 suportada)");
-            return;
-        };
-        ui.label(profile.name);
-
-        // Seletor de alvo.
-        let current = profile.targets[self.selected_target].name;
-        egui::ComboBox::from_label("Alvo")
-            .selected_text(current)
-            .show_ui(ui, |ui| {
-                for (i, t) in profile.targets.iter().enumerate() {
-                    ui.selectable_value(&mut self.selected_target, i, t.name);
-                }
-            });
-        let target = profile.targets[self.selected_target];
-
-        // Sprite do alvo: normal + shiny lado a lado, pra comparar a cor que
-        // estamos caçando. Quando o shiny aparece, destacamos a coluna dele.
-        // Pra alvos de espécie fixa (lendário/inicial) é a própria espécie; pra
-        // selvagem "qualquer" (species 0) mostramos a espécie do ÚLTIMO encontro —
-        // assim o painel exibe quem apareceu (e, ao parar, o shiny achado).
-        ui.separator();
-        let ctx = ui.ctx().clone();
-        let display_species = if target.species != 0 {
-            target.species
-        } else {
-            self.hunter.last_species
-        };
-        let normal_tex = self.target_sprite(&ctx, display_species, false);
-        let shiny_tex = self.target_sprite(&ctx, display_species, true);
-        let found = self.hunter.found;
-        ui.horizontal(|ui| {
-            // Distribui as duas colunas igualmente na largura do painel.
-            let col_w = (ui.available_width() - 8.0) / 2.0;
-            let draw =
-                |ui: &mut egui::Ui, tex: &Option<egui::TextureHandle>, label: &str, hot: bool| {
-                    ui.allocate_ui(egui::vec2(col_w, 130.0), |ui| {
-                        ui.vertical_centered(|ui| {
-                            match tex {
-                                Some(tex) => {
-                                    ui.add(
-                                        egui::Image::new(tex)
-                                            .fit_to_exact_size(egui::vec2(96.0, 96.0)),
-                                    );
-                                }
-                                None => {
-                                    ui.add_space(24.0);
-                                    ui.label(egui::RichText::new("?").size(40.0).weak());
-                                    ui.add_space(24.0);
-                                }
-                            }
-                            let rich = egui::RichText::new(label).small();
-                            ui.label(if hot {
-                                rich.strong().color(egui::Color32::GOLD)
-                            } else {
-                                rich.weak()
-                            });
-                        });
-                    });
-                };
-            draw(ui, &normal_tex, "Normal", false);
-            draw(ui, &shiny_tex, "✨ Shiny", found);
-        });
-
-        // Contador grande.
-        ui.separator();
-        ui.vertical_centered(|ui| {
-            ui.label(
-                egui::RichText::new(self.hunter.attempts.to_string())
-                    .size(30.0)
-                    .strong(),
-            );
-            ui.label("tentativas");
-        });
-
-        if let Some(w) = &self.hunt_warning {
-            ui.label(egui::RichText::new(w).color(egui::Color32::from_rgb(0xE0, 0x80, 0x40)));
-        }
-
-        // Tempo decorrido + taxa.
-        if let Some(start) = self.hunt_started {
-            let secs = start.elapsed().as_secs_f64();
-            let (m, s) = (secs as u64 / 60, secs as u64 % 60);
-            let rate = if secs > 0.5 {
-                self.hunter.attempts as f64 / secs
-            } else {
-                0.0
-            };
-            ui.label(format!("⏱ {m:02}:{s:02}   ·   {rate:.1}/s"));
-        }
-
-        // Probabilidade acumulada de já ter achado pelo menos 1 shiny.
-        let p = 1.0 - (1.0 - 1.0 / 8192.0_f64).powi(self.hunter.attempts as i32);
-        ui.label(format!("📊 Chance acumulada: {:.1}%", p * 100.0));
-
-        // Quão perto chegou (menor valor shiny visto).
-        if self.hunter.best_shiny_value != 0xFFFF {
-            ui.label(format!(
-                "🔥 Mais perto: {} (tentativa #{})",
-                self.hunter.best_shiny_value, self.hunter.best_attempt
-            ));
-        }
-
-        // Último encontro.
-        if self.hunter.last_pid != 0 {
-            ui.separator();
-            ui.label(format!("Último PID: {:08X}", self.hunter.last_pid));
-            ui.label(format!(
-                "Valor shiny: {} (shiny se < 8)",
-                self.hunter.last_shiny_value
-            ));
-            ui.label(format!("Espécie lida: {}", self.hunter.last_species));
-        }
-
-        // Controles.
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label("Velocidade:");
-            ui.add(
-                egui::Slider::new(&mut self.hunt_speed, 1..=2000)
-                    .logarithmic(true)
-                    .suffix(" fr/upd"),
-            );
-        });
-        // Iniciar/parar à esquerda; "Como usar" no lado oposto.
-        ui.horizontal(|ui| {
-            if self.hunting {
-                if ui.button("⏹ Parar caça").clicked() {
-                    self.hunting = false;
-                }
-            } else if ui.button("▶ Iniciar caça").clicked() {
-                self.start_hunt();
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button("❓ Como usar")
-                    .on_hover_text("Passo a passo e vídeo de exemplo deste modo de caça")
-                    .clicked()
-                {
-                    self.show_hunt_help = true;
-                }
-            });
-        });
-
-        if self.hunter.found {
-            ui.separator();
-            ui.vertical_centered(|ui| {
-                ui.colored_label(
-                    egui::Color32::from_rgb(255, 105, 180),
-                    egui::RichText::new("✨ SHINY ENCONTRADO! ✨")
-                        .size(18.0)
-                        .strong(),
-                );
-            });
-        }
-
-        if SHOW_RAM_FINDER {
-            self.cursor_finder_ui(ui);
-            self.battle_state_finder_ui(ui);
-        }
     }
 
     /// Ferramenta de debug pra achar o endereço do cursor do menu do inicial na
@@ -1480,7 +1326,11 @@ impl AuroraApp {
             self.hunting = false;
             return;
         };
-        let target = &profile.targets[self.selected_target];
+        let Some(index) = self.selected_target else {
+            self.hunting = false;
+            return;
+        };
+        let target = &profile.targets[index];
         // `hunt_speed` frames por update (1 = tempo real, assistível). Timeout de
         // 1 min de tempo emulado por tentativa antes de resetar por segurança.
         let batch = self.hunt_speed.max(1);
@@ -1494,9 +1344,12 @@ impl AuroraApp {
             // A-mash seguiria até a tela de apelido. Para e explica.
             self.hunting = false;
             self.running = true;
-            let msg = "⚠ Time cheio: o presente iria para o PC, onde a caça não o vê. \
-                       Libere um espaço no time, salve em frente ao presente e comece \
-                       a caça de novo.";
+            self.hunt_stopped = Some(Instant::now());
+            let msg = t(
+                "Time cheio: o presente iria para o PC, onde a caça não o vê. Libere um espaço no time, salve em frente ao presente e comece a caça de novo.",
+                "Party full: the gift would go to the PC, where the hunt can't see it. Free a party slot, save in front of the gift and start the hunt again.",
+                "Equipo lleno: el regalo iría al PC, donde la caza no lo ve. Libera un hueco en el equipo, guarda frente al regalo y empieza la caza de nuevo.",
+            );
             self.set_status(msg);
             self.hunt_warning = Some(msg.into());
         }
@@ -1506,6 +1359,9 @@ impl AuroraApp {
             // jogador assiste/joga a partir daí (pode apertar Z=A pra avançar).
             self.hunting = false;
             self.running = true;
+            self.hunt_stopped = Some(Instant::now());
+            self.show_hunter = true;
+            self.shiny_banner = true;
             log::info!(
                 "✨ Shiny encontrado em {} tentativas! Controle devolvido pra você ver a batalha.",
                 self.hunter.attempts
@@ -1566,10 +1422,13 @@ impl AuroraApp {
             self.show_hunt_help = false;
             return;
         };
-        let target = profile.targets[self.selected_target];
-        // Desktop ainda só em português (o seletor de idioma dele vem depois).
-        let help =
-            auroragba_shiny::help::help_for(profile, &target, auroragba_shiny::lang::Lang::Pt);
+        let Some(index) = self.selected_target else {
+            self.show_hunt_help = false;
+            return;
+        };
+        let target = profile.targets[index];
+        let lang = i18n::get();
+        let help = auroragba_shiny::help::help_for(profile, &target, lang);
 
         // Player do vídeo deste modo: cria ao abrir; troca se o alvo mudou de modo.
         match (help.video, &self.help_player) {
@@ -1579,33 +1438,46 @@ impl AuroraApp {
         }
 
         let mut open = self.show_hunt_help;
-        egui::Window::new(format!("❓ Como usar — {}", help.title))
-            .id(egui::Id::new("hunt_help"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(560.0)
-            .show(ctx, |ui| {
-                ui.set_width(560.0);
-                ui.label(egui::RichText::new(target.name).strong());
-                ui.add_space(4.0);
-                for para in help.body.split("\n\n") {
-                    ui.label(para);
-                    ui.add_space(6.0);
+        egui::Window::new(format!(
+            "{} — {}",
+            t("Como usar", "How to use", "Cómo usar"),
+            help.title
+        ))
+        .id(egui::Id::new("hunt_help"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(560.0)
+        .show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.label(
+                egui::RichText::new(target.display_name(lang))
+                    .font(theme::bold(16.0))
+                    .color(theme::TEXT),
+            );
+            ui.add_space(4.0);
+            for para in help.body.split("\n\n") {
+                ui.label(para);
+                ui.add_space(6.0);
+            }
+            ui.separator();
+            match &mut self.help_player {
+                Some(player) => player.show(ui, 560.0),
+                None if help.video.is_some() => {
+                    ui.label(t(
+                        "Não foi possível iniciar o vídeo de exemplo.",
+                        "Couldn't start the example video.",
+                        "No se pudo iniciar el vídeo de ejemplo.",
+                    ));
                 }
-                ui.separator();
-                match &mut self.help_player {
-                    Some(player) => player.show(ui, 560.0),
-                    None if help.video.is_some() => {
-                        ui.label("Não foi possível iniciar o vídeo de exemplo.");
-                    }
-                    None => {
-                        ui.label(
-                            egui::RichText::new(auroragba_shiny::help::NO_VIDEO_NOTE[0]).weak(),
-                        );
-                    }
+                None => {
+                    ui.label(
+                        egui::RichText::new(lang.pick(auroragba_shiny::help::NO_VIDEO_NOTE))
+                            .color(theme::MUTED),
+                    );
                 }
-            });
+            }
+        });
         self.show_hunt_help = open;
         if !open {
             // Libera o decoder e a textura ao fechar.
@@ -1959,7 +1831,13 @@ impl AuroraApp {
             }
             Some(ToolAction::Screenshot) => self.screenshot(),
             Some(ToolAction::Link) => self.show_link = !self.show_link,
-            Some(ToolAction::Hunter) => self.show_hunter = !self.show_hunter,
+            Some(ToolAction::Hunter) => {
+                if self.show_hunter {
+                    self.close_hunter();
+                } else {
+                    self.show_hunter = true;
+                }
+            }
             Some(ToolAction::Settings) => self.settings_open = true,
             Some(ToolAction::States) => {
                 self.states_open = true;
@@ -2100,6 +1978,7 @@ impl AuroraApp {
             p.rect_stroke(pill, 999.0, egui::Stroke::new(1.0_f32, theme::BORDER));
             p.galley(pill.center() - galley.size() / 2.0, galley, theme::TEXT);
         }
+        self.shiny_banner(ui, area);
     }
 
     /// Biblioteca em tela cheia: a tela inicial sem ROM (e o botão Biblioteca).
@@ -2741,8 +2620,10 @@ impl eframe::App for AuroraApp {
         // a caça (é por ele que ela para).
         if self.profile.is_some() && self.view == View::Game && (self.show_hunter || self.hunting) {
             egui::SidePanel::right("shiny_panel")
-                .min_width(230.0)
-                .show(ctx, |ui| self.shiny_panel(ui));
+                .exact_width(380.0)
+                .resizable(false)
+                .frame(egui::Frame::none().fill(theme::BG))
+                .show(ctx, |ui| self.hunter_panel(ui));
         }
 
         match self.view {

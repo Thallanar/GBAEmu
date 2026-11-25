@@ -696,28 +696,34 @@ impl AuroraApp {
                         .rounding(14.0),
                 );
                 ui.add_space(8.0);
-                widgets::titled(
-                    ui,
-                    "AuroraGBA",
-                    Some(&format!(
-                        "{} {} · {}",
-                        t("Versão", "Version", "Versión"),
-                        env!("CARGO_PKG_VERSION"),
-                        t(
-                            "código aberto, GPL-3.0",
-                            "open source, GPL-3.0",
-                            "código abierto, GPL-3.0"
-                        )
-                    )),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    ui.label(
+                        RichText::new("AuroraGBA")
+                            .font(theme::semibold(15.0))
+                            .color(theme::TEXT),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "{} {} · {}",
+                            t("Versão", "Version", "Versión"),
+                            env!("CARGO_PKG_VERSION"),
+                            t(
+                                "código aberto, GPL-3.0",
+                                "open source, GPL-3.0",
+                                "código abierto, GPL-3.0"
+                            )
+                        ))
+                        .font(theme::regular(13.0))
+                        .color(theme::MUTED),
+                    );
                     ui.hyperlink_to(
                         RichText::new(t(
                             "Código no GitHub",
                             "Source on GitHub",
                             "Código en GitHub",
                         ))
-                        .font(theme::semibold(14.0)),
+                        .font(theme::semibold(13.0)),
                         SOURCE_URL,
                     );
                 });
