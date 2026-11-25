@@ -117,6 +117,18 @@ pub fn outline_button(ui: &mut egui::Ui, label: &str, height: f32) -> Response {
     )
 }
 
+/// Botão com contorno vermelho (ação destrutiva, tipo "Parar caça").
+pub fn danger_button(ui: &mut egui::Ui, label: &str, height: f32) -> Response {
+    filled_button(
+        ui,
+        label,
+        height,
+        Color32::TRANSPARENT,
+        theme::DANGER_TEXT,
+        Some(theme::DANGER),
+    )
+}
+
 fn filled_button(
     ui: &mut egui::Ui,
     label: &str,

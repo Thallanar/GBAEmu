@@ -22,10 +22,12 @@ mod i18n;
 mod icons;
 mod library;
 mod link;
+mod link_ui;
 mod pacing;
 mod png;
 mod settings;
 mod shader;
+mod states;
 mod theme;
 mod widgets;
 
@@ -507,6 +509,13 @@ struct AuroraApp {
     space_toggle: bool,
     /// Ícone do app pra tela Sobre (carregado na primeira vez).
     about_icon: Option<egui::TextureHandle>,
+    /// Janela de Estados aberta, no modo carregar (senão salvar), e o slot
+    /// ocupado esperando confirmação pra ser sobrescrito.
+    states_open: bool,
+    states_load_mode: bool,
+    states_confirm: Option<usize>,
+    /// Miniaturas dos slots (pela data do arquivo do estado).
+    thumb_cache: HashMap<usize, (std::time::SystemTime, Option<egui::TextureHandle>)>,
     /// Janela "❓ Como usar" do Shiny Hunter aberta?
     show_hunt_help: bool,
     /// Player do vídeo de exemplo da ajuda (criado ao abrir a janela; trocado
@@ -567,6 +576,7 @@ enum ToolAction {
     Link,
     Hunter,
     Settings,
+    States,
 }
 
 /// Agora em segundos Unix.
@@ -809,6 +819,10 @@ impl AuroraApp {
                 .unwrap_or(0),
             space_toggle: get_bool("space_toggle", false),
             about_icon: None,
+            states_open: false,
+            states_load_mode: false,
+            states_confirm: None,
+            thumb_cache: HashMap::new(),
             show_hunt_help: false,
             help_player: None,
             rebinding: None,
@@ -905,6 +919,7 @@ impl AuroraApp {
                 // Localiza as tabelas de gráficos pra decodificar sprites do alvo.
                 self.gfx = RomGfx::locate(&self.gba.bus.cartridge.rom);
                 self.sprite_cache.clear();
+                self.thumb_cache.clear();
                 self.rewind.clear();
                 match self.profile {
                     Some(p) => log::info!("Jogo reconhecido: {} ({code})", p.name),
@@ -988,15 +1003,18 @@ impl AuroraApp {
         let blob = self.gba.save_state();
         match self.slot_path(slot) {
             Some(path) => match std::fs::write(&path, &blob) {
-                Ok(()) => self.set_status(format!(
-                    "{} {}",
-                    t(
-                        "Estado salvo no slot",
-                        "State saved to slot",
-                        "Estado guardado en la ranura"
-                    ),
-                    slot + 1
-                )),
+                Ok(()) => {
+                    self.save_slot_thumb(slot);
+                    self.set_status(format!(
+                        "{} {}",
+                        t(
+                            "Estado salvo no slot",
+                            "State saved to slot",
+                            "Estado guardado en la ranura"
+                        ),
+                        slot + 1
+                    ));
+                }
                 Err(e) => self.set_status(format!(
                     "{}: {e}",
                     t(
@@ -1058,11 +1076,6 @@ impl AuroraApp {
                 t("vazio", "is empty", "vacía")
             )),
         }
-    }
-
-    /// True se o slot tem um arquivo de save state em disco.
-    fn slot_exists(&self, slot: usize) -> bool {
-        self.slot_path(slot).is_some_and(|p| p.exists())
     }
 
     /// Empilha um snapshot do estado atual no anel de rewind, descartando o mais
@@ -1784,15 +1797,18 @@ impl AuroraApp {
                             {
                                 action = Some(ToolAction::Screenshot);
                             }
-                            let states = widgets::tool_button(
+                            if widgets::tool_button(
                                 ui,
                                 Icon::States,
                                 states_label,
-                                false,
+                                self.states_open,
                                 has_rom && !hunting,
                                 compact,
-                            );
-                            self.states_popup(ui, &states);
+                            )
+                            .clicked()
+                            {
+                                action = Some(ToolAction::States);
+                            }
                             widgets::tool_separator(ui);
                             if widgets::tool_button(
                                 ui,
@@ -1945,61 +1961,13 @@ impl AuroraApp {
             Some(ToolAction::Link) => self.show_link = !self.show_link,
             Some(ToolAction::Hunter) => self.show_hunter = !self.show_hunter,
             Some(ToolAction::Settings) => self.settings_open = true,
+            Some(ToolAction::States) => {
+                self.states_open = true;
+                self.states_load_mode = false;
+                self.states_confirm = None;
+            }
             None => {}
         }
-    }
-
-    /// Menu provisório dos estados (vira a grade com miniaturas no próximo
-    /// passo do redesenho).
-    fn states_popup(&mut self, ui: &mut egui::Ui, button: &egui::Response) {
-        let id = ui.make_persistent_id("states_popup");
-        if button.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(id));
-        }
-        egui::popup::popup_below_widget(ui, id, button, |ui| {
-            ui.set_min_width(260.0);
-            ui.label(t(
-                "Slot (● = ocupado):",
-                "Slot (● = used):",
-                "Ranura (● = ocupada):",
-            ));
-            ui.horizontal(|ui| {
-                for slot in 0..SAVE_SLOTS {
-                    let label = if self.slot_exists(slot) {
-                        format!("●{}", slot + 1)
-                    } else {
-                        format!("{}", slot + 1)
-                    };
-                    ui.selectable_value(&mut self.current_slot, slot, label);
-                }
-            });
-            ui.separator();
-            let n = self.current_slot + 1;
-            if ui
-                .button(format!(
-                    "{} {n} (F5)",
-                    t("Salvar no slot", "Save to slot", "Guardar en la ranura")
-                ))
-                .clicked()
-            {
-                self.save_state_slot(self.current_slot);
-                ui.memory_mut(|m| m.close_popup());
-            }
-            let can_load = self.slot_exists(self.current_slot);
-            if ui
-                .add_enabled(
-                    can_load,
-                    egui::Button::new(format!(
-                        "{} {n} (F9)",
-                        t("Carregar do slot", "Load from slot", "Cargar de la ranura")
-                    )),
-                )
-                .clicked()
-            {
-                self.load_state_slot(self.current_slot);
-                ui.memory_mut(|m| m.close_popup());
-            }
-        });
     }
 
     /// Rodapé: velocidade, mensagem efêmera e lembrete dos atalhos.
@@ -2018,7 +1986,7 @@ impl AuroraApp {
                     };
                     let in_game = self.rom_path.is_some() && self.view == View::Game;
                     if in_game {
-                        let speed = if (self.running && !self.settings_open) || self.hunting {
+                        let speed = if (self.running && !self.settings_open && !self.states_open) || self.hunting {
                             let txt = format!("{:.0} fps · {:.1}×", self.fps, self.fps / 59.7275);
                             if i18n::get() == i18n::Lang::En {
                                 txt
@@ -2403,9 +2371,20 @@ impl AuroraApp {
         match pending.poll() {
             None => ctx.request_repaint(),
             Some(Ok(session)) => {
-                let papel = if session.id == 0 { "host" } else { "convidado" };
                 self.gba.link_configure(true, session.id);
-                self.set_status(format!("🔗 link conectado — somos o {papel}"));
+                self.set_status(if session.id == 0 {
+                    t(
+                        "Link conectado: você hospeda",
+                        "Link connected: you are the host",
+                        "Link conectado: eres el anfitrión",
+                    )
+                } else {
+                    t(
+                        "Link conectado: você é o convidado",
+                        "Link connected: you are the guest",
+                        "Link conectado: eres el invitado",
+                    )
+                });
                 self.link = Some(session);
                 self.link_pending = None;
                 self.link_advertiser = None; // conectou: para de se anunciar
@@ -2413,168 +2392,14 @@ impl AuroraApp {
             Some(Err(e)) => {
                 // `Interrupted` = cancelamento pedido pelo usuário, sem alarde.
                 if e.kind() != std::io::ErrorKind::Interrupted {
-                    self.set_status(format!("link falhou ({e})"));
+                    self.set_status(format!(
+                        "{} ({e})",
+                        t("O link falhou", "The link failed", "El link falló")
+                    ));
                 }
                 self.link_pending = None;
                 self.link_advertiser = None;
             }
-        }
-    }
-
-    /// Painel de Link: hospedar/conectar (ocioso), spinner (conectando) ou
-    /// status + desconectar (conectado). A conexão roda em thread de fundo
-    /// ([`link::PendingLink`]), então a UI nunca trava esperando o parceiro.
-    fn link_window(&mut self, ctx: &egui::Context) {
-        // Espelha o estado em valores `Copy` pra não segurar `&self` enquanto a
-        // UI roda — as mutações de fato acontecem depois, via `action`.
-        let connected_id = self.link.as_ref().map(|s| s.id);
-        let pending_hosting = self.link_pending.as_ref().map(|p| p.hosting);
-        // Snapshot dos hosts descobertos na LAN (vazio se a descoberta está off).
-        let peers = self
-            .discovery
-            .as_ref()
-            .map(|d| d.peers())
-            .unwrap_or_default();
-        let mut open = self.show_link;
-        let mut action: Option<LinkAction> = None;
-
-        egui::Window::new("🔗 Link")
-            .open(&mut open)
-            .resizable(false)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                if let Some(id) = connected_id {
-                    let papel = if id == 0 {
-                        "host (parent)"
-                    } else {
-                        "convidado (child)"
-                    };
-                    ui.label(format!("✅ Conectado — somos o {papel}."));
-                    ui.label(
-                        egui::RichText::new(
-                            "A troca acontece dentro do jogo (balcão da Pokémon Center).",
-                        )
-                        .small()
-                        .weak(),
-                    );
-                    ui.separator();
-                    if ui.button("Desconectar").clicked() {
-                        action = Some(LinkAction::Disconnect);
-                    }
-                } else if let Some(hosting) = pending_hosting {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(if hosting {
-                            "Aguardando o parceiro conectar…"
-                        } else {
-                            "Conectando…"
-                        });
-                    });
-                    if hosting {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "Ouvindo na porta {}. Passe o seu IP da rede pro parceiro.",
-                                self.link_port
-                            ))
-                            .small()
-                            .weak(),
-                        );
-                    }
-                    ui.separator();
-                    if ui.button("Cancelar").clicked() {
-                        action = Some(LinkAction::Cancel);
-                    }
-                } else {
-                    ui.label("Hospedar (você gera o clock — é o master):");
-                    ui.horizontal(|ui| {
-                        ui.label("Porta:");
-                        ui.add(egui::TextEdit::singleline(&mut self.link_port).desired_width(70.0));
-                        if ui.button("Hospedar").clicked() {
-                            action = Some(LinkAction::Host);
-                        }
-                    });
-                    ui.separator();
-                    ui.label("Conectar a um host:");
-                    ui.horizontal(|ui| {
-                        ui.label("Endereço:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.link_addr).desired_width(160.0),
-                        );
-                        if ui.button("Conectar").clicked() {
-                            action = Some(LinkAction::Join);
-                        }
-                    });
-                    ui.separator();
-                    ui.label("Parceiros na rede:");
-                    if self.discovery.is_none() {
-                        ui.label(
-                            egui::RichText::new("Descoberta indisponível — use o endereço manual.")
-                                .small()
-                                .weak(),
-                        );
-                    } else if peers.is_empty() {
-                        ui.label(
-                            egui::RichText::new("Procurando hosts na LAN…")
-                                .small()
-                                .weak(),
-                        );
-                    } else {
-                        for peer in &peers {
-                            if ui
-                                .button(format!("🔗 {} ({})", peer.name, peer.addr))
-                                .clicked()
-                            {
-                                action = Some(LinkAction::JoinAddr(peer.addr.to_string()));
-                            }
-                        }
-                    }
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new("Os dois lados precisam estar na mesma rede (LAN).")
-                            .small()
-                            .weak(),
-                    );
-                }
-            });
-        self.show_link = open;
-
-        match action {
-            Some(LinkAction::Host) => match self.link_port.trim().parse::<u16>() {
-                Ok(port) => {
-                    self.link_pending = Some(link::PendingLink::host(port));
-                    // Anuncia o host na LAN pra os parceiros nos acharem sem IP
-                    // (best-effort: se o broadcast falhar, o manual ainda vale).
-                    self.link_advertiser = discovery::Advertiser::start(port, host_name())
-                        .map_err(|e| log::info!("não consegui anunciar o link na LAN: {e}"))
-                        .ok();
-                }
-                Err(_) => self.set_status("porta inválida"),
-            },
-            Some(LinkAction::Join) => {
-                let addr = self.link_addr.trim().to_string();
-                if addr.is_empty() {
-                    self.set_status("endereço vazio");
-                } else {
-                    self.link_pending = Some(link::PendingLink::join(addr));
-                }
-            }
-            Some(LinkAction::JoinAddr(addr)) => {
-                self.link_pending = Some(link::PendingLink::join(addr));
-            }
-            Some(LinkAction::Cancel) => {
-                if let Some(p) = &self.link_pending {
-                    p.cancel();
-                }
-                self.link_pending = None;
-                self.link_advertiser = None; // para de anunciar
-                self.set_status("conexão de link cancelada");
-            }
-            Some(LinkAction::Disconnect) => {
-                self.link = None;
-                self.gba.link_configure(false, 0);
-                self.set_status("link encerrado");
-            }
-            None => {}
         }
     }
 
@@ -2590,7 +2415,14 @@ impl AuroraApp {
             if let Err(e) = session.run_frame(&mut self.gba) {
                 self.link = None;
                 self.gba.link_configure(false, 0);
-                self.set_status(format!("link caiu ({e}) — seguindo sem parceiro"));
+                self.set_status(format!(
+                    "{} ({e})",
+                    t(
+                        "O link caiu: seguindo sem parceiro",
+                        "The link dropped: playing solo",
+                        "El link se cayó: sigues sin compañero"
+                    )
+                ));
             }
         } else {
             self.gba.run_frame();
@@ -2765,7 +2597,6 @@ impl eframe::App for AuroraApp {
         // Contexto GL do backend glow (pra subir o framebuffer e desenhar com
         // shader). `None` em backends sem glow — aí caímos na textura egui.
         let gl = frame.gl().cloned();
-
         // Bombeia o gamepad (mantém `is_pressed` atualizado) e, se estamos
         // remapeando um botão, captura a próxima tecla/botão pressionado. Enquanto
         // `configuring`, não repassamos input ao jogo nem disparamos hotkeys (pra
@@ -2828,7 +2659,11 @@ impl eframe::App for AuroraApp {
                 self.refresh_texture();
             }
             ctx.request_repaint();
-        } else if self.running && self.view == View::Game && !self.settings_open {
+        } else if self.running
+            && self.view == View::Game
+            && !self.settings_open
+            && !self.states_open
+        {
             if configuring {
                 // Remapeando controles: roda no ritmo normal, sem repassar input.
                 self.run_paced();
@@ -2886,6 +2721,7 @@ impl eframe::App for AuroraApp {
 
         // Janelas (quando abertas).
         self.settings_window(ctx, gl.as_ref());
+        self.states_window(ctx);
         if self.rebinding.is_some() {
             // Repinta sem parar pra capturar a tecla/botão do remapeamento.
             ctx.request_repaint();
