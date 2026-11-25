@@ -18,13 +18,19 @@ use eframe::egui;
 mod audio;
 mod discovery;
 mod help_video;
+mod i18n;
+mod icons;
 mod library;
 mod link;
 mod pacing;
 mod png;
 mod shader;
+mod theme;
+mod widgets;
 
 use auroragba_scale::{Scaler, Upscale};
+use i18n::{t, LangPref};
+use icons::Icon;
 use shader::{Active, MultipassKind, ShaderKind, ShaderRenderer};
 
 /// Quantidade de slots de save state em disco (`<rom>.ss1`..`.ss8`).
@@ -158,53 +164,6 @@ impl InputConfig {
 enum Rebind {
     Key(usize),
     Pad(usize),
-}
-
-/// Tamanho da capa (caixa) no grid da biblioteca.
-const COVER_W: f32 = 110.0;
-const COVER_H: f32 = 124.0;
-
-/// Desenha uma célula da biblioteca (capa + título) e devolve `true` se clicada.
-fn cover_cell(ui: &mut egui::Ui, entry: &library::RomEntry) -> bool {
-    let mut clicked = false;
-    ui.allocate_ui(egui::vec2(COVER_W + 8.0, COVER_H + 30.0), |ui| {
-        ui.vertical_centered(|ui| {
-            let resp = match &entry.cover {
-                Some(tex) => {
-                    // Preserva o aspecto da capa dentro da caixa (box art é
-                    // retrato, screenshot é paisagem).
-                    let ts = tex.size_vec2();
-                    let scale = (COVER_W / ts.x).min(COVER_H / ts.y);
-                    let img = egui::Image::new(tex).fit_to_exact_size(ts * scale);
-                    ui.add(egui::ImageButton::new(img))
-                }
-                None => {
-                    // Placeholder enquanto o worker gera a capa.
-                    let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(COVER_W, COVER_H), egui::Sense::click());
-                    ui.painter()
-                        .rect_filled(rect, 4.0, egui::Color32::from_gray(40));
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "…",
-                        egui::FontId::proportional(24.0),
-                        egui::Color32::GRAY,
-                    );
-                    resp
-                }
-            };
-            clicked = resp.clicked();
-            let label = if entry.title.is_empty() {
-                entry.code.as_str()
-            } else {
-                entry.title.as_str()
-            };
-            ui.label(egui::RichText::new(label).small())
-                .on_hover_text(entry.path.display().to_string());
-        });
-    });
-    clicked
 }
 
 /// Nome estável de um botão de gamepad (pra UI e persistência).
@@ -407,7 +366,8 @@ fn main() -> eframe::Result<()> {
         .expect("ícone embutido deve ser um PNG válido");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([960.0, 720.0])
+            .with_inner_size([1200.0, 780.0])
+            .with_min_inner_size([720.0, 520.0])
             .with_title("AuroraGBA")
             .with_app_id("auroragba")
             .with_icon(icon),
@@ -544,8 +504,18 @@ struct AuroraApp {
     rebinding: Option<Rebind>,
     /// Biblioteca de ROMs (varredura de pasta + capas).
     library: library::Library,
-    /// Janela da biblioteca aberta?
-    show_library: bool,
+    /// Tela no centro da janela: o jogo ou a biblioteca.
+    view: View,
+    /// ROM selecionada na biblioteca (índice em `library.entries`).
+    lib_selected: Option<usize>,
+    /// Quando cada ROM foi aberta pela última vez (segundos Unix), por caminho.
+    last_played: HashMap<PathBuf, u64>,
+    /// Acelerar ligado pelo botão da barra (o Espaço acelera enquanto segurado).
+    ff_toggle: bool,
+    /// Painel do Shiny Hunter aberto (pelo botão da barra).
+    show_hunter: bool,
+    /// Idioma escolhido (automático = o do sistema).
+    lang_pref: LangPref,
     /// Sessão de lockstep do link cable (Fase Link, etapa b). `None` = solo.
     link: Option<link::LinkSession>,
     /// Conexão de link em andamento numa thread de fundo. `None` = sem tentativa.
@@ -564,6 +534,68 @@ struct AuroraApp {
     pacer: pacing::Pacer,
     /// Trace de pacing (`AURORAGBA_PACING_TRACE`). `None` = desligado.
     pacing_trace: Option<pacing::PacingTrace>,
+}
+
+/// O que ocupa o centro da janela.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Game,
+    Library,
+}
+
+/// Botão clicado na barra de ferramentas (aplicado depois de desenhar).
+enum ToolAction {
+    Library,
+    BackToGame,
+    OpenFile,
+    TogglePause,
+    Reset,
+    ToggleFast,
+    Screenshot,
+    Link,
+    Hunter,
+}
+
+/// Agora em segundos Unix.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// "Jogado há 3 h", "Jogado ontem"… a partir do instante em que foi aberto.
+fn played_label(when: Option<u64>) -> String {
+    let Some(when) = when else {
+        return t("Nunca jogado", "Never played", "Nunca jugado").to_string();
+    };
+    let secs = unix_now().saturating_sub(when);
+    let (h, d) = (secs / 3600, secs / 86_400);
+    match (h, d) {
+        (0, _) => t(
+            "Jogado agora há pouco",
+            "Played just now",
+            "Jugado hace un momento",
+        )
+        .to_string(),
+        (h, 0) => format!("{} {h} h", t("Jogado há", "Played", "Jugado hace")) + t("", " ago", ""),
+        (_, 1) => t("Jogado ontem", "Played yesterday", "Jugado ayer").to_string(),
+        (_, d) if d < 14 => format!(
+            "{} {d} {}",
+            t("Há", "", "Hace"),
+            t("dias", "days ago", "días")
+        )
+        .trim()
+        .to_string(),
+        (_, d) => format!(
+            "{} {} {}",
+            t("Há", "", "Hace"),
+            d / 7,
+            t("semanas", "weeks ago", "semanas")
+        )
+        .trim()
+        .to_string(),
+    }
 }
 
 /// Ação escolhida no painel de Link, aplicada depois de fechar a UI (pra não
@@ -600,6 +632,26 @@ impl AuroraApp {
         link_session: Option<link::LinkSession>,
         rom_arg: Option<PathBuf>,
     ) -> Self {
+        theme::install(&cc.egui_ctx);
+        let lang_pref = cc
+            .storage
+            .and_then(|s| s.get_string("language"))
+            .map(|k| LangPref::from_key(&k))
+            .unwrap_or_default();
+        lang_pref.apply();
+        let last_played: HashMap<PathBuf, u64> = cc
+            .storage
+            .and_then(|s| s.get_string("last_played"))
+            .map(|text| {
+                text.lines()
+                    .filter_map(|l| {
+                        let (secs, path) = l.split_once('\t')?;
+                        Some((PathBuf::from(path), secs.parse().ok()?))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let image = egui::ColorImage::new([SCREEN_WIDTH, SCREEN_HEIGHT], egui::Color32::BLACK);
         let texture =
             cc.egui_ctx
@@ -718,7 +770,12 @@ impl AuroraApp {
             help_player: None,
             rebinding: None,
             library: library::Library::new(cache_dir),
-            show_library: false,
+            view: View::Library,
+            lib_selected: None,
+            last_played,
+            ff_toggle: false,
+            show_hunter: false,
+            lang_pref,
             link: link_session,
             link_pending: None,
             show_link: false,
@@ -737,19 +794,30 @@ impl AuroraApp {
         };
 
         if let Some(s) = &app.link {
-            let papel = if s.id == 0 { "parent" } else { "child" };
-            app.set_status(format!("🔗 link ativo — somos o {papel}"));
+            app.set_status(if s.id == 0 {
+                t(
+                    "Link ativo: você hospeda",
+                    "Link active: you are the host",
+                    "Link activo: eres el anfitrión",
+                )
+            } else {
+                t(
+                    "Link ativo: você é o convidado",
+                    "Link active: you are the guest",
+                    "Link activo: eres el invitado",
+                )
+            });
         }
 
-        // Restaura a última pasta de ROMs e já mostra a biblioteca no boot.
+        // Restaura a última pasta de ROMs: sem ROM na linha de comando, a janela
+        // abre na biblioteca.
         if let Some(dir) = saved_lib_dir {
             if dir.is_dir() {
                 app.library.scan(dir);
-                app.show_library = true;
+                app.select_last_played();
             }
         }
         if let Some(path) = rom_arg {
-            app.show_library = false;
             app.open_rom(path);
         }
         app
@@ -769,6 +837,10 @@ impl AuroraApp {
                 self.gba.cpu.regs.set_pc(0x0800_0000);
                 self.rom_path = Some(path.clone());
                 self.running = true;
+                self.view = View::Game;
+                self.ff_toggle = false;
+                self.show_hunter = false;
+                self.last_played.insert(path.clone(), unix_now());
                 self.load_save(&path);
 
                 // A sessão de link sobrevive à troca de ROM — o Gba é novo,
@@ -794,7 +866,14 @@ impl AuroraApp {
                     None => log::info!("Jogo não reconhecido pelo Shiny Hunter (code={code})"),
                 }
             }
-            Err(e) => log::error!("Falha ao abrir ROM: {e}"),
+            Err(e) => {
+                log::error!("Falha ao abrir ROM: {e}");
+                self.set_status(format!(
+                    "{} {}: {e}",
+                    t("Não deu pra abrir", "Couldn't open", "No se pudo abrir"),
+                    file_label(&path)
+                ));
+            }
         }
     }
 
@@ -854,16 +933,39 @@ impl AuroraApp {
     /// Salva o estado atual no slot informado (arquivo `.ssN` ao lado da ROM).
     fn save_state_slot(&mut self, slot: usize) {
         if self.rom_path.is_none() {
-            self.set_status("Carregue uma ROM antes de salvar estado");
+            self.set_status(t(
+                "Carregue uma ROM antes de salvar estado",
+                "Load a ROM before saving a state",
+                "Carga una ROM antes de guardar un estado",
+            ));
             return;
         }
         let blob = self.gba.save_state();
         match self.slot_path(slot) {
             Some(path) => match std::fs::write(&path, &blob) {
-                Ok(()) => self.set_status(format!("Estado salvo no slot {}", slot + 1)),
-                Err(e) => self.set_status(format!("Falha ao salvar estado: {e}")),
+                Ok(()) => self.set_status(format!(
+                    "{} {}",
+                    t(
+                        "Estado salvo no slot",
+                        "State saved to slot",
+                        "Estado guardado en la ranura"
+                    ),
+                    slot + 1
+                )),
+                Err(e) => self.set_status(format!(
+                    "{}: {e}",
+                    t(
+                        "Falha ao salvar estado",
+                        "Failed to save state",
+                        "Error al guardar el estado"
+                    )
+                )),
             },
-            None => self.set_status("Carregue uma ROM antes de salvar estado"),
+            None => self.set_status(t(
+                "Carregue uma ROM antes de salvar estado",
+                "Load a ROM before saving a state",
+                "Carga una ROM antes de guardar un estado",
+            )),
         }
     }
 
@@ -871,7 +973,11 @@ impl AuroraApp {
     /// de outro jogo (o cabeçalho do save state guarda o game code).
     fn load_state_slot(&mut self, slot: usize) {
         let Some(path) = self.slot_path(slot) else {
-            self.set_status("Carregue uma ROM antes de carregar estado");
+            self.set_status(t(
+                "Carregue uma ROM antes de carregar estado",
+                "Load a ROM before loading a state",
+                "Carga una ROM antes de cargar un estado",
+            ));
             return;
         };
         match std::fs::read(&path) {
@@ -881,11 +987,31 @@ impl AuroraApp {
                     // antigo não bate mais com esta linha do tempo.
                     self.rewind.clear();
                     self.running = true;
-                    self.set_status(format!("Estado carregado do slot {}", slot + 1));
+                    self.set_status(format!(
+                        "{} {}",
+                        t(
+                            "Estado carregado do slot",
+                            "State loaded from slot",
+                            "Estado cargado de la ranura"
+                        ),
+                        slot + 1
+                    ));
                 }
-                Err(e) => self.set_status(format!("Falha ao carregar estado: {e}")),
+                Err(e) => self.set_status(format!(
+                    "{}: {e}",
+                    t(
+                        "Falha ao carregar estado",
+                        "Failed to load state",
+                        "Error al cargar el estado"
+                    )
+                )),
             },
-            Err(_) => self.set_status(format!("Slot {} vazio", slot + 1)),
+            Err(_) => self.set_status(format!(
+                "{} {} {}",
+                t("Slot", "Slot", "Ranura"),
+                slot + 1,
+                t("vazio", "is empty", "vacía")
+            )),
         }
     }
 
@@ -916,7 +1042,11 @@ impl AuroraApp {
     /// Salva um PNG do framebuffer atual em `<dir-da-rom>/screenshots/`.
     fn screenshot(&mut self) {
         let Some(rom) = self.rom_path.clone() else {
-            self.set_status("Carregue uma ROM antes de capturar a tela");
+            self.set_status(t(
+                "Carregue uma ROM antes de capturar a tela",
+                "Load a ROM before taking a screenshot",
+                "Carga una ROM antes de capturar la pantalla",
+            ));
             return;
         };
         let dir = rom
@@ -924,7 +1054,14 @@ impl AuroraApp {
             .unwrap_or_else(|| std::path::Path::new("."))
             .join("screenshots");
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.set_status(format!("Falha ao criar pasta de screenshots: {e}"));
+            self.set_status(format!(
+                "{}: {e}",
+                t(
+                    "Falha ao criar a pasta de capturas",
+                    "Failed to create the screenshots folder",
+                    "Error al crear la carpeta de capturas"
+                )
+            ));
             return;
         }
         let stem = rom.file_stem().and_then(|s| s.to_str()).unwrap_or("rom");
@@ -939,8 +1076,23 @@ impl AuroraApp {
             &self.gba.bus.ppu.framebuffer[..],
         );
         match std::fs::write(&path, bytes) {
-            Ok(()) => self.set_status(format!("Screenshot: {}", path.display())),
-            Err(e) => self.set_status(format!("Falha ao salvar screenshot: {e}")),
+            Ok(()) => self.set_status(format!(
+                "{} {}",
+                t(
+                    "Captura salva em",
+                    "Screenshot saved to",
+                    "Captura guardada en"
+                ),
+                path.display()
+            )),
+            Err(e) => self.set_status(format!(
+                "{}: {e}",
+                t(
+                    "Falha ao salvar a captura",
+                    "Failed to save the screenshot",
+                    "Error al guardar la captura"
+                )
+            )),
         }
     }
 
@@ -1468,48 +1620,813 @@ impl AuroraApp {
     }
 
     /// Janela da biblioteca: escolher pasta + grid de capas clicáveis.
-    fn library_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_library;
-        let mut pick = false;
-        let mut launch: Option<PathBuf> = None;
-        egui::Window::new("📚 Biblioteca")
-            .open(&mut open)
-            .default_size([700.0, 480.0])
+    /// Nome do jogo pra mostrar: o do perfil do Shiny Hunter (ex.: "Pokémon
+    /// Emerald") ou o nome do arquivo, sem `_`.
+    fn display_name(path: &std::path::Path, code: &str) -> String {
+        if let Some(p) = auroragba_shiny::games::detect(code) {
+            return p.name.to_string();
+        }
+        path.file_stem()
+            .map(|s| s.to_string_lossy().replace('_', " ").trim().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Nome do jogo carregado (barra de ferramentas).
+    fn game_title(&self) -> String {
+        match &self.rom_path {
+            Some(p) => Self::display_name(p, &self.gba.bus.cartridge.game_code()),
+            None => String::new(),
+        }
+    }
+
+    /// Pré-seleciona na biblioteca o último jogo aberto (ou o primeiro).
+    fn select_last_played(&mut self) {
+        let last = self
+            .library
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| self.last_played.get(&e.path).map(|&t| (i, t)))
+            .max_by_key(|&(_, t)| t)
+            .map(|(i, _)| i);
+        self.lib_selected = last.or(if self.library.entries.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
+    }
+
+    /// Abre o seletor de arquivo e carrega a ROM escolhida.
+    fn pick_rom_file(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("GBA ROM", &["gba"])
+            .pick_file()
+        {
+            self.open_rom(path);
+        }
+    }
+
+    /// Escolhe a pasta da biblioteca e a varre.
+    fn pick_library_dir(&mut self) {
+        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+            self.library.scan(dir);
+            self.select_last_played();
+        }
+    }
+
+    /// Barra de ferramentas do topo: nome do jogo à esquerda, ações à direita
+    /// (só os ícones quando a janela é estreita demais pros nomes).
+    fn toolbar(&mut self, ctx: &egui::Context) {
+        let mut action: Option<ToolAction> = None;
+        let has_rom = self.rom_path.is_some();
+        let hunting = self.hunting;
+        let frame = egui::Frame::none()
+            .fill(theme::SURFACE)
+            .inner_margin(egui::Margin {
+                left: 16.0,
+                right: 12.0,
+                top: 0.0,
+                bottom: 0.0,
+            });
+        egui::TopBottomPanel::top("toolbar")
+            .exact_height(56.0)
+            .frame(frame)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("📁 Escolher pasta…").clicked() {
-                        pick = true;
-                    }
-                    match &self.library.dir {
-                        Some(d) => ui.label(d.display().to_string()),
-                        None => ui.label("Nenhuma pasta selecionada."),
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let lib_label = t("Biblioteca", "Library", "Biblioteca");
+                    let pause_label = if self.running {
+                        t("Pausar", "Pause", "Pausar")
+                    } else {
+                        t("Continuar", "Resume", "Continuar")
                     };
-                });
-                ui.separator();
-                if self.library.entries.is_empty() {
-                    ui.label("Nenhuma ROM .gba aqui. Escolha uma pasta com seus jogos.");
-                    return;
-                }
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for entry in &self.library.entries {
-                            if cover_cell(ui, entry) {
-                                launch = Some(entry.path.clone());
+                    let reset_label = t("Reiniciar", "Restart", "Reiniciar");
+                    let ff_label = if self.ff_toggle {
+                        t("Acelerado", "Fast", "Acelerado")
+                    } else {
+                        t("Acelerar", "Fast forward", "Acelerar")
+                    };
+                    let states_label = t("Estados", "States", "Estados");
+                    let shot_label = t("Captura", "Screenshot", "Captura");
+                    let link_label = t("Link", "Link", "Link");
+                    let hunter_label = "Shiny Hunter";
+                    let cfg_label = t("Configurações", "Settings", "Ajustes");
+                    let open_label = t("Abrir arquivo…", "Open file…", "Abrir archivo…");
+                    let back_label = t("Voltar ao jogo", "Back to game", "Volver al juego");
+
+                    let labels: Vec<&str> = match self.view {
+                        View::Game => {
+                            let mut v = vec![
+                                lib_label,
+                                pause_label,
+                                reset_label,
+                                ff_label,
+                                states_label,
+                                shot_label,
+                                link_label,
+                                cfg_label,
+                            ];
+                            if self.profile.is_some() {
+                                v.push(hunter_label);
+                            }
+                            v
+                        }
+                        View::Library => vec![cfg_label, open_label, back_label],
+                    };
+                    let needed: f32 = labels
+                        .iter()
+                        .map(|l| widgets::tool_button_width(ui, l) + 4.0)
+                        .sum::<f32>()
+                        + 3.0 * 13.0;
+                    // O título precisa de espaço pro nome do jogo (até ~220 px).
+                    let title_w = ui
+                        .painter()
+                        .layout_no_wrap(self.game_title(), theme::bold(15.0), theme::TEXT)
+                        .size()
+                        .x
+                        .clamp(100.0, 220.0);
+                    let compact = needed > ui.available_width() - title_w - 16.0;
+
+                    match self.view {
+                        View::Game => {
+                            let cfg = widgets::tool_button(
+                                ui,
+                                Icon::Gear,
+                                cfg_label,
+                                false,
+                                true,
+                                compact,
+                            );
+                            self.settings_popup(ui, &cfg);
+                            if self.profile.is_some()
+                                && widgets::tool_button(
+                                    ui,
+                                    Icon::Sparkle,
+                                    hunter_label,
+                                    self.show_hunter || hunting,
+                                    !hunting,
+                                    compact,
+                                )
+                                .clicked()
+                            {
+                                action = Some(ToolAction::Hunter);
+                            }
+                            if widgets::tool_button(
+                                ui,
+                                Icon::Link,
+                                link_label,
+                                self.show_link,
+                                !hunting,
+                                compact,
+                            )
+                            .clicked()
+                            {
+                                action = Some(ToolAction::Link);
+                            }
+                            widgets::tool_separator(ui);
+                            if widgets::tool_button(
+                                ui,
+                                Icon::Camera,
+                                shot_label,
+                                false,
+                                has_rom,
+                                compact,
+                            )
+                            .clicked()
+                            {
+                                action = Some(ToolAction::Screenshot);
+                            }
+                            let states = widgets::tool_button(
+                                ui,
+                                Icon::States,
+                                states_label,
+                                false,
+                                has_rom && !hunting,
+                                compact,
+                            );
+                            self.states_popup(ui, &states);
+                            widgets::tool_separator(ui);
+                            if widgets::tool_button(
+                                ui,
+                                Icon::FastForward,
+                                ff_label,
+                                self.ff_toggle,
+                                has_rom && !hunting,
+                                compact,
+                            )
+                            .clicked()
+                            {
+                                action = Some(ToolAction::ToggleFast);
+                            }
+                            if widgets::tool_button(
+                                ui,
+                                Icon::Reset,
+                                reset_label,
+                                false,
+                                has_rom && !hunting,
+                                compact,
+                            )
+                            .clicked()
+                            {
+                                action = Some(ToolAction::Reset);
+                            }
+                            let pause_icon = if self.running {
+                                Icon::Pause
+                            } else {
+                                Icon::Play
+                            };
+                            if widgets::tool_button(
+                                ui,
+                                pause_icon,
+                                pause_label,
+                                false,
+                                has_rom && !hunting,
+                                compact,
+                            )
+                            .clicked()
+                            {
+                                action = Some(ToolAction::TogglePause);
+                            }
+                            widgets::tool_separator(ui);
+                            if widgets::tool_button(
+                                ui,
+                                Icon::Library,
+                                lib_label,
+                                false,
+                                !hunting,
+                                compact,
+                            )
+                            .clicked()
+                            {
+                                action = Some(ToolAction::Library);
                             }
                         }
-                    });
+                        View::Library => {
+                            let cfg = widgets::tool_button(
+                                ui,
+                                Icon::Gear,
+                                cfg_label,
+                                false,
+                                true,
+                                compact,
+                            );
+                            self.settings_popup(ui, &cfg);
+                            if widgets::tool_button(
+                                ui,
+                                Icon::File,
+                                open_label,
+                                false,
+                                true,
+                                compact,
+                            )
+                            .clicked()
+                            {
+                                action = Some(ToolAction::OpenFile);
+                            }
+                            if has_rom
+                                && widgets::tool_button(
+                                    ui,
+                                    Icon::Back,
+                                    back_label,
+                                    false,
+                                    true,
+                                    compact,
+                                )
+                                .clicked()
+                            {
+                                action = Some(ToolAction::BackToGame);
+                            }
+                        }
+                    }
+
+                    // O que sobrou à esquerda: "AURORAGBA" + nome do jogo/tela.
+                    let title = match self.view {
+                        View::Library => lib_label.to_string(),
+                        View::Game if has_rom => self.game_title(),
+                        View::Game => String::new(),
+                    };
+                    let w = ui.available_width();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(w, 40.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.add_space(3.0);
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.add(egui::Label::new(
+                                egui::RichText::new("AURORAGBA")
+                                    .font(theme::semibold(11.0))
+                                    .color(theme::MUTED),
+                            ));
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(title)
+                                        .font(theme::bold(15.0))
+                                        .color(theme::TEXT),
+                                )
+                                .truncate(true),
+                            );
+                        },
+                    );
                 });
             });
-        self.show_library = open;
-        if pick {
-            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                self.library.scan(dir);
+
+        match action {
+            Some(ToolAction::Library) => {
+                self.view = View::Library;
+                self.select_last_played();
             }
+            Some(ToolAction::BackToGame) => self.view = View::Game,
+            Some(ToolAction::OpenFile) => self.pick_rom_file(),
+            Some(ToolAction::TogglePause) => {
+                self.running = !self.running;
+                self.pacer.reset();
+            }
+            Some(ToolAction::Reset) => {
+                if let Some(p) = self.rom_path.clone() {
+                    self.open_rom(p);
+                }
+            }
+            Some(ToolAction::ToggleFast) => {
+                self.ff_toggle = !self.ff_toggle;
+                self.pacer.reset();
+            }
+            Some(ToolAction::Screenshot) => self.screenshot(),
+            Some(ToolAction::Link) => self.show_link = !self.show_link,
+            Some(ToolAction::Hunter) => self.show_hunter = !self.show_hunter,
+            None => {}
+        }
+    }
+
+    /// Menu provisório das Configurações (vira a tela de Configurações no
+    /// próximo passo do redesenho).
+    fn settings_popup(&mut self, ui: &mut egui::Ui, button: &egui::Response) {
+        let id = ui.make_persistent_id("settings_popup");
+        if button.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(id));
+        }
+        egui::popup::popup_below_widget(ui, id, button, |ui| {
+            ui.set_min_width(200.0);
+            if ui
+                .button(t("Controles…", "Controls…", "Controles…"))
+                .clicked()
+            {
+                self.show_input_config = true;
+                ui.memory_mut(|m| m.close_popup());
+            }
+            if ui.button(t("Vídeo…", "Video…", "Vídeo…")).clicked() {
+                self.show_video = true;
+                ui.memory_mut(|m| m.close_popup());
+            }
+            ui.separator();
+            ui.label(egui::RichText::new(t("Idioma", "Language", "Idioma")).color(theme::MUTED));
+            let options = [
+                (LangPref::Auto, t("Automático", "Automatic", "Automático")),
+                (LangPref::Fixed(i18n::Lang::Pt), "Português"),
+                (LangPref::Fixed(i18n::Lang::En), "English"),
+                (LangPref::Fixed(i18n::Lang::Es), "Español"),
+            ];
+            for (pref, name) in options {
+                if ui.radio(self.lang_pref == pref, name).clicked() {
+                    self.lang_pref = pref;
+                    pref.apply();
+                }
+            }
+        });
+    }
+
+    /// Menu provisório dos estados (vira a grade com miniaturas no próximo
+    /// passo do redesenho).
+    fn states_popup(&mut self, ui: &mut egui::Ui, button: &egui::Response) {
+        let id = ui.make_persistent_id("states_popup");
+        if button.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(id));
+        }
+        egui::popup::popup_below_widget(ui, id, button, |ui| {
+            ui.set_min_width(260.0);
+            ui.label(t(
+                "Slot (● = ocupado):",
+                "Slot (● = used):",
+                "Ranura (● = ocupada):",
+            ));
+            ui.horizontal(|ui| {
+                for slot in 0..SAVE_SLOTS {
+                    let label = if self.slot_exists(slot) {
+                        format!("●{}", slot + 1)
+                    } else {
+                        format!("{}", slot + 1)
+                    };
+                    ui.selectable_value(&mut self.current_slot, slot, label);
+                }
+            });
+            ui.separator();
+            let n = self.current_slot + 1;
+            if ui
+                .button(format!(
+                    "{} {n} (F5)",
+                    t("Salvar no slot", "Save to slot", "Guardar en la ranura")
+                ))
+                .clicked()
+            {
+                self.save_state_slot(self.current_slot);
+                ui.memory_mut(|m| m.close_popup());
+            }
+            let can_load = self.slot_exists(self.current_slot);
+            if ui
+                .add_enabled(
+                    can_load,
+                    egui::Button::new(format!(
+                        "{} {n} (F9)",
+                        t("Carregar do slot", "Load from slot", "Cargar de la ranura")
+                    )),
+                )
+                .clicked()
+            {
+                self.load_state_slot(self.current_slot);
+                ui.memory_mut(|m| m.close_popup());
+            }
+        });
+    }
+
+    /// Rodapé: velocidade, mensagem efêmera e lembrete dos atalhos.
+    fn status_bar(&mut self, ctx: &egui::Context) {
+        let frame = egui::Frame::none()
+            .fill(theme::STATUS_BG)
+            .inner_margin(egui::Margin::symmetric(16.0, 0.0));
+        egui::TopBottomPanel::bottom("status")
+            .exact_height(28.0)
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 14.0;
+                    let small = |s: String, c: egui::Color32| {
+                        egui::Label::new(egui::RichText::new(s).font(theme::regular(12.0)).color(c))
+                    };
+                    let in_game = self.rom_path.is_some() && self.view == View::Game;
+                    if in_game {
+                        let speed = if self.running || self.hunting {
+                            let txt = format!("{:.0} fps · {:.1}×", self.fps, self.fps / 59.7275);
+                            if i18n::get() == i18n::Lang::En {
+                                txt
+                            } else {
+                                txt.replace('.', ",")
+                            }
+                        } else {
+                            t("Pausado", "Paused", "En pausa").to_string()
+                        };
+                        ui.add(small(speed, theme::TEXT_SOFT));
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 14.0), egui::Sense::hover());
+                        ui.painter().rect_filled(r, 0.0, egui::Color32::from_rgb(0x33, 0x33, 0x3D));
+                    }
+                    let msg = match &self.status {
+                        Some((msg, at)) if at.elapsed() < STATUS_DURATION => Some(msg.clone()),
+                        _ if self.hunting => Some(
+                            t(
+                                "Caça em andamento: pare pelo painel para voltar a jogar",
+                                "Hunt in progress: stop it from the panel to play again",
+                                "Caza en curso: detenla desde el panel para volver a jugar",
+                            )
+                            .to_string(),
+                        ),
+                        _ => None,
+                    };
+                    if let Some(msg) = msg {
+                        ui.add(small(msg, theme::MUTED).truncate(true));
+                    }
+                    if in_game && !self.hunting {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add(small(
+                                t(
+                                    "F5 salvar · F9 carregar · F12 captura · Espaço acelerar · R voltar no tempo",
+                                    "F5 save · F9 load · F12 screenshot · Space fast forward · R rewind",
+                                    "F5 guardar · F9 cargar · F12 captura · Espacio acelerar · R retroceder",
+                                )
+                                .to_string(),
+                                theme::FAINT,
+                            ));
+                        });
+                    }
+                });
+            });
+    }
+
+    /// A tela do jogo, em escala inteira, centralizada na área livre.
+    fn game_view(&mut self, ui: &mut egui::Ui, gl: Option<&Arc<eframe::glow::Context>>) {
+        let k = self.scale.round().max(1.0);
+        let size = egui::vec2(SCREEN_WIDTH as f32 * k, SCREEN_HEIGHT as f32 * k);
+        let area = ui.max_rect();
+        // Alinha ao pixel físico pra a escala inteira não borrar.
+        let ppp = ui.ctx().pixels_per_point();
+        let min = ((area.center() - size / 2.0) * ppp).round() / ppp;
+        let rect = egui::Rect::from_min_size(min, size);
+        if self.rom_path.is_none() {
+            return;
+        }
+        match (&self.shader, gl) {
+            (Some(renderer), Some(gl)) => {
+                // Filtro de upscale (HQx) antes do shader: amplia o framebuffer
+                // na CPU; sem filtro, `scale` só copia.
+                let (iw, ih) = self.scaler.scale(
+                    self.upscale,
+                    &self.gba.bus.ppu.framebuffer[..],
+                    SCREEN_WIDTH,
+                    SCREEN_HEIGHT,
+                    &mut self.scaled,
+                );
+                renderer
+                    .lock()
+                    .unwrap()
+                    .upload(gl, iw as i32, ih as i32, &self.scaled);
+                let cb = shader::callback(
+                    rect,
+                    renderer.clone(),
+                    self.shader_active(),
+                    [iw as f32, ih as f32],
+                    self.frame_count as i32,
+                );
+                ui.painter().add(cb);
+            }
+            _ => {
+                // Fallback: textura egui (backend sem glow).
+                egui::Image::new(&self.texture).paint_at(ui, rect);
+            }
+        }
+
+        if !self.running && !self.hunting {
+            let msg = t(
+                "Pausado · clique em Continuar para voltar",
+                "Paused · click Resume to continue",
+                "En pausa · haz clic en Continuar para seguir",
+            );
+            let galley =
+                ui.painter()
+                    .layout_no_wrap(msg.to_owned(), theme::semibold(13.0), theme::TEXT);
+            let pill = egui::Rect::from_center_size(
+                egui::pos2(area.center().x, area.top() + 20.0 + 17.0),
+                galley.size() + egui::vec2(32.0, 16.0),
+            );
+            let p = ui.painter();
+            p.rect_filled(pill, 999.0, theme::SURFACE2);
+            p.rect_stroke(pill, 999.0, egui::Stroke::new(1.0_f32, theme::BORDER));
+            p.galley(pill.center() - galley.size() / 2.0, galley, theme::TEXT);
+        }
+    }
+
+    /// Biblioteca em tela cheia: a tela inicial sem ROM (e o botão Biblioteca).
+    fn library_page(&mut self, ui: &mut egui::Ui) {
+        let mut launch: Option<PathBuf> = None;
+        let mut pick_dir = false;
+        let mut open_file = false;
+
+        let Some(dir) = self.library.dir.clone() else {
+            ui.vertical_centered(|ui| {
+                ui.add_space((ui.available_height() * 0.28).max(24.0));
+                ui.label(
+                    egui::RichText::new(t(
+                        "Escolha a pasta dos seus jogos",
+                        "Choose your games folder",
+                        "Elige la carpeta de tus juegos",
+                    ))
+                    .font(theme::bold(26.0))
+                    .color(theme::TEXT),
+                );
+                ui.label(
+                    egui::RichText::new(t(
+                        "O AuroraGBA mostra as ROMs .gba da pasta com capa. Os saves ficam ao lado de cada jogo.",
+                        "AuroraGBA lists the folder's .gba ROMs with covers. Saves stay next to each game.",
+                        "AuroraGBA muestra las ROM .gba de la carpeta con portada. Las partidas quedan junto a cada juego.",
+                    ))
+                    .color(theme::MUTED),
+                );
+                ui.add_space(16.0);
+                if widgets::accent_button(ui, t("Escolher pasta…", "Choose folder…", "Elegir carpeta…"), 44.0)
+                    .clicked()
+                {
+                    pick_dir = true;
+                }
+                ui.add_space(4.0);
+                if widgets::outline_button(ui, t("Abrir um arquivo…", "Open a single file…", "Abrir un archivo…"), 40.0)
+                    .clicked()
+                {
+                    open_file = true;
+                }
+            });
+            if pick_dir {
+                self.pick_library_dir();
+            }
+            if open_file {
+                self.pick_rom_file();
+            }
+            return;
+        };
+
+        // Cabeçalho: título, pasta e "Trocar pasta…".
+        let count = self.library.entries.len();
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.label(
+                    egui::RichText::new(t("Seus jogos", "Your games", "Tus juegos"))
+                        .font(theme::bold(26.0))
+                        .color(theme::TEXT),
+                );
+                let mut shown = dir.display().to_string();
+                if let Some(home) =
+                    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+                {
+                    let home = PathBuf::from(home).display().to_string();
+                    if !home.is_empty() && shown.starts_with(&home) {
+                        shown = format!("~{}", &shown[home.len()..]);
+                    }
+                }
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{shown} · {count} ROMs · {}",
+                        t(
+                            "clique duas vezes para jogar",
+                            "double-click to play",
+                            "doble clic para jugar"
+                        )
+                    ))
+                    .font(theme::regular(13.0))
+                    .color(theme::MUTED),
+                );
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
+                let link = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(t(
+                            "Trocar pasta…",
+                            "Change folder…",
+                            "Cambiar carpeta…",
+                        ))
+                        .font(theme::semibold(13.0))
+                        .color(theme::ACCENT),
+                    )
+                    .sense(egui::Sense::click()),
+                );
+                if link
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    pick_dir = true;
+                }
+            });
+        });
+        ui.add_space(12.0);
+
+        if count == 0 {
+            ui.label(
+                egui::RichText::new(t(
+                    "Nenhuma ROM .gba nesta pasta.",
+                    "No .gba ROMs in this folder.",
+                    "No hay ROM .gba en esta carpeta.",
+                ))
+                .color(theme::MUTED),
+            );
+        } else {
+            let gap = 20.0;
+            let avail = ui.available_width();
+            let cols = (((avail + gap) / (170.0 + gap)).floor() as usize).clamp(2, 8);
+            let card_w = (avail - gap * (cols as f32 - 1.0)) / cols as f32;
+            let cover = card_w - 20.0;
+            let card_h = 10.0 + cover + 10.0 + 38.0 + 18.0 + 30.0;
+            let scroll_h = (ui.available_height() - 64.0).max(120.0);
+            egui::ScrollArea::vertical()
+                .max_height(scroll_h)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+                    for row in 0..count.div_ceil(cols) {
+                        ui.horizontal(|ui| {
+                            for i in row * cols..((row + 1) * cols).min(count) {
+                                let (clicked, double) = self.library_card(ui, i, card_w, card_h);
+                                if clicked {
+                                    self.lib_selected = Some(i);
+                                }
+                                if double {
+                                    launch = Some(self.library.entries[i].path.clone());
+                                }
+                            }
+                        });
+                    }
+                });
+
+            // "Jogar <jogo>" embaixo, centralizado.
+            if let Some(i) = self.lib_selected.filter(|&i| i < count) {
+                let e = &self.library.entries[i];
+                let name = Self::display_name(&e.path, &e.code);
+                let path = e.path.clone();
+                ui.add_space(12.0);
+                ui.vertical_centered(|ui| {
+                    let label = format!("{} {name}", t("Jogar", "Play", "Jugar"));
+                    if widgets::accent_button(ui, &label, 44.0).clicked() {
+                        launch = Some(path);
+                    }
+                });
+            }
+        }
+
+        if pick_dir {
+            self.pick_library_dir();
         }
         if let Some(path) = launch {
             self.open_rom(path);
-            self.show_library = false;
         }
+    }
+
+    /// Um cartão da biblioteca: capa, nome, quando jogou e o selo do Shiny
+    /// Hunter (jogo suportado). Devolve (clicado, clique duplo).
+    fn library_card(&self, ui: &mut egui::Ui, i: usize, w: f32, h: f32) -> (bool, bool) {
+        let entry = &self.library.entries[i];
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+        let resp = resp.on_hover_text(entry.path.display().to_string());
+        if ui.is_rect_visible(rect) {
+            let selected = self.lib_selected == Some(i);
+            let p = ui.painter();
+            p.rect_filled(rect, 14.0, theme::SURFACE);
+            if selected {
+                p.rect_stroke(
+                    rect.shrink(1.0),
+                    14.0,
+                    egui::Stroke::new(2.0_f32, theme::ACCENT),
+                );
+            } else if resp.hovered() {
+                p.rect_stroke(
+                    rect.shrink(0.5),
+                    14.0,
+                    egui::Stroke::new(1.0_f32, theme::BORDER),
+                );
+            }
+            let cover_rect = egui::Rect::from_min_size(
+                rect.min + egui::vec2(10.0, 10.0),
+                egui::vec2(w - 20.0, w - 20.0),
+            );
+            p.rect_filled(cover_rect, 10.0, egui::Color32::from_rgb(0x1E, 0x2A, 0x36));
+            match &entry.cover {
+                Some(tex) => {
+                    // Preserva o aspecto (box art é retrato, screenshot é paisagem).
+                    let ts = tex.size_vec2();
+                    let s = (cover_rect.width() / ts.x).min(cover_rect.height() / ts.y);
+                    let r = egui::Rect::from_center_size(cover_rect.center(), ts * s);
+                    egui::Image::new(tex).rounding(8.0).paint_at(ui, r);
+                }
+                None => {
+                    p.text(
+                        cover_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "…",
+                        theme::regular(22.0),
+                        theme::FAINT,
+                    );
+                }
+            }
+            let x = rect.left() + 12.0;
+            let mut y = cover_rect.bottom() + 10.0;
+            let name = Self::display_name(&entry.path, &entry.code);
+            let mut job =
+                egui::text::LayoutJob::simple(name, theme::semibold(14.0), theme::TEXT, w - 24.0);
+            job.wrap.max_rows = 2;
+            let galley = ui.fonts(|f| f.layout_job(job));
+            let name_h = galley.size().y;
+            ui.painter().galley(egui::pos2(x, y), galley, theme::TEXT);
+            y += name_h.max(19.0) + 4.0;
+            let p = ui.painter();
+            p.text(
+                egui::pos2(x, y),
+                egui::Align2::LEFT_TOP,
+                played_label(self.last_played.get(&entry.path).copied()),
+                theme::regular(12.0),
+                theme::MUTED,
+            );
+            if auroragba_shiny::games::detect(&entry.code).is_some() {
+                let label = "Shiny Hunter";
+                let galley =
+                    p.layout_no_wrap(label.to_owned(), theme::semibold(11.0), theme::ACCENT);
+                let badge = egui::Rect::from_min_size(
+                    egui::pos2(x - 2.0, rect.bottom() - 32.0),
+                    egui::vec2(galley.size().x + 32.0, 22.0),
+                );
+                p.rect_filled(badge, 999.0, theme::ACCENT_SOFT);
+                icons::paint(
+                    p,
+                    egui::Rect::from_center_size(
+                        egui::pos2(badge.left() + 15.0, badge.center().y),
+                        egui::vec2(11.0, 11.0),
+                    ),
+                    Icon::Sparkle,
+                    theme::ACCENT,
+                );
+                p.galley(
+                    egui::pos2(
+                        badge.left() + 24.0,
+                        badge.center().y - galley.size().y / 2.0,
+                    ),
+                    galley,
+                    theme::ACCENT,
+                );
+            }
+        }
+        (resp.clicked(), resp.double_clicked())
     }
 
     /// Verifica se a thread de conexão de link terminou. Em sucesso, instala a
@@ -1957,7 +2874,7 @@ impl eframe::App for AuroraApp {
         // Recebe as capas que o worker da biblioteca terminou; se ainda há
         // pendentes e a janela está aberta, segue repintando pra elas aparecerem.
         let covers_pending = self.library.poll(ctx);
-        if covers_pending && self.show_library {
+        if covers_pending && self.view == View::Library {
             ctx.request_repaint();
         }
         if let Some(rebind) = self.rebinding {
@@ -2001,7 +2918,7 @@ impl eframe::App for AuroraApp {
                 self.refresh_texture();
             }
             ctx.request_repaint();
-        } else if self.running {
+        } else if self.running && self.view == View::Game {
             if configuring {
                 // Remapeando controles: roda no ritmo normal, sem repassar input.
                 self.run_paced();
@@ -2012,7 +2929,7 @@ impl eframe::App for AuroraApp {
                     self.rewind_step();
                     self.gba.bus.apu.buffer.clear();
                     self.pacer.reset();
-                } else if fast_forward {
+                } else if fast_forward || self.ff_toggle {
                     // Acelera: roda frames (sem o gate de áudio) até gastar o
                     // orçamento de tempo desta janela de update. Assim o ganho não
                     // fica preso em "N frames fixos × refresh" — usa toda a CPU.
@@ -2066,225 +2983,53 @@ impl eframe::App for AuroraApp {
             self.flush_save();
         }
 
-        egui::TopBottomPanel::top("menu").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("Arquivo", |ui| {
-                    if ui.button("Abrir ROM…").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("GBA ROM", &["gba"])
-                            .pick_file()
-                        {
-                            self.open_rom(path);
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button("📚 Biblioteca de ROMs").clicked() {
-                        self.show_library = !self.show_library;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Sair").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-                ui.menu_button("Emulação", |ui| {
-                    if ui
-                        .button(if self.running { "Pausar" } else { "Retomar" })
-                        .clicked()
-                    {
-                        self.running = !self.running;
-                        ui.close_menu();
-                    }
-                    if ui.button("Reset").clicked() {
-                        if let Some(p) = self.rom_path.clone() {
-                            self.open_rom(p);
-                        }
-                        ui.close_menu();
-                    }
-                });
-                ui.menu_button("Estado", |ui| {
-                    ui.label("Slot (● = ocupado):");
-                    ui.horizontal(|ui| {
-                        for slot in 0..SAVE_SLOTS {
-                            let label = if self.slot_exists(slot) {
-                                format!("●{}", slot + 1)
-                            } else {
-                                format!("{}", slot + 1)
-                            };
-                            ui.selectable_value(&mut self.current_slot, slot, label);
-                        }
-                    });
-                    ui.separator();
-                    if ui
-                        .button(format!("💾 Salvar no slot {} (F5)", self.current_slot + 1))
-                        .clicked()
-                    {
-                        self.save_state_slot(self.current_slot);
-                        ui.close_menu();
-                    }
-                    let can_load = self.slot_exists(self.current_slot);
-                    if ui
-                        .add_enabled(
-                            can_load,
-                            egui::Button::new(format!(
-                                "📂 Carregar slot {} (F9)",
-                                self.current_slot + 1
-                            )),
-                        )
-                        .clicked()
-                    {
-                        self.load_state_slot(self.current_slot);
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("📷 Captura de tela (F12)").clicked() {
-                        self.screenshot();
-                        ui.close_menu();
-                    }
-                });
-                ui.menu_button("Configurações", |ui| {
-                    if ui.button("🎮 Controles…").clicked() {
-                        self.show_input_config = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("🎨 Vídeo…").clicked() {
-                        self.show_video = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("🔗 Link…").clicked() {
-                        self.show_link = true;
-                        ui.close_menu();
-                    }
-                });
-                ui.separator();
-                ui.label(format!(
-                    "Escala: {:.0}× · Shader: {}",
-                    self.scale,
-                    self.shader_kind.label()
-                ));
-            });
-        });
+        self.toolbar(ctx);
+        self.status_bar(ctx);
 
-        // Rodapé: mensagem efêmera de status (esq.) + lembrete dos atalhos (dir.).
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                // Velocidade emulada: fps e múltiplo do tempo real (GBA ≈ 59,73 fps).
-                if self.running {
-                    let speed = self.fps / 59.7275;
-                    ui.label(
-                        egui::RichText::new(format!("{:.0} fps · {:.1}×", self.fps, speed))
-                            .monospace()
-                            .small(),
-                    );
-                    ui.separator();
-                }
-                if let Some((msg, t)) = &self.status {
-                    if t.elapsed() < STATUS_DURATION {
-                        ui.label(msg);
-                    }
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(
-                            "F5 salvar · F9 carregar · F12 screenshot · Espaço FF · R rewind",
-                        )
-                        .weak()
-                        .small(),
-                    );
-                });
-            });
-        });
-
-        // Janela de configuração de controles (quando aberta).
+        // Janelas (quando abertas).
         if self.show_input_config {
             self.input_config_window(ctx);
+            // Repinta sem parar pra capturar a tecla/botão do remapeamento.
+            ctx.request_repaint();
         }
-        // Ajuda "Como usar" do Shiny Hunter (quando aberta).
         if self.show_hunt_help {
             self.hunt_help_window(ctx);
         }
-        // Janela de vídeo (escala + shader). Passa o contexto GL pra compilar
-        // shaders importados na hora do clique em "Importar".
+        // Vídeo recebe o contexto GL pra compilar shaders importados na hora.
         if self.show_video {
             self.video_window(ctx, gl.as_ref());
         }
-        // Janela da biblioteca de ROMs (quando aberta).
-        if self.show_library {
-            self.library_window(ctx);
-        }
-        // Janela do Link (quando aberta). Repinta de tempos em tempos pra a
-        // lista de parceiros na LAN refletir os anúncios que vão chegando.
+        // Repinta de tempos em tempos pra lista de parceiros na LAN refletir os
+        // anúncios que vão chegando.
         if self.show_link {
             self.link_window(ctx);
             ctx.request_repaint_after(Duration::from_millis(500));
         }
-        // Mantém repintando enquanto remapeia (pra capturar a tecla/botão sem
-        // depender de outro evento) ou se a janela está aberta.
-        if self.show_input_config {
-            ctx.request_repaint();
-        }
 
-        // Painel do Shiny Hunter (só quando o jogo é reconhecido).
-        if self.profile.is_some() {
+        // Painel do Shiny Hunter: abre pelo botão da barra e fica visível durante
+        // a caça (é por ele que ela para).
+        if self.profile.is_some() && self.view == View::Game && (self.show_hunter || self.hunting) {
             egui::SidePanel::right("shiny_panel")
                 .min_width(230.0)
                 .show(ctx, |ui| self.shiny_panel(ui));
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                // Escala inteira: aspecto 3:2 travado por construção (240k × 160k).
-                let k = self.scale.round().max(1.0);
-                let size = egui::vec2(SCREEN_WIDTH as f32 * k, SCREEN_HEIGHT as f32 * k);
-
-                match (&self.shader, gl.as_ref()) {
-                    (Some(renderer), Some(gl)) => {
-                        // Filtro de upscale (HQx) antes do shader: amplia o
-                        // framebuffer na CPU; sem filtro, `scale` só copia.
-                        let (iw, ih) = self.scaler.scale(
-                            self.upscale,
-                            &self.gba.bus.ppu.framebuffer[..],
-                            SCREEN_WIDTH,
-                            SCREEN_HEIGHT,
-                            &mut self.scaled,
-                        );
-                        // Caminho glow: sobe o buffer (já ampliado) e desenha com
-                        // o shader por cima.
-                        renderer
-                            .lock()
-                            .unwrap()
-                            .upload(gl, iw as i32, ih as i32, &self.scaled);
-                        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                        let cb = shader::callback(
-                            rect,
-                            renderer.clone(),
-                            self.shader_active(),
-                            [iw as f32, ih as f32],
-                            self.frame_count as i32,
-                        );
-                        ui.painter().add(cb);
-                    }
-                    _ => {
-                        // Fallback: textura egui (backend sem glow).
-                        ui.add(egui::Image::new(&self.texture).fit_to_exact_size(size));
-                    }
-                }
-
-                if let Some(p) = &self.rom_path {
-                    ui.label(format!("ROM: {}", p.display()));
-                } else {
-                    ui.label("Nenhuma ROM carregada. Arquivo → Abrir ROM…");
-                }
-
-                let s = &self.gba.cpu.stats;
-                ui.label(format!(
-                    "ARM: {} · THUMB: {} · unimpl: {}",
-                    s.arm_executed,
-                    s.thumb_executed,
-                    s.arm_unimplemented + s.thumb_unimplemented
-                ));
-            });
-        });
+        match self.view {
+            View::Library => {
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::none()
+                            .fill(theme::BG)
+                            .inner_margin(egui::Margin::symmetric(40.0, 28.0)),
+                    )
+                    .show(ctx, |ui| self.library_page(ui));
+            }
+            View::Game => {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none().fill(theme::GAME_BG))
+                    .show(ctx, |ui| self.game_view(ui, gl.as_ref()));
+            }
+        }
     }
 
     /// Persiste a configuração de controles no storage do eframe (chamado
@@ -2306,6 +3051,13 @@ impl eframe::App for AuroraApp {
         if let Some(dir) = &self.library.dir {
             storage.set_string("library_dir", dir.display().to_string());
         }
+        storage.set_string("language", self.lang_pref.key().to_string());
+        let played: String = self
+            .last_played
+            .iter()
+            .map(|(path, secs)| format!("{secs}\t{}\n", path.display()))
+            .collect();
+        storage.set_string("last_played", played);
     }
 }
 

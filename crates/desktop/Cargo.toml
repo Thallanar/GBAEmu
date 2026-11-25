@@ -37,3 +37,4 @@ image.workspace = true
 rfd = "0.14"
 mdns-sd = "0.20.0"
 openh264 = "0.9.10"
+sys-locale = "0.3.2"
