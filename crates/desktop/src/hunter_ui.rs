@@ -169,7 +169,11 @@ impl AuroraApp {
 
         if self.hunting {
             let target = profile.targets[self.selected_target.unwrap_or(0)];
-            self.panel_hunting(&mut body, &target, target.display_name(lang));
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(&mut body, |ui| {
+                    self.panel_hunting(ui, &target, target.display_name(lang))
+                });
             let w = foot.available_width();
             if widgets::wide_button(
                 &mut foot,
@@ -185,7 +189,9 @@ impl AuroraApp {
             }
         } else if self.hunter.found {
             let target = profile.targets[self.selected_target.unwrap_or(0)];
-            self.panel_found(&mut body, &target);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(&mut body, |ui| self.panel_found(ui, &target));
             let w = (foot.available_width() - 10.0) / 2.0;
             foot.spacing_mut().item_spacing.x = 10.0;
             if widgets::wide_button(
@@ -211,7 +217,11 @@ impl AuroraApp {
             }
         } else if let Some(i) = self.selected_target {
             let target = profile.targets[i];
-            self.panel_ready(&mut body, profile.name, &target, target.display_name(lang));
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(&mut body, |ui| {
+                    self.panel_ready(ui, profile.name, &target, target.display_name(lang))
+                });
             foot.spacing_mut().item_spacing.x = 10.0;
             let help = help_button(&mut foot);
             if help.clicked() {
@@ -412,6 +422,7 @@ impl AuroraApp {
             });
         });
         self.sprite_pair(ui, target.species, 96.0);
+        self.speed_card(ui);
         if let Some(w) = &self.hunt_warning {
             egui::Frame::none()
                 .fill(WARN.gamma_multiply(0.12))
@@ -535,54 +546,7 @@ impl AuroraApp {
             }
         });
 
-        widgets::card(ui, |ui| {
-            let mut idx = HUNT_SPEEDS
-                .iter()
-                .position(|&s| s >= self.hunt_speed)
-                .unwrap_or(HUNT_SPEEDS.len() - 1);
-            let names = [
-                "1× (normal)",
-                "4×",
-                "16×",
-                "64×",
-                t("Máxima", "Maximum", "Máxima"),
-            ];
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(t("Velocidade da caça", "Hunt speed", "Velocidad de caza"))
-                        .font(theme::semibold(13.0))
-                        .color(theme::TEXT),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(names[idx])
-                            .font(theme::semibold(13.0))
-                            .color(theme::ACCENT),
-                    );
-                });
-            });
-            ui.spacing_mut().slider_width = ui.available_width();
-            if ui
-                .add(egui::Slider::new(&mut idx, 0..=HUNT_SPEEDS.len() - 1).show_value(false))
-                .changed()
-            {
-                self.hunt_speed = HUNT_SPEEDS[idx];
-            }
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(t("Dá pra acompanhar", "Watchable", "Se puede seguir"))
-                        .font(theme::regular(11.0))
-                        .color(theme::FAINT),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(t("Máxima", "Maximum", "Máxima"))
-                            .font(theme::regular(11.0))
-                            .color(theme::FAINT),
-                    );
-                });
-            });
-        });
+        self.speed_card(ui);
 
         let arrow = if self.hunt_details { "▾" } else { "▸" };
         if widgets::text_link(
@@ -646,6 +610,59 @@ impl AuroraApp {
             self.cursor_finder_ui(ui);
             self.battle_state_finder_ui(ui);
         }
+    }
+
+    /// Velocidade da caça (frames de emulação por atualização de tela). Fica
+    /// em "Pronto" e durante a caça; começa em 1×, como antes do redesenho.
+    fn speed_card(&mut self, ui: &mut egui::Ui) {
+        widgets::card(ui, |ui| {
+            let mut idx = HUNT_SPEEDS
+                .iter()
+                .position(|&s| s >= self.hunt_speed)
+                .unwrap_or(HUNT_SPEEDS.len() - 1);
+            let names = [
+                "1× (normal)",
+                "4×",
+                "16×",
+                "64×",
+                t("Máxima", "Maximum", "Máxima"),
+            ];
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(t("Velocidade da caça", "Hunt speed", "Velocidad de caza"))
+                        .font(theme::semibold(13.0))
+                        .color(theme::TEXT),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(names[idx])
+                            .font(theme::semibold(13.0))
+                            .color(theme::ACCENT),
+                    );
+                });
+            });
+            ui.spacing_mut().slider_width = ui.available_width();
+            if ui
+                .add(egui::Slider::new(&mut idx, 0..=HUNT_SPEEDS.len() - 1).show_value(false))
+                .changed()
+            {
+                self.hunt_speed = HUNT_SPEEDS[idx];
+            }
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(t("Dá pra acompanhar", "Watchable", "Se puede seguir"))
+                        .font(theme::regular(11.0))
+                        .color(theme::FAINT),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(t("Máxima", "Maximum", "Máxima"))
+                            .font(theme::regular(11.0))
+                            .color(theme::FAINT),
+                    );
+                });
+            });
+        });
     }
 
     fn panel_found(&mut self, ui: &mut egui::Ui, target: &TargetDef) {
@@ -780,10 +797,49 @@ impl AuroraApp {
         } else {
             target.display_name(i18n::get())
         };
-        let w = 640.0_f32.min(area.width() - 32.0);
+        let w = 640.0_f32.min(area.width() - 24.0);
+        let title = format!(
+            "{name} shiny {} {}",
+            t("na tentativa", "on attempt", "en el intento"),
+            fmt_int(self.hunter.attempts)
+        );
+        let sub = t(
+            "A caça parou e o jogo é seu. Salve antes de qualquer coisa.",
+            "The hunt stopped and the game is yours. Save before anything else.",
+            "La caza se detuvo y el juego es tuyo. Guarda antes que nada.",
+        );
+        // Botões à direita; se o texto ficaria espremido, eles descem pra uma
+        // linha própria (janela estreita / painel do Hunter aberto).
+        let save_label = t("Salvar estado", "Save state", "Guardar estado");
+        let buttons_w = 36.0
+            + 8.0
+            + ui.painter()
+                .layout_no_wrap(save_label.to_owned(), theme::bold(14.0), theme::TEXT)
+                .size()
+                .x
+            + 32.0;
+        let text_left = 50.0;
+        let side_w = w - text_left - 12.0 - buttons_w - 12.0;
+        let stacked = side_w < 220.0;
+        let text_w = if stacked {
+            w - text_left - 12.0
+        } else {
+            side_w
+        };
+        let wrap = |text: String, font: egui::FontId, color: Color32| {
+            ui.fonts(|f| f.layout(text, font, color, text_w))
+        };
+        let title_g = wrap(title, theme::bold(15.0), theme::TEXT);
+        let sub_g = wrap(sub.to_owned(), theme::regular(13.0), theme::MUTED);
+        let text_h = title_g.size().y + 3.0 + sub_g.size().y;
+        let h = if stacked {
+            12.0 + text_h + 10.0 + 40.0 + 12.0
+        } else {
+            (12.0 + text_h + 12.0).max(64.0)
+        };
         let rect = Rect::from_min_size(
-            pos2(area.center().x - w / 2.0, area.top() + 16.0),
-            vec2(w, 64.0),
+            pos2(area.center().x - w / 2.0, area.top() + 12.0),
+            vec2(w, h),
         );
         let p = ui.painter();
         p.rect_filled(rect, 14.0, theme::SURFACE);
@@ -792,38 +848,33 @@ impl AuroraApp {
             14.0,
             Stroke::new(1.0_f32, theme::ACCENT.gamma_multiply(0.6)),
         );
+        let text_top = if stacked {
+            rect.top() + 12.0
+        } else {
+            rect.center().y - text_h / 2.0
+        };
         icons::paint(
             p,
-            Rect::from_center_size(pos2(rect.left() + 28.0, rect.center().y), vec2(22.0, 22.0)),
+            Rect::from_center_size(pos2(rect.left() + 28.0, text_top + 10.0), vec2(22.0, 22.0)),
             Icon::Sparkle,
             theme::ACCENT,
         );
-        p.text(
-            pos2(rect.left() + 50.0, rect.center().y - 10.0),
-            Align2::LEFT_CENTER,
-            format!(
-                "{name} shiny {} {}",
-                t("na tentativa", "on attempt", "en el intento"),
-                fmt_int(self.hunter.attempts)
-            ),
-            theme::bold(15.0),
+        let sub_top = text_top + title_g.size().y + 3.0;
+        p.galley(
+            pos2(rect.left() + text_left, text_top),
+            title_g,
             theme::TEXT,
         );
-        p.text(
-            pos2(rect.left() + 50.0, rect.center().y + 11.0),
-            Align2::LEFT_CENTER,
-            t(
-                "A caça parou e o jogo é seu. Salve antes de qualquer coisa.",
-                "The hunt stopped and the game is yours. Save before anything else.",
-                "La caza se detuvo y el juego es tuyo. Guarda antes que nada.",
-            ),
-            theme::regular(13.0),
-            theme::MUTED,
-        );
-        let mut buttons = ui.child_ui(
-            rect.shrink2(vec2(12.0, 12.0)),
-            egui::Layout::right_to_left(egui::Align::Center),
-        );
+        p.galley(pos2(rect.left() + text_left, sub_top), sub_g, theme::MUTED);
+        let row = if stacked {
+            Rect::from_min_max(
+                pos2(rect.left() + 12.0, rect.bottom() - 12.0 - 40.0),
+                rect.right_bottom() - vec2(12.0, 12.0),
+            )
+        } else {
+            rect.shrink2(vec2(12.0, 12.0))
+        };
+        let mut buttons = ui.child_ui(row, egui::Layout::right_to_left(egui::Align::Center));
         let (close, resp) = buttons.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
         if resp.hovered() {
             buttons
@@ -842,13 +893,7 @@ impl AuroraApp {
         {
             self.shiny_banner = false;
         }
-        if widgets::accent_button(
-            &mut buttons,
-            t("Salvar estado", "Save state", "Guardar estado"),
-            40.0,
-        )
-        .clicked()
-        {
+        if widgets::accent_button(&mut buttons, save_label, 40.0).clicked() {
             self.open_states_to_save();
         }
     }
