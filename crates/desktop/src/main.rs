@@ -783,7 +783,7 @@ impl AuroraApp {
             selected_target: None,
             hunting: false,
             hunter: Hunter::new(),
-            hunt_speed: *hunter_ui::HUNT_SPEEDS.last().unwrap(),
+            hunt_speed: hunter_ui::HUNT_SPEEDS[0],
             audio: audio::AudioOut::new(),
             gfx: None,
             sprite_cache: HashMap::new(),
@@ -1333,12 +1333,26 @@ impl AuroraApp {
         let target = &profile.targets[index];
         // `hunt_speed` frames por update (1 = tempo real, assistível). Timeout de
         // 1 min de tempo emulado por tentativa antes de resetar por segurança.
-        let batch = self.hunt_speed.max(1);
-        let result = self
-            .hunter
-            .tick(&mut self.gba, profile, target, batch, 60 * 60);
-        // Descarta o áudio gerado durante a caça (não toca; evita crescer o buffer).
-        self.gba.bus.apu.buffer.clear();
+        // Roda em lotes pequenos e para ao gastar o orçamento de tempo da
+        // atualização de tela: nas velocidades altas, rodar tudo de uma vez
+        // congelava a janela (segundos por quadro) e parecia um crash.
+        let start = Instant::now();
+        let mut left = self.hunt_speed.max(1);
+        let mut result = CheckResult::NotReady;
+        while left > 0 {
+            let chunk = left.min(4);
+            result = self
+                .hunter
+                .tick(&mut self.gba, profile, target, chunk, 60 * 60);
+            // Descarta o áudio gerado durante a caça (não toca; evita crescer o buffer).
+            self.gba.bus.apu.buffer.clear();
+            left -= chunk;
+            if matches!(result, CheckResult::Shiny | CheckResult::PartyFull)
+                || start.elapsed() >= FAST_FORWARD_BUDGET
+            {
+                break;
+            }
+        }
         if result == CheckResult::PartyFull {
             // Presente com o time cheio: ele iria pro PC (invisível pra caça) e o
             // A-mash seguiria até a tela de apelido. Para e explica.
@@ -1913,14 +1927,17 @@ impl AuroraApp {
     /// A tela do jogo, em escala inteira, centralizada na área livre.
     fn game_view(&mut self, ui: &mut egui::Ui, gl: Option<&Arc<eframe::glow::Context>>) {
         let area = ui.max_rect();
-        // "Ajustar" (escala 0): a maior escala inteira que cabe na área livre.
+        // A maior escala inteira que cabe na área livre: é o "Ajustar" (escala
+        // 0) e também o teto da escala fixa, pra a tela nunca passar da área
+        // (com o painel do Hunter aberto numa janela estreita, invadia o painel).
+        let fit = (area.width() / SCREEN_WIDTH as f32)
+            .min(area.height() / SCREEN_HEIGHT as f32)
+            .floor()
+            .max(1.0);
         let k = if self.scale < 1.0 {
-            (area.width() / SCREEN_WIDTH as f32)
-                .min(area.height() / SCREEN_HEIGHT as f32)
-                .floor()
-                .max(1.0)
+            fit
         } else {
-            self.scale.round()
+            self.scale.round().min(fit)
         };
         let size = egui::vec2(SCREEN_WIDTH as f32 * k, SCREEN_HEIGHT as f32 * k);
         // Alinha ao pixel físico pra a escala inteira não borrar.
@@ -2096,11 +2113,18 @@ impl AuroraApp {
         } else {
             let gap = 20.0;
             let avail = ui.available_width();
-            let cols = (((avail + gap) / (170.0 + gap)).floor() as usize).clamp(2, 8);
+            let scroll_h = (ui.available_height() - 64.0).max(120.0);
+            // Cartões de ~170 px, mas nunca mais altos que a área visível: em
+            // janela baixa entram mais colunas (cartões menores) pra uma fileira
+            // caber inteira.
+            let chrome_h = 10.0 + 10.0 + 38.0 + 18.0 + 30.0;
+            let max_cover = (scroll_h - chrome_h).max(60.0);
+            let by_width = ((avail + gap) / (170.0 + gap)).floor() as usize;
+            let by_height = ((avail + gap) / (max_cover + 20.0 + gap)).ceil() as usize;
+            let cols = by_width.max(by_height).clamp(2, 10);
             let card_w = (avail - gap * (cols as f32 - 1.0)) / cols as f32;
             let cover = card_w - 20.0;
-            let card_h = 10.0 + cover + 10.0 + 38.0 + 18.0 + 30.0;
-            let scroll_h = (ui.available_height() - 64.0).max(120.0);
+            let card_h = cover + chrome_h;
             egui::ScrollArea::vertical()
                 .max_height(scroll_h)
                 .auto_shrink([false, false])
@@ -2620,7 +2644,7 @@ impl eframe::App for AuroraApp {
         // a caça (é por ele que ela para).
         if self.profile.is_some() && self.view == View::Game && (self.show_hunter || self.hunting) {
             egui::SidePanel::right("shiny_panel")
-                .exact_width(380.0)
+                .exact_width((ctx.screen_rect().width() * 0.42).clamp(300.0, 380.0))
                 .resizable(false)
                 .frame(egui::Frame::none().fill(theme::BG))
                 .show(ctx, |ui| self.hunter_panel(ui));
