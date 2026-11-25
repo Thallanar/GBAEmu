@@ -31,7 +31,6 @@ const BOXART: &[(&str, &str)] = &[
 /// Uma ROM na biblioteca.
 pub struct RomEntry {
     pub path: PathBuf,
-    pub title: String,
     pub code: String,
     /// Textura da capa (None enquanto o worker ainda não devolveu).
     pub cover: Option<egui::TextureHandle>,
@@ -83,14 +82,13 @@ impl Library {
         collect_gba(&dir, &mut roms, 0);
         roms.sort();
         for path in roms {
-            let (title, code) = read_header(&path);
+            let code = read_code(&path);
             let _ = self.job_tx.send(CoverJob {
                 path: path.clone(),
                 code: code.clone(),
             });
             self.entries.push(RomEntry {
                 path,
-                title,
                 code,
                 cover: None,
             });
@@ -137,23 +135,14 @@ fn collect_gba(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
     }
 }
 
-/// Lê título (0xA0, 12 bytes) e game code (0xAC, 4 bytes) do header, sem carregar
-/// a ROM inteira. Se o título vier vazio, usa o nome do arquivo.
-fn read_header(path: &Path) -> (String, String) {
+/// Lê o game code (0xAC, 4 bytes) do header, sem carregar a ROM inteira.
+/// Vazio se o arquivo for curto demais.
+fn read_code(path: &Path) -> String {
     let mut buf = [0u8; 0xB0];
-    if let Ok(mut f) = File::open(path) {
-        if f.read_exact(&mut buf).is_ok() {
-            let title = ascii_field(&buf[0xA0..0xAC]);
-            let code = ascii_field(&buf[0xAC..0xB0]);
-            let title = if title.is_empty() {
-                file_stem(path)
-            } else {
-                title
-            };
-            return (title, code);
-        }
+    match File::open(path).and_then(|mut f| f.read_exact(&mut buf)) {
+        Ok(()) => ascii_field(&buf[0xAC..0xB0]),
+        Err(_) => String::new(),
     }
-    (file_stem(path), String::new())
 }
 
 /// Texto ASCII imprimível de um campo do header (descarta zeros/lixo no fim).
