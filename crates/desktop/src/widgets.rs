@@ -237,6 +237,7 @@ pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
 /// Título + subtítulo empilhados (subtítulo opcional, cinza).
 pub fn titled(ui: &mut egui::Ui, title: &str, sub: Option<&str>) {
     ui.vertical(|ui| {
+        ui.set_max_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 3.0;
         ui.label(
             egui::RichText::new(title)
@@ -378,6 +379,25 @@ pub fn text_link(ui: &mut egui::Ui, label: &str) -> Response {
     .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Linha "conteúdo à esquerda, controle à direita". O controle reserva o
+/// espaço dele primeiro e o conteúdo quebra linha no que sobra, então nada se
+/// sobrepõe quando a janela é estreita. Alinhados pelo topo (centralizar
+/// esticaria a linha até a altura disponível inteira).
+pub fn split<R>(
+    ui: &mut egui::Ui,
+    left: impl FnOnce(&mut egui::Ui),
+    right: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+        let r = right(ui);
+        ui.add_space(8.0);
+        let w = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(w, 0.0), egui::Layout::top_down(egui::Align::Min), left);
+        r
+    })
+    .inner
+}
+
 /// Linha "título/subtítulo à esquerda, controle à direita" dentro de um cartão.
 pub fn row<R>(
     ui: &mut egui::Ui,
@@ -385,12 +405,7 @@ pub fn row<R>(
     sub: Option<&str>,
     control: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
-    ui.horizontal(|ui| {
-        titled(ui, title, sub);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control)
-            .inner
-    })
-    .inner
+    split(ui, |ui| titled(ui, title, sub), control)
 }
 
 /// Estilo de [`wide_button`].

@@ -63,25 +63,28 @@ impl AuroraApp {
             });
 
             if let Some(id) = connected_id {
-                banner(&mut ui, |ui| {
-                    widgets::titled(
-                        ui,
-                        t("Conectado", "Connected", "Conectado"),
-                        Some(if id == 0 {
-                            t(
+                banner(
+                    &mut ui,
+                    |ui| {
+                        widgets::titled(
+                            ui,
+                            t("Conectado", "Connected", "Conectado"),
+                            Some(if id == 0 {
+                                t(
                                 "Você hospeda (gera o relógio do cabo). Agora é só usar o link dentro do jogo.",
                                 "You're the host (you drive the cable clock). Now just use the link inside the game.",
                                 "Eres el anfitrión (generas el reloj del cable). Ahora solo usa el link dentro del juego.",
                             )
-                        } else {
-                            t(
+                            } else {
+                                t(
                                 "Você é o convidado (o outro lado gera o relógio). Agora é só usar o link dentro do jogo.",
                                 "You're the guest (the other side drives the clock). Now just use the link inside the game.",
                                 "Eres el invitado (el otro lado genera el reloj). Ahora solo usa el link dentro del juego.",
                             )
-                        }),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            }),
+                        );
+                    },
+                    |ui| {
                         if widgets::danger_button(
                             ui,
                             t("Desconectar", "Disconnect", "Desconectar"),
@@ -91,17 +94,19 @@ impl AuroraApp {
                         {
                             action = Some(LinkAction::Disconnect);
                         }
-                    });
-                });
+                    },
+                );
                 return;
             }
 
             if let Some(hosting) = pending_hosting {
-                banner(&mut ui, |ui| {
-                    ui.add(egui::Spinner::new().size(20.0).color(theme::ACCENT));
-                    let sub =
-                        if hosting {
-                            format!(
+                banner(
+                    &mut ui,
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(20.0).color(theme::ACCENT));
+                            let sub = if hosting {
+                                format!(
                             "{} {}. {}",
                             t("Ouvindo na porta", "Listening on port", "Escuchando en el puerto"),
                             self.link_port.trim(),
@@ -111,30 +116,32 @@ impl AuroraApp {
                                 "Apareces en la lista del compañero; si no, pásale tu IP.",
                             )
                         )
-                        } else {
-                            self.link_addr.trim().to_string()
-                        };
-                    widgets::titled(
-                        ui,
-                        if hosting {
-                            t(
-                                "Esperando o parceiro conectar…",
-                                "Waiting for your partner…",
-                                "Esperando al compañero…",
-                            )
-                        } else {
-                            t("Conectando…", "Connecting…", "Conectando…")
-                        },
-                        Some(&sub),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            } else {
+                                self.link_addr.trim().to_string()
+                            };
+                            widgets::titled(
+                                ui,
+                                if hosting {
+                                    t(
+                                        "Esperando o parceiro conectar…",
+                                        "Waiting for your partner…",
+                                        "Esperando al compañero…",
+                                    )
+                                } else {
+                                    t("Conectando…", "Connecting…", "Conectando…")
+                                },
+                                Some(&sub),
+                            );
+                        });
+                    },
+                    |ui| {
                         if widgets::outline_button(ui, t("Cancelar", "Cancel", "Cancelar"), 40.0)
                             .clicked()
                         {
                             action = Some(LinkAction::Cancel);
                         }
-                    });
-                });
+                    },
+                );
                 return;
             }
 
@@ -351,7 +358,7 @@ impl AuroraApp {
 }
 
 /// Faixa azul de status (conectado / conectando), com conteúdo em linha.
-fn banner(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+fn banner(ui: &mut egui::Ui, left: impl FnOnce(&mut egui::Ui), right: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::none()
         .fill(theme::ACCENT_SOFT)
         .stroke(egui::Stroke::new(
@@ -362,6 +369,6 @@ fn banner(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         .inner_margin(egui::Margin::same(16.0))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(add);
+            widgets::split(ui, left, right);
         });
 }
