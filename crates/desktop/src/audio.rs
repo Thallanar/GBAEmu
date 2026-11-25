@@ -23,6 +23,8 @@ pub struct AudioOut {
     speed: f64,
     /// Média móvel da fila (amostras), para o controle de taxa dinâmico.
     fill_avg: f64,
+    /// Volume (0 = mudo, 1 = original), aplicado ao reamostrar.
+    gain: f32,
 }
 
 /// Desvio máximo do controle de taxa dinâmico (±0,5%: inaudível).
@@ -90,6 +92,7 @@ impl AudioOut {
             phase: 0.0,
             speed: 1.0,
             fill_avg: 0.0,
+            gain: 1.0,
         })
     }
 
@@ -107,6 +110,11 @@ impl AudioOut {
     /// sincronizando a emulação ao tempo real.
     pub fn target(&self) -> usize {
         (self.sample_rate as usize) * (self.channels as usize) / 15
+    }
+
+    /// Volume da saída (0 = mudo, 1 = original).
+    pub fn set_gain(&mut self, gain: f32) {
+        self.gain = gain.clamp(0.0, 1.0);
     }
 
     /// Velocidade atual da emulação (ver [`crate::pacing::Pacer::speed`]).
@@ -152,8 +160,8 @@ impl AudioOut {
             } else {
                 (l0, r0)
             };
-            let l = l0 + (l1 - l0) * frac;
-            let r = r0 + (r1 - r0) * frac;
+            let l = (l0 + (l1 - l0) * frac) * self.gain;
+            let r = (r0 + (r1 - r0) * frac) * self.gain;
 
             match self.channels {
                 1 => out.push((l + r) * 0.5),

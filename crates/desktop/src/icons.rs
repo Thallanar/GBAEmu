@@ -16,6 +16,7 @@ pub enum Icon {
     Sparkle,
     Gear,
     File,
+    Close,
     Back,
 }
 
@@ -142,6 +143,10 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 (6.0, 21.0),
             ]);
             line(&[(14.0, 3.0), (14.0, 7.0), (18.0, 7.0)]);
+        }
+        Icon::Close => {
+            line(&[(6.0, 6.0), (18.0, 18.0)]);
+            line(&[(18.0, 6.0), (6.0, 18.0)]);
         }
         Icon::Back => line(&[(15.0, 6.0), (9.0, 12.0), (15.0, 18.0)]),
     }
