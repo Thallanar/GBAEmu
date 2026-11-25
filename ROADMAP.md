@@ -366,9 +366,9 @@ Otimizações estruturais do interpretador, medidas em release headless.
 
 **Requisitos técnicos do Play:**
 
-- [ ] Subir `compileSdk`/`targetSdk` (hoje 34) pro alvo exigido pelo Play pra
-      apps novos (conferir o número atual no Play Console) e testar as mudanças
-      de comportamento do Android novo (tela cheia/edge-to-edge, permissões, SAF).
+- [ ] Subir `compileSdk`/`targetSdk` de 34 pra **36 (Android 16)** — exigido
+      pra apps novos e atualizações desde 31/ago/2026 — e testar as mudanças de
+      comportamento (tela cheia/edge-to-edge obrigatório, permissões, SAF).
 - [ ] Build de release: **AAB** assinado (chave de upload + Play App Signing),
       `.so` das arquiteturas suportadas, R8/minify avaliado, e o release testado
       no celular (não só o debug).
@@ -408,10 +408,16 @@ Otimizações estruturais do interpretador, medidas em release headless.
 
 **Publicação:**
 
-- [ ] Conta de desenvolvedor no Play Console.
-- [ ] **Teste fechado** com testadores (contas pessoais novas precisam de um
-      teste fechado com um mínimo de testadores por ~14 dias antes da produção;
-      conferir a regra atual no Console) e correção do que aparecer.
+- [ ] Conta de desenvolvedor no Play Console — **pessoal ou organização**. Conta
+      pessoal criada depois de 13/nov/2023 precisa de **teste fechado com 12
+      testadores inscritos por 14 dias seguidos** antes da produção (o teste
+      interno não conta). Conta de organização (exige número D-U-N-S, que dá pra
+      tirar com CNPJ/MEI) não tem essa exigência.
+- [ ] Beta antes do Play: APK nos Releases do GitHub pra amigos/comunidade, pra
+      pegar travamentos e bugs sem gastar a janela de 14 dias.
+- [ ] **Teste fechado** (se a conta for pessoal): recrutar os 12+ testadores,
+      pedir que abram e usem o app de verdade durante as 2 semanas, corrigir o
+      que aparecer.
 - [ ] Produção → **versão 1.0.0**.
 - [ ] Desktop: binários Linux/Windows da 1.0.0 nos Releases do GitHub.
 
