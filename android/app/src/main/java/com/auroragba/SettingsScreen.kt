@@ -222,6 +222,12 @@ class SettingsScreen(private val act: Activity, private val host: Host) {
             paint()
             addView(row)
         })
+        body.addView(ui.navRow(null, t(R.string.iface_edit_layout), t(R.string.iface_edit_layout_sub)) {
+            // O editor desenha por cima do jogo: as Configurações saem da frente
+            // e voltam (nesta mesma página) quando ele fecha.
+            dialog.hide()
+            host.openLayoutEditor { dialog.show() }
+        })
         body.addView(ui.sliderRow(t(R.string.pad_size), host.padSize, 70, 130, 5, "%") { host.padSize = it })
         body.addView(ui.sliderRow(t(R.string.pad_opacity), host.padOpacity, 10, 60, 1, "%") { host.padOpacity = it })
         body.addView(ui.switchRow(t(R.string.pad_haptics), t(R.string.pad_haptics_sub), host.padHaptics) {

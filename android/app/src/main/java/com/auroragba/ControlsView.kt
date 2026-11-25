@@ -3,6 +3,7 @@ package com.auroragba
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
@@ -40,6 +41,60 @@ enum class PadModel(val key: String) {
     }
 }
 
+/** Peças do gamepad na tela que o editor de layout move e redimensiona. */
+enum class PadPart(val key: String) {
+    L("l"), MENU("menu"), R("r"), SELECT("sel"), START("start"), DPAD("dpad"), B("b"), A("a");
+
+    companion object {
+        fun from(key: String) = values().firstOrNull { it.key == key }
+    }
+}
+
+/** Ajuste de uma peça: deslocamento (dp) a partir da posição padrão e tamanho (%). */
+class PadTweak(var dx: Float = 0f, var dy: Float = 0f, var size: Int = 100) {
+    val isDefault get() = dx == 0f && dy == 0f && size == 100
+}
+
+/**
+ * Layout personalizado de uma orientação: um [PadTweak] por peça (todos zerados =
+ * o layout padrão). O tamanho por peça multiplica o "Tamanho dos botões" geral.
+ * Persistido como `chave:dx,dy,tamanho;…`, só com as peças alteradas.
+ */
+class PadLayout {
+    private val tweaks = PadPart.values().map { PadTweak() }
+
+    operator fun get(p: PadPart) = tweaks[p.ordinal]
+
+    fun copy() = PadLayout().also { c ->
+        PadPart.values().forEach { p -> c[p].apply { dx = this@PadLayout[p].dx; dy = this@PadLayout[p].dy; size = this@PadLayout[p].size } }
+    }
+
+    fun reset() = tweaks.forEach { it.dx = 0f; it.dy = 0f; it.size = 100 }
+
+    fun encode(): String = PadPart.values().filter { !this[it].isDefault }.joinToString(";") { p ->
+        val t = this[p]
+        "${p.key}:${Math.round(t.dx)},${Math.round(t.dy)},${t.size}"
+    }
+
+    companion object {
+        const val SIZE_MIN = 60
+        const val SIZE_MAX = 160
+
+        fun decode(s: String?): PadLayout {
+            val l = PadLayout()
+            s?.split(';')?.forEach { entry ->
+                val kv = entry.split(':')
+                val part = PadPart.from(kv.getOrNull(0) ?: return@forEach) ?: return@forEach
+                val v = kv.getOrNull(1)?.split(',') ?: return@forEach
+                l[part].dx = v.getOrNull(0)?.toFloatOrNull() ?: 0f
+                l[part].dy = v.getOrNull(1)?.toFloatOrNull() ?: 0f
+                l[part].size = (v.getOrNull(2)?.toIntOrNull() ?: 100).coerceIn(SIZE_MIN, SIZE_MAX)
+            }
+            return l
+        }
+    }
+}
+
 /**
  * Overlay transparente com os controles na tela. A cada toque recomputa a máscara
  * de botões (multi-touch) a partir de TODOS os ponteiros ativos e chama
@@ -60,6 +115,9 @@ class ControlsView(context: Context) : View(context) {
         // passar um pouco da borda sem soltar a direção.
         const val STICK_REACH = 1.6f
         const val STICK_DIRS = Btn.UP or Btn.DOWN or Btn.LEFT or Btn.RIGHT
+        // Ordem de teste do toque no editor: botões por cima do direcional.
+        val PICK_ORDER = listOf(PadPart.A, PadPart.B, PadPart.START, PadPart.SELECT,
+            PadPart.L, PadPart.R, PadPart.MENU, PadPart.DPAD)
     }
 
     var onMask: (Int) -> Unit = {}
@@ -80,6 +138,15 @@ class ControlsView(context: Context) : View(context) {
     /** Escala do tamanho dos controles (0,7–1,3); as distâncias às bordas escalam junto. */
     var scale = 1f
         set(value) { field = value.coerceIn(0.5f, 1.5f); invalidate() }
+
+    /** Ajustes do editor de layout, um por orientação. */
+    var layoutPortrait = PadLayout()
+        set(value) { field = value; invalidate() }
+    var layoutLandscape = PadLayout()
+        set(value) { field = value; invalidate() }
+
+    /** O layout da orientação atual. */
+    val layout: PadLayout get() = if (portrait) layoutPortrait else layoutLandscape
 
     /** Opacidade do preenchimento dos botões (0–1). */
     var opacity = 70 / 255f
@@ -103,6 +170,16 @@ class ControlsView(context: Context) : View(context) {
             invalidate()
         }
 
+    /**
+     * Modo editor de layout: não gera input; tocar escolhe a peça ([selected],
+     * avisada em [onSelect]) e arrastar a move. Desenha a grade e os contornos.
+     */
+    var editing = false
+        set(value) { field = value; invalidate() }
+    var selected = PadPart.A
+        set(value) { field = value; invalidate() }
+    var onSelect: (PadPart) -> Unit = {}
+
     private val d = resources.displayMetrics.density
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(70, 255, 255, 255) }
     private val active = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(140, 120, 200, 255) }
@@ -116,6 +193,20 @@ class ControlsView(context: Context) : View(context) {
         textSize = 16 * d
     }
     private val stickBase = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+    // Editor: grade, contorno tracejado de cada peça e a peça escolhida em destaque.
+    private val grid = Paint().apply { color = Color.argb(13, 255, 255, 255); strokeWidth = 1f }
+    private val outline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = Color.argb(115, 255, 255, 255)
+        strokeWidth = 2 * d
+        pathEffect = DashPathEffect(floatArrayOf(6 * d, 4 * d), 0f)
+    }
+    private val selStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = Pal.ACCENT
+        strokeWidth = 2 * d
+    }
+    private val selFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(77, 120, 200, 255) }
     private val path = Path()
     private val rect = RectF()
 
@@ -124,41 +215,88 @@ class ControlsView(context: Context) : View(context) {
     private var knobX = 0f
     private var knobY = 0f
 
+    // Arrasto no editor: ponteiro, ponto inicial e deslocamento inicial (dp).
+    private var dragId = -1
+    private var dragX0 = 0f
+    private var dragY0 = 0f
+    private var offX0 = 0f
+    private var offY0 = 0f
+
     private val vibrator: Vibrator? = context.getSystemService(Vibrator::class.java)
 
-    // ── Geometria (recalculada conforme o tamanho/orientação/escala) ──────────
-    // As posições são offsets a partir dos cantos, multiplicados pela escala:
-    // botões maiores se afastam juntos da borda, sem se sobrepor.
+    // ── Geometria (recalculada a cada toque/desenho) ──────────────────────────
+    // As posições padrão são offsets a partir dos cantos, multiplicados pela
+    // escala geral: botões maiores se afastam juntos da borda, sem se sobrepor.
+    // Por cima vêm os ajustes do editor (deslocamento + tamanho de cada peça),
+    // com o centro preso dentro da view.
     private val s get() = scale * d
     private val pad get() = 24 * d
-    private val arm get() = (if (portrait) 56 else 64) * s // meio-comprimento do braço do D-pad
-    private val thick get() = (if (portrait) 42 else 46) * s // largura do braço
-    private val abR get() = (if (portrait) 42 else 44) * s
-    private val seSize get() = 30 * s
-    private val seHalfW get() = 44 * s
-    private val lrW get() = (if (portrait) 110 else 120) * s
-    private val lrH get() = 48 * s
+    private val n = PadPart.values().size
+    private val defX = FloatArray(n)
+    private val defY = FloatArray(n)
+    private val cx = FloatArray(n)
+    private val cy = FloatArray(n)
+    private val hw = FloatArray(n) // meia-largura
+    private val hh = FloatArray(n) // meia-altura
+
+    /** Escala de uma peça: geral × tamanho próprio do editor. */
+    private fun ps(p: PadPart) = s * layout[p].size / 100f
+
+    // Direcional (dependem do tamanho da peça).
+    private val kD get() = ps(PadPart.DPAD)
+    private val arm get() = (if (portrait) 56 else 64) * kD // meio-comprimento do braço do D-pad
+    private val thick get() = (if (portrait) 42 else 46) * kD // largura do braço
     private val stickR get() = arm + thick / 2 // raio da base do stick = alcance do D-pad
 
-    private val dpadCx get() = pad + (if (portrait) 62 else 96) * s
-    private val dpadCy get() = height - (if (portrait) 120 * s else pad + 96 * s)
-    // Retrato: A/B encostados mais à direita (folga pro stick, que é mais largo
-    // que o D-pad).
-    private val aCx get() = width - pad - (if (portrait) 48 else 64) * s
-    private val aCy get() = height - (if (portrait) 105 * s else pad + 120 * s)
-    private val bCx get() = width - pad - (if (portrait) 150 else 152) * s
-    private val bCy get() = height - (if (portrait) 105 * s else pad + 64 * s)
-    private val startCx get() = width / 2f + (if (portrait) 70 else 60) * s
-    private val selCx get() = width / 2f - (if (portrait) 70 else 60) * s
-    // Retrato: Select/Start ficam no respiro ENTRE a linha L/R/☰ e a fileira do
-    // direcional/A-B (centro), bem acima do direcional pra não encavalar.
-    private val seCy get() = height - (if (portrait) 250 * s else pad + 24 * d)
+    private fun computeGeometry() {
+        val p = portrait
+        val w = width.toFloat()
+        val h = height.toFloat()
+        fun def(part: PadPart, x: Float, y: Float) {
+            defX[part.ordinal] = x
+            defY[part.ordinal] = y
+        }
+        // Retrato: A/B encostados mais à direita (folga pro stick, que é mais
+        // largo que o D-pad); Select/Start no respiro ENTRE a linha L/R/☰ e a
+        // fileira do direcional/A-B, bem acima do direcional pra não encavalar.
+        def(PadPart.DPAD, pad + (if (p) 62 else 96) * s, h - (if (p) 120 * s else pad + 96 * s))
+        def(PadPart.A, w - pad - (if (p) 48 else 64) * s, h - (if (p) 105 * s else pad + 120 * s))
+        def(PadPart.B, w - pad - (if (p) 150 else 152) * s, h - (if (p) 105 * s else pad + 64 * s))
+        val seCy = h - (if (p) 250 * s else pad + 24 * d)
+        def(PadPart.START, w / 2 + (if (p) 70 else 60) * s, seCy)
+        def(PadPart.SELECT, w / 2 - (if (p) 70 else 60) * s, seCy)
+        // Linha L/R/☰: no topo da view (paisagem) ou no topo do cluster (retrato).
+        val rowCy = (if (p) h - 345 * s else pad) + 24 * s
+        val lrHalf = (if (p) 55 else 60) * s
+        def(PadPart.L, pad + lrHalf, rowCy)
+        def(PadPart.R, w - pad - lrHalf, rowCy)
+        def(PadPart.MENU, w / 2, rowCy)
 
-    // Linha L/R/☰: no topo da view (paisagem) ou no topo do cluster (retrato).
-    private val rowTop get() = if (portrait) height - 345 * s else pad
-    private fun lRect() = RectF(pad, rowTop, pad + lrW, rowTop + lrH)
-    private fun rRect() = RectF(width - pad - lrW, rowTop, width - pad, rowTop + lrH)
-    private fun menuRect() = RectF(width / 2f - 60 * s, rowTop, width / 2f + 60 * s, rowTop + lrH)
+        for (part in PadPart.values()) {
+            val i = part.ordinal
+            val k = ps(part)
+            when (part) {
+                PadPart.DPAD -> { hw[i] = stickR; hh[i] = stickR }
+                PadPart.A, PadPart.B -> { hw[i] = (if (p) 42 else 44) * k; hh[i] = hw[i] }
+                PadPart.SELECT, PadPart.START -> { hw[i] = 44 * k; hh[i] = 30 * k }
+                PadPart.L, PadPart.R -> { hw[i] = (if (p) 55 else 60) * k; hh[i] = 24 * k }
+                PadPart.MENU -> { hw[i] = 60 * k; hh[i] = 24 * k }
+            }
+            val t = layout[part]
+            cx[i] = clampIn(defX[i] + t.dx * d, hw[i], w)
+            cy[i] = clampIn(defY[i] + t.dy * d, hh[i], h)
+        }
+    }
+
+    /** Prende o centro de modo que a peça (meia-medida [half]) caiba em [0, size]. */
+    private fun clampIn(v: Float, half: Float, size: Float) =
+        if (size <= 2 * half) size / 2 else v.coerceIn(half, size - half)
+
+    private fun inBox(p: PadPart, x: Float, y: Float) =
+        kotlin.math.abs(x - cx[p.ordinal]) <= hw[p.ordinal] && kotlin.math.abs(y - cy[p.ordinal]) <= hh[p.ordinal]
+
+    private fun inCircle(p: PadPart, x: Float, y: Float) =
+        dist(x, y, cx[p.ordinal], cy[p.ordinal]) <= hw[p.ordinal]
 
     /** Direções pra um toque em (dx, dy) do centro, com [ratio] de diagonal. */
     private fun directions(dx: Float, dy: Float, ratio: Float): Int {
@@ -178,15 +316,15 @@ class ControlsView(context: Context) : View(context) {
     private fun hit(x: Float, y: Float): Int {
         if (padHidden) return 0
         var m = 0
-        if (dist(x, y, aCx, aCy) <= abR) m = m or Btn.A
-        if (dist(x, y, bCx, bCy) <= abR) m = m or Btn.B
-        if (inPill(x, y, startCx, seCy)) m = m or Btn.START
-        if (inPill(x, y, selCx, seCy)) m = m or Btn.SELECT
-        if (lRect().contains(x, y)) m = m or Btn.L
-        if (rRect().contains(x, y)) m = m or Btn.R
+        if (inCircle(PadPart.A, x, y)) m = m or Btn.A
+        if (inCircle(PadPart.B, x, y)) m = m or Btn.B
+        if (inBox(PadPart.START, x, y)) m = m or Btn.START
+        if (inBox(PadPart.SELECT, x, y)) m = m or Btn.SELECT
+        if (inBox(PadPart.L, x, y)) m = m or Btn.L
+        if (inBox(PadPart.R, x, y)) m = m or Btn.R
         if (m != 0) return m
-        val dx = x - dpadCx
-        val dy = y - dpadCy
+        val dx = x - cx[PadPart.DPAD.ordinal]
+        val dy = y - cy[PadPart.DPAD.ordinal]
         when (model) {
             // D-pad e setas: dentro da caixa do "+", a direção sai do eixo
             // DOMINANTE; a secundária só numa diagonal de verdade — encostar perto
@@ -196,7 +334,7 @@ class ControlsView(context: Context) : View(context) {
             PadModel.CLASSIC, PadModel.ARROWS -> {
                 val reach = arm + thick / 2f
                 if (kotlin.math.abs(dx) <= reach && kotlin.math.abs(dy) <= reach &&
-                    kotlin.math.hypot(dx.toDouble(), dy.toDouble()) >= 24 * s
+                    kotlin.math.hypot(dx.toDouble(), dy.toDouble()) >= 24 * kD
                 ) {
                     m = directions(dx, dy, DIAG_RATIO)
                 }
@@ -214,16 +352,15 @@ class ControlsView(context: Context) : View(context) {
     private fun dist(x: Float, y: Float, cx: Float, cy: Float) =
         kotlin.math.hypot((x - cx).toDouble(), (y - cy).toDouble()).toFloat()
 
-    private fun inPill(x: Float, y: Float, cx: Float, cy: Float) =
-        x >= cx - seHalfW && x <= cx + seHalfW && y >= cy - seSize && y <= cy + seSize
-
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        computeGeometry()
+        if (editing) return editTouch(event)
         // Toque novo no botão de menu (topo/centro) abre o menu e não vira input.
         if (event.actionMasked == MotionEvent.ACTION_DOWN ||
             event.actionMasked == MotionEvent.ACTION_POINTER_DOWN
         ) {
             val i = event.actionIndex
-            if (menuRect().contains(event.getX(i), event.getY(i))) {
+            if (inBox(PadPart.MENU, event.getX(i), event.getY(i))) {
                 onMenu()
                 return true
             }
@@ -238,6 +375,8 @@ class ControlsView(context: Context) : View(context) {
                 var m = 0
                 var kx = 0f
                 var ky = 0f
+                val dcx = cx[PadPart.DPAD.ordinal]
+                val dcy = cy[PadPart.DPAD.ordinal]
                 if (event.actionMasked != MotionEvent.ACTION_UP &&
                     event.actionMasked != MotionEvent.ACTION_CANCEL
                 ) {
@@ -252,10 +391,10 @@ class ControlsView(context: Context) : View(context) {
                         // Pino do stick acompanha o dedo que está nele (até a borda),
                         // a menos que o dedo esteja num botão (os botões têm prioridade).
                         if (model == PadModel.STICK && !padHidden && (h and STICK_DIRS.inv()) == 0 &&
-                            dist(x, y, dpadCx, dpadCy) <= stickR * STICK_REACH
+                            dist(x, y, dcx, dcy) <= stickR * STICK_REACH
                         ) {
-                            kx = x - dpadCx
-                            ky = y - dpadCy
+                            kx = x - dcx
+                            ky = y - dcy
                         }
                     }
                 }
@@ -271,6 +410,44 @@ class ControlsView(context: Context) : View(context) {
                     invalidate()
                 }
             }
+        }
+        return true
+    }
+
+    /** Editor: tocar escolhe a peça; arrastar (com o primeiro dedo) a move. */
+    private fun editTouch(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                val x = event.x
+                val y = event.y
+                val part = PICK_ORDER.firstOrNull { inBox(it, x, y) } ?: return true
+                if (part != selected) {
+                    selected = part
+                    onSelect(part)
+                }
+                dragId = event.getPointerId(0)
+                dragX0 = x
+                dragY0 = y
+                offX0 = layout[part].dx
+                offY0 = layout[part].dy
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val i = event.findPointerIndex(dragId)
+                if (dragId < 0 || i < 0) return true
+                val t = layout[selected]
+                t.dx = offX0 + (event.getX(i) - dragX0) / d
+                t.dy = offY0 + (event.getY(i) - dragY0) / d
+                // Guarda o deslocamento já preso à tela, senão arrastar além da
+                // borda acumularia um excesso invisível.
+                computeGeometry()
+                val k = selected.ordinal
+                t.dx = (cx[k] - defX[k]) / d
+                t.dy = (cy[k] - defY[k]) / d
+                invalidate()
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> dragId = -1
+            MotionEvent.ACTION_POINTER_UP ->
+                if (event.getPointerId(event.actionIndex) == dragId) dragId = -1
         }
         return true
     }
@@ -292,35 +469,64 @@ class ControlsView(context: Context) : View(context) {
     }
 
     override fun onDraw(canvas: Canvas) {
-        text.textSize = 16 * s
-        val o = menuRect()
-        rect(canvas, o.left, o.top, o.right, o.bottom, "☰ MENU", false)
-        if (padHidden) return
+        computeGeometry()
+        if (editing) drawGrid(canvas)
+        rectPart(canvas, PadPart.MENU, "☰ MENU", false)
+        if (padHidden && !editing) return
 
         when (model) {
             PadModel.CLASSIC -> drawCross(canvas)
             PadModel.STICK -> drawStick(canvas)
             PadModel.ARROWS -> drawArrows(canvas)
         }
-        circle(canvas, aCx, aCy, abR, "A", mask and Btn.A != 0)
-        circle(canvas, bCx, bCy, abR, "B", mask and Btn.B != 0)
-        text.textSize = 13 * s
-        pill(canvas, startCx, seCy, "START", mask and Btn.START != 0)
-        pill(canvas, selCx, seCy, "SEL", mask and Btn.SELECT != 0)
-        text.textSize = 16 * s
-        val l = lRect()
-        rect(canvas, l.left, l.top, l.right, l.bottom, "L", mask and Btn.L != 0)
-        val r = rRect()
-        rect(canvas, r.left, r.top, r.right, r.bottom, "R", mask and Btn.R != 0)
+        circle(canvas, PadPart.A, "A", mask and Btn.A != 0)
+        circle(canvas, PadPart.B, "B", mask and Btn.B != 0)
+        pill(canvas, PadPart.START, "START", mask and Btn.START != 0)
+        pill(canvas, PadPart.SELECT, "SEL", mask and Btn.SELECT != 0)
+        rectPart(canvas, PadPart.L, "L", mask and Btn.L != 0)
+        rectPart(canvas, PadPart.R, "R", mask and Btn.R != 0)
+        if (editing) drawOutlines(canvas)
+    }
+
+    private fun drawGrid(canvas: Canvas) {
+        val step = 16 * d
+        var x = step
+        while (x < width) { canvas.drawLine(x, 0f, x, height.toFloat(), grid); x += step }
+        var y = step
+        while (y < height) { canvas.drawLine(0f, y, width.toFloat(), y, grid); y += step }
+    }
+
+    /** Contorno tracejado de cada peça; a escolhida ganha realce e borda cheia. */
+    private fun drawOutlines(canvas: Canvas) {
+        for (p in PadPart.values()) {
+            val i = p.ordinal
+            val on = p == selected
+            when (p) {
+                PadPart.A, PadPart.B -> {
+                    if (on) canvas.drawCircle(cx[i], cy[i], hw[i], selFill)
+                    canvas.drawCircle(cx[i], cy[i], hw[i], if (on) selStroke else outline)
+                }
+                else -> {
+                    rect.set(cx[i] - hw[i], cy[i] - hh[i], cx[i] + hw[i], cy[i] + hh[i])
+                    val r = when (p) {
+                        PadPart.SELECT, PadPart.START -> hh[i]
+                        PadPart.DPAD -> 16 * ps(p)
+                        else -> 10 * ps(p)
+                    }
+                    if (on) canvas.drawRoundRect(rect, r, r, selFill)
+                    canvas.drawRoundRect(rect, r, r, if (on) selStroke else outline)
+                }
+            }
+        }
     }
 
     /** D-pad em cruz, com a(s) direção(ões) ativa(s) realçada(s). */
     private fun drawCross(canvas: Canvas) {
-        val cx = dpadCx
-        val cy = dpadCy
+        val cx = cx[PadPart.DPAD.ordinal]
+        val cy = cy[PadPart.DPAD.ordinal]
         val a = arm
         val t = thick
-        val rr = 10 * s
+        val rr = 10 * kD
         canvas.drawRoundRect(RectF(cx - t / 2, cy - a, cx + t / 2, cy + a), rr, rr, fill)
         canvas.drawRoundRect(RectF(cx - a, cy - t / 2, cx + a, cy + t / 2), rr, rr, fill)
         if (mask and Btn.UP != 0) canvas.drawRoundRect(RectF(cx - t / 2, cy - a, cx + t / 2, cy), rr, rr, active)
@@ -331,35 +537,38 @@ class ControlsView(context: Context) : View(context) {
 
     /** Stick: base em anel, zona morta tracejada e o pino seguindo o dedo. */
     private fun drawStick(canvas: Canvas) {
-        val cx = dpadCx
-        val cy = dpadCy
+        val cx = cx[PadPart.DPAD.ordinal]
+        val cy = cy[PadPart.DPAD.ordinal]
         val r = stickR
+        val k = kD
         stickBase.alpha = (fill.alpha * 0.45f).toInt()
         canvas.drawCircle(cx, cy, r, stickBase)
-        ring.strokeWidth = 2 * s
+        ring.strokeWidth = 2 * k
         ring.alpha = fill.alpha
         canvas.drawCircle(cx, cy, r, ring)
         // Pino: limitado à borda da base.
         var kx = knobX
         var ky = knobY
         val len = kotlin.math.hypot(kx.toDouble(), ky.toDouble()).toFloat()
-        val maxLen = r - 30 * s
+        val maxLen = r - 30 * k
         if (len > maxLen && len > 0f) {
             kx *= maxLen / len
             ky *= maxLen / len
         }
         val dirs = mask and (Btn.UP or Btn.DOWN or Btn.LEFT or Btn.RIGHT)
-        canvas.drawCircle(cx + kx, cy + ky, 30 * s, if (dirs != 0) active else fill)
+        canvas.drawCircle(cx + kx, cy + ky, 30 * k, if (dirs != 0) active else fill)
     }
 
     /** Quatro setas separadas (pentágonos apontando pro centro), com glifo. */
     private fun drawArrows(canvas: Canvas) {
-        val cx = dpadCx
-        val cy = dpadCy
+        val cx = cx[PadPart.DPAD.ordinal]
+        val cy = cy[PadPart.DPAD.ordinal]
         val a = arm
         val t = thick
-        val gap = 8 * s // meia-folga no centro entre as setas
+        val k = kD
+        val gap = 8 * k // meia-folga no centro entre as setas
         val tip = (a - gap) * 0.32f // comprimento da ponta
+        text.textSize = 16 * k
         fun arrow(dir: Int, on: Boolean) {
             path.reset()
             when (dir) {
@@ -387,8 +596,8 @@ class ControlsView(context: Context) : View(context) {
             path.close()
             canvas.drawPath(path, if (on) active else fill)
             // Glifo: triângulo pequeno apontando pra fora, perto da ponta externa.
-            val g = 6 * s
-            val far = a - 14 * s
+            val g = 6 * k
+            val far = a - 14 * k
             path.reset()
             when (dir) {
                 Btn.UP -> { path.moveTo(cx, cy - far - g); path.lineTo(cx + g, cy - far + g * 0.6f); path.lineTo(cx - g, cy - far + g * 0.6f) }
@@ -405,21 +614,27 @@ class ControlsView(context: Context) : View(context) {
         arrow(Btn.RIGHT, mask and Btn.RIGHT != 0)
     }
 
-    private fun circle(canvas: Canvas, cx: Float, cy: Float, r: Float, label: String, on: Boolean) {
-        canvas.drawCircle(cx, cy, r, if (on) active else fill)
-        canvas.drawText(label, cx, cy + text.textSize * 0.37f, text)
+    private fun circle(canvas: Canvas, p: PadPart, label: String, on: Boolean) {
+        val i = p.ordinal
+        text.textSize = 16 * ps(p)
+        canvas.drawCircle(cx[i], cy[i], hw[i], if (on) active else fill)
+        canvas.drawText(label, cx[i], cy[i] + text.textSize * 0.37f, text)
     }
 
-    private fun pill(canvas: Canvas, cx: Float, cy: Float, label: String, on: Boolean) {
-        rect.set(cx - seHalfW, cy - seSize, cx + seHalfW, cy + seSize)
-        canvas.drawRoundRect(rect, seSize, seSize, if (on) active else fill)
-        canvas.drawText(label, cx, cy + text.textSize * 0.35f, text)
+    private fun pill(canvas: Canvas, p: PadPart, label: String, on: Boolean) {
+        val i = p.ordinal
+        text.textSize = 13 * ps(p)
+        rect.set(cx[i] - hw[i], cy[i] - hh[i], cx[i] + hw[i], cy[i] + hh[i])
+        canvas.drawRoundRect(rect, hh[i], hh[i], if (on) active else fill)
+        canvas.drawText(label, cx[i], cy[i] + text.textSize * 0.35f, text)
     }
 
-    private fun rect(canvas: Canvas, l: Float, t: Float, r: Float, b: Float, label: String, on: Boolean) {
-        rect.set(l, t, r, b)
-        val rr = 10 * s
+    private fun rectPart(canvas: Canvas, p: PadPart, label: String, on: Boolean) {
+        val i = p.ordinal
+        text.textSize = 16 * ps(p)
+        rect.set(cx[i] - hw[i], cy[i] - hh[i], cx[i] + hw[i], cy[i] + hh[i])
+        val rr = 10 * ps(p)
         canvas.drawRoundRect(rect, rr, rr, if (on) active else fill)
-        canvas.drawText(label, (l + r) / 2, (t + b) / 2 + text.textSize * 0.37f, text)
+        canvas.drawText(label, cx[i], cy[i] + text.textSize * 0.37f, text)
     }
 }
