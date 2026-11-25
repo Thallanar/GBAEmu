@@ -80,6 +80,12 @@ pub struct PrizeMenu {
     pub max_addr: u32,
     /// Valor do cursor máximo na lista de prêmios (5 prêmios + "não, obrigado").
     pub max: u8,
+    /// `(endereço, valor)` que indica "texto parado esperando o A" (estado da
+    /// impressora de texto). Com o A martelado, um toque no meio do "Qual
+    /// prêmio?" termina o texto e o menu nasce já escolhendo o 1º prêmio, antes
+    /// de dar pra forçar o cursor — então no cassino o A só é tocado com texto
+    /// esperando, com a lista aberta ou depois de uma pausa longa.
+    pub text_wait: (u32, u8),
 }
 
 /// Onde o jogo guarda as moedas do cassino. No FR/LG elas ficam no SaveBlock1,
@@ -775,6 +781,9 @@ const FIRERED: GameProfile = GameProfile {
         cursor_addr: 0x0203_ADE6,
         max_addr: 0x0203_ADE8,
         max: 5,
+        // Achado no mesmo save: 3 com o texto esperando o A; 0 escrevendo ou
+        // sem texto.
+        text_wait: (0x0300_222B, 3),
     }),
     coins: Some(CoinStore {
         block1_ptr: 0x0300_5008,

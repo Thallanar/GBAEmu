@@ -286,6 +286,8 @@ pub struct Hunter {
     /// nesta tentativa (`None` até o time aparecer na RAM). O presente só conta
     /// num slot que estava vazio aqui.
     gift_baseline: Option<[bool; PARTY_SIZE as usize]>,
+    /// Cassino: frame (da tentativa) em que começou o último toque de A.
+    prize_tap: Option<u32>,
 }
 
 /// Frame (contado desde o reset) em que injetamos a seed do RNG do jogo. Tem que
@@ -320,6 +322,11 @@ fn lcg_reachable(from: u32, to: u32, max_steps: u32) -> bool {
 /// Largura de cada meio-ciclo do tap de A (8 pressionado / 8 solto). Cadência
 /// fixa: a entropia agora vem da seed injetada, não mais do timing.
 const MASH_PERIOD: u32 = 8;
+
+/// Cassino: fora de texto esperando/lista aberta, o A só é tocado depois desta
+/// pausa (frames). Cobre o "Qual prêmio?" escrevendo na velocidade de texto mais
+/// lenta (27 letras × 8 frames), pra nenhum toque cair no meio dele.
+const PRIZE_IDLE_GAP: u32 = 240;
 
 /// Frame (desde o reset) a partir do qual o [`HuntMethod::SoftResetApproach`]
 /// começa a tentar o passo de aproximação. Antes disso o jogo ainda está no
@@ -442,6 +449,7 @@ impl Hunter {
             spin_frames: 0,
             flee_frames: 0,
             gift_baseline: None,
+            prize_tap: None,
         };
         // Sorteia a seed da 1ª tentativa já no boot (a 1ª caça não passa por
         // soft_reset antes do primeiro encontro).
@@ -531,6 +539,36 @@ impl Hunter {
     /// Power-cycle do console (preserva o Flash). Volta o jogo à tela de título;
     /// daí o `tick`/`advance_to_encounter` amassa A até a batalha. Sorteia uma
     /// nova seed pra próxima tentativa render um PID diferente.
+    /// Se o A deve estar pressionado neste frame. Normal: toques de
+    /// [`MASH_PERIOD`] frames (pressiona/solta). Prêmio do cassino: toque de
+    /// [`MASH_PERIOD`] frames só com texto esperando, com a lista de prêmios
+    /// aberta (cursor já forçado) ou depois de [`PRIZE_IDLE_GAP`] frames sem
+    /// toque — ver [`crate::games::PrizeMenu::text_wait`].
+    fn press_a(&mut self, gba: &mut Gba, profile: &GameProfile, target: &TargetDef) -> bool {
+        let f = self.frames_this_attempt;
+        let (HuntMethod::GameCornerPrize { .. }, Some(menu)) = (target.method, profile.prize_menu)
+        else {
+            return (f / MASH_PERIOD).is_multiple_of(2);
+        };
+        if let Some(t) = self.prize_tap {
+            let since = f - t;
+            if since < MASH_PERIOD {
+                return true; // segurando o toque atual
+            }
+            if since < 2 * MASH_PERIOD {
+                return false; // solta antes de poder tocar de novo
+            }
+        }
+        let waiting = gba.bus.read_u8(menu.text_wait.0) == menu.text_wait.1;
+        let list_open = gba.bus.read_u8(menu.max_addr) == menu.max;
+        let idle = self.prize_tap.is_none_or(|t| f - t >= PRIZE_IDLE_GAP);
+        if waiting || list_open || idle {
+            self.prize_tap = Some(f);
+            return true;
+        }
+        false
+    }
+
     pub fn soft_reset(&mut self, gba: &mut Gba) {
         // Solta tudo antes do reset: sem isso um passo de aproximação em curso
         // (ou o A do mash) vazaria segurado pra tela de título da tentativa nova.
@@ -538,6 +576,7 @@ impl Hunter {
         gba.reset();
         self.frames_this_attempt = 0;
         self.gift_baseline = None;
+        self.prize_tap = None;
         self.reroll_seed();
     }
 
@@ -554,6 +593,7 @@ impl Hunter {
         self.frames_this_attempt = 0;
         self.seed_injected = false;
         self.gift_baseline = None;
+        self.prize_tap = None;
         for _ in 0..max_frames {
             self.maybe_inject_seed(gba, profile);
             // Força o cursor do inicial pro alvo quando a bag está aberta (no-op
@@ -564,7 +604,7 @@ impl Hunter {
             // demais métodos).
             self.drive_approach(gba, target);
             // Tapa A (ver `tick`): cobre título → continuar → bag → diálogos.
-            let press = (self.frames_this_attempt / MASH_PERIOD).is_multiple_of(2);
+            let press = self.press_a(gba, profile, target);
             gba.bus.io.joypad.set_button(Button::A, press);
             gba.run_frame();
             self.frames_this_attempt += 1;
@@ -713,7 +753,7 @@ impl Hunter {
             // escolhe "Continuar", abre a bag, confirma o inicial (já forçado) e
             // avança diálogos — tudo com A. Tap (não segurar) pra cada prompt
             // registrar uma borda de tecla.
-            let press = (self.frames_this_attempt / MASH_PERIOD).is_multiple_of(2);
+            let press = self.press_a(gba, profile, target);
             gba.bus.io.joypad.set_button(Button::A, press);
             gba.run_frame();
             self.frames_this_attempt += 1;
@@ -932,6 +972,61 @@ mod tests {
     use games::{Slot, StarterCursor, StarterMenu, TargetDef};
 
     #[test]
+    fn prize_hunt_never_taps_a_while_text_is_printing() {
+        use crate::games::PrizeMenu;
+        let profile = GameProfile {
+            code: "TEST",
+            name: "test",
+            player_party: 0x0200_0000,
+            enemy_party: 0x0200_1000,
+            rng_addr: None,
+            starter_menu: None,
+            battle_flag: None,
+            action_cursor: None,
+            prize_menu: Some(PrizeMenu {
+                cursor_addr: 0x0203_ADE6,
+                max_addr: 0x0203_ADE8,
+                max: 5,
+                text_wait: (0x0300_222B, 3),
+            }),
+            coins: None,
+            targets: &[],
+        };
+        let prize = TargetDef {
+            name: "Dratini (cassino)",
+            species: 147,
+            slot: Slot::Player,
+            method: HuntMethod::GameCornerPrize {
+                index: 2,
+                price: 2800,
+            },
+            cursor: StarterCursor::Center,
+        };
+        let mut gba = Gba::new();
+        let mut h = Hunter::new();
+        let press_at = |h: &mut Hunter, gba: &mut Gba, f: u32| {
+            h.frames_this_attempt = f;
+            h.press_a(gba, &profile, &prize)
+        };
+        // Começo da tentativa: sem toque anterior, toca (título/continuar).
+        assert!(press_at(&mut h, &mut gba, 0));
+        // Segura o toque por MASH_PERIOD frames e depois solta.
+        assert!(press_at(&mut h, &mut gba, 7));
+        assert!(!press_at(&mut h, &mut gba, 8));
+        // Texto escrevendo (sem espera, sem lista): não toca antes da pausa longa.
+        assert!(!press_at(&mut h, &mut gba, 100));
+        // Texto esperando o A: toca na hora.
+        gba.bus.write_u8(0x0300_222B, 3);
+        assert!(press_at(&mut h, &mut gba, 101));
+        gba.bus.write_u8(0x0300_222B, 0);
+        // Escrevendo de novo: nada até a pausa longa...
+        assert!(!press_at(&mut h, &mut gba, 101 + PRIZE_IDLE_GAP - 1));
+        // ...mas a lista de prêmios aberta libera o toque.
+        gba.bus.write_u8(0x0203_ADE8, 5);
+        assert!(press_at(&mut h, &mut gba, 101 + PRIZE_IDLE_GAP - 1));
+    }
+
+    #[test]
     fn prize_cursor_only_forced_on_the_prize_list_and_coins_decode() {
         use crate::games::{CoinStore, PrizeMenu};
         let profile = GameProfile {
@@ -947,6 +1042,7 @@ mod tests {
                 cursor_addr: 0x0203_ADE6,
                 max_addr: 0x0203_ADE8,
                 max: 5,
+                text_wait: (0x0300_222B, 3),
             }),
             coins: Some(CoinStore {
                 block1_ptr: 0x0300_5008,
