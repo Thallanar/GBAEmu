@@ -6,10 +6,13 @@ use eframe::egui::{self, Color32, FontFamily, FontId, Rounding, Stroke};
 /// Fundo da área do jogo (mais escuro que as superfícies).
 pub const GAME_BG: Color32 = Color32::from_rgb(0x0C, 0x0C, 0x0F);
 pub const BG: Color32 = Color32::from_rgb(0x12, 0x12, 0x16);
+/// Barra lateral das Configurações.
+pub const BG_DEEP: Color32 = Color32::from_rgb(0x17, 0x17, 0x1C);
 pub const STATUS_BG: Color32 = Color32::from_rgb(0x14, 0x14, 0x18);
 pub const SURFACE: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x22);
 pub const SURFACE2: Color32 = Color32::from_rgb(0x26, 0x26, 0x2E);
 pub const LINE: Color32 = Color32::from_rgb(0x26, 0x26, 0x2E);
+pub const DIVIDER: Color32 = Color32::from_rgb(0x2C, 0x2C, 0x35);
 pub const BORDER: Color32 = Color32::from_rgb(0x3A, 0x3A, 0x45);
 pub const TEXT: Color32 = Color32::from_rgb(0xF2, 0xF2, 0xF5);
 pub const TEXT_SOFT: Color32 = Color32::from_rgb(0xD6, 0xD6, 0xDD);

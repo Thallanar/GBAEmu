@@ -24,6 +24,7 @@ mod library;
 mod link;
 mod pacing;
 mod png;
+mod settings;
 mod shader;
 mod theme;
 mod widgets;
@@ -446,8 +447,7 @@ struct AuroraApp {
     /// Scaler com buffers reutilizáveis + o buffer de saída (RGBA8 ampliado).
     scaler: Scaler,
     scaled: Vec<u8>,
-    /// Janela de configurações de vídeo (escala + shader) aberta?
-    show_video: bool,
+
     /// Contador de frames, usado pra limitar a frequência de gravação do save.
     frame_count: u64,
     /// Perfil do jogo detectado pelo header (None = não reconhecido / sem ROM).
@@ -493,8 +493,20 @@ struct AuroraApp {
     input: InputConfig,
     /// Contexto do gilrs pra ler gamepads (None se indisponível no host).
     gilrs: Option<gilrs::Gilrs>,
-    /// Janela de configuração de controles aberta?
-    show_input_config: bool,
+    /// Configurações abertas, e em qual seção.
+    settings_open: bool,
+    settings_page: settings::Page,
+    /// Som ligado e volume (0–100).
+    sound_on: bool,
+    volume: u32,
+    /// Toca o som acelerado no fast-forward (senão fica mudo).
+    ff_sound: bool,
+    /// Multiplicador do fast-forward (0 = o máximo que a máquina aguentar).
+    ff_mult: u32,
+    /// Espaço liga/desliga o acelerado (senão acelera só enquanto segurado).
+    space_toggle: bool,
+    /// Ícone do app pra tela Sobre (carregado na primeira vez).
+    about_icon: Option<egui::TextureHandle>,
     /// Janela "❓ Como usar" do Shiny Hunter aberta?
     show_hunt_help: bool,
     /// Player do vídeo de exemplo da ajuda (criado ao abrir a janela; trocado
@@ -554,6 +566,7 @@ enum ToolAction {
     Screenshot,
     Link,
     Hunter,
+    Settings,
 }
 
 /// Agora em segundos Unix.
@@ -706,12 +719,25 @@ impl AuroraApp {
                 }
             }
         }
+        // Escala inteira 1–6, ou 0 = ajustar à janela.
         let scale = cc
             .storage
             .and_then(|s| s.get_string("video_scale"))
-            .and_then(|s| s.parse::<f32>().ok())
-            .filter(|s| (1.0..=6.0).contains(s))
+            .and_then(|s| {
+                if s == "fit" {
+                    Some(0.0)
+                } else {
+                    s.parse::<f32>().ok()
+                }
+            })
+            .filter(|s| *s == 0.0 || (1.0..=6.0).contains(s))
             .unwrap_or(3.0);
+        let get_bool = |key: &str, default: bool| {
+            cc.storage
+                .and_then(|s| s.get_string(key))
+                .map(|v| v == "1")
+                .unwrap_or(default)
+        };
         let upscale = cc
             .storage
             .and_then(|s| s.get_string("video_upscale"))
@@ -734,7 +760,7 @@ impl AuroraApp {
             upscale,
             scaler: Scaler::new(),
             scaled: Vec::new(),
-            show_video: false,
+
             frame_count: 0,
             profile: None,
             selected_target: 0,
@@ -765,7 +791,24 @@ impl AuroraApp {
                     None
                 }
             },
-            show_input_config: false,
+            settings_open: false,
+            settings_page: settings::Page::default(),
+            sound_on: get_bool("sound_on", true),
+            volume: cc
+                .storage
+                .and_then(|s| s.get_string("volume"))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100u32)
+                .min(100),
+            ff_sound: get_bool("ff_sound", false),
+            ff_mult: cc
+                .storage
+                .and_then(|s| s.get_string("ff_mult"))
+                .and_then(|s| s.parse().ok())
+                .filter(|m| [0u32, 2, 4, 8].contains(m))
+                .unwrap_or(0),
+            space_toggle: get_bool("space_toggle", false),
+            about_icon: None,
             show_hunt_help: false,
             help_player: None,
             rebinding: None,
@@ -792,6 +835,8 @@ impl AuroraApp {
             pacer: pacing::Pacer::new(),
             pacing_trace: pacing::PacingTrace::from_env(),
         };
+
+        app.apply_audio_gain();
 
         if let Some(s) = &app.link {
             app.set_status(if s.id == 0 {
@@ -1555,71 +1600,6 @@ impl AuroraApp {
         }
     }
 
-    /// Janela de configuração de controles: uma grade Botão × (Teclado, Gamepad)
-    /// com remapeamento ao clicar (aguarda a próxima tecla/botão).
-    fn input_config_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_input_config;
-        egui::Window::new("🎮 Controles")
-            .open(&mut open)
-            .resizable(false)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new("Clique num campo e pressione a tecla/botão. Esc cancela.")
-                        .small()
-                        .weak(),
-                );
-                egui::Grid::new("input_grid")
-                    .num_columns(3)
-                    .spacing([12.0, 6.0])
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new("Botão").strong());
-                        ui.label(egui::RichText::new("Teclado").strong());
-                        ui.label(egui::RichText::new("Gamepad").strong());
-                        ui.end_row();
-                        for (i, name) in GBA_NAMES.iter().enumerate() {
-                            ui.label(*name);
-                            let key_label = if self.rebinding == Some(Rebind::Key(i)) {
-                                "[pressione…]".to_string()
-                            } else {
-                                self.input.keys[i].name().to_string()
-                            };
-                            if ui.button(key_label).clicked() {
-                                self.rebinding = Some(Rebind::Key(i));
-                            }
-                            let pad_label = if self.rebinding == Some(Rebind::Pad(i)) {
-                                "[pressione…]".to_string()
-                            } else {
-                                self.input.pads[i].map(pad_name).unwrap_or("—").to_string()
-                            };
-                            if ui.button(pad_label).clicked() {
-                                self.rebinding = Some(Rebind::Pad(i));
-                            }
-                            ui.end_row();
-                        }
-                    });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("Restaurar padrão").clicked() {
-                        self.input = InputConfig::default();
-                        self.rebinding = None;
-                    }
-                    if self.rebinding.is_some() && ui.button("Cancelar (Esc)").clicked() {
-                        self.rebinding = None;
-                    }
-                });
-                let pads = self.gilrs.as_ref().map_or(0, |g| g.gamepads().count());
-                ui.label(
-                    egui::RichText::new(format!("Gamepads conectados: {pads}"))
-                        .small()
-                        .weak(),
-                );
-            });
-        self.show_input_config = open;
-    }
-
-    /// Janela da biblioteca: escolher pasta + grid de capas clicáveis.
     /// Nome do jogo pra mostrar: o do perfil do Shiny Hunter (ex.: "Pokémon
     /// Emerald") ou o nome do arquivo, sem `_`.
     fn display_name(path: &std::path::Path, code: &str) -> String {
@@ -1701,8 +1681,13 @@ impl AuroraApp {
                         t("Continuar", "Resume", "Continuar")
                     };
                     let reset_label = t("Reiniciar", "Restart", "Reiniciar");
-                    let ff_label = if self.ff_toggle {
-                        t("Acelerado", "Fast", "Acelerado")
+                    let ff_on_label = if self.ff_mult == 0 {
+                        t("Acelerado", "Fast", "Acelerado").to_string()
+                    } else {
+                        format!("{} {}×", t("Acelerado", "Fast", "Acelerado"), self.ff_mult)
+                    };
+                    let ff_label: &str = if self.ff_toggle {
+                        &ff_on_label
                     } else {
                         t("Acelerar", "Fast forward", "Acelerar")
                     };
@@ -1749,15 +1734,18 @@ impl AuroraApp {
 
                     match self.view {
                         View::Game => {
-                            let cfg = widgets::tool_button(
+                            if widgets::tool_button(
                                 ui,
                                 Icon::Gear,
                                 cfg_label,
-                                false,
+                                self.settings_open,
                                 true,
                                 compact,
-                            );
-                            self.settings_popup(ui, &cfg);
+                            )
+                            .clicked()
+                            {
+                                action = Some(ToolAction::Settings);
+                            }
                             if self.profile.is_some()
                                 && widgets::tool_button(
                                     ui,
@@ -1862,15 +1850,18 @@ impl AuroraApp {
                             }
                         }
                         View::Library => {
-                            let cfg = widgets::tool_button(
+                            if widgets::tool_button(
                                 ui,
                                 Icon::Gear,
                                 cfg_label,
-                                false,
+                                self.settings_open,
                                 true,
                                 compact,
-                            );
-                            self.settings_popup(ui, &cfg);
+                            )
+                            .clicked()
+                            {
+                                action = Some(ToolAction::Settings);
+                            }
                             if widgets::tool_button(
                                 ui,
                                 Icon::File,
@@ -1953,45 +1944,9 @@ impl AuroraApp {
             Some(ToolAction::Screenshot) => self.screenshot(),
             Some(ToolAction::Link) => self.show_link = !self.show_link,
             Some(ToolAction::Hunter) => self.show_hunter = !self.show_hunter,
+            Some(ToolAction::Settings) => self.settings_open = true,
             None => {}
         }
-    }
-
-    /// Menu provisório das Configurações (vira a tela de Configurações no
-    /// próximo passo do redesenho).
-    fn settings_popup(&mut self, ui: &mut egui::Ui, button: &egui::Response) {
-        let id = ui.make_persistent_id("settings_popup");
-        if button.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(id));
-        }
-        egui::popup::popup_below_widget(ui, id, button, |ui| {
-            ui.set_min_width(200.0);
-            if ui
-                .button(t("Controles…", "Controls…", "Controles…"))
-                .clicked()
-            {
-                self.show_input_config = true;
-                ui.memory_mut(|m| m.close_popup());
-            }
-            if ui.button(t("Vídeo…", "Video…", "Vídeo…")).clicked() {
-                self.show_video = true;
-                ui.memory_mut(|m| m.close_popup());
-            }
-            ui.separator();
-            ui.label(egui::RichText::new(t("Idioma", "Language", "Idioma")).color(theme::MUTED));
-            let options = [
-                (LangPref::Auto, t("Automático", "Automatic", "Automático")),
-                (LangPref::Fixed(i18n::Lang::Pt), "Português"),
-                (LangPref::Fixed(i18n::Lang::En), "English"),
-                (LangPref::Fixed(i18n::Lang::Es), "Español"),
-            ];
-            for (pref, name) in options {
-                if ui.radio(self.lang_pref == pref, name).clicked() {
-                    self.lang_pref = pref;
-                    pref.apply();
-                }
-            }
-        });
     }
 
     /// Menu provisório dos estados (vira a grade com miniaturas no próximo
@@ -2063,7 +2018,7 @@ impl AuroraApp {
                     };
                     let in_game = self.rom_path.is_some() && self.view == View::Game;
                     if in_game {
-                        let speed = if self.running || self.hunting {
+                        let speed = if (self.running && !self.settings_open) || self.hunting {
                             let txt = format!("{:.0} fps · {:.1}×", self.fps, self.fps / 59.7275);
                             if i18n::get() == i18n::Lang::En {
                                 txt
@@ -2111,9 +2066,17 @@ impl AuroraApp {
 
     /// A tela do jogo, em escala inteira, centralizada na área livre.
     fn game_view(&mut self, ui: &mut egui::Ui, gl: Option<&Arc<eframe::glow::Context>>) {
-        let k = self.scale.round().max(1.0);
-        let size = egui::vec2(SCREEN_WIDTH as f32 * k, SCREEN_HEIGHT as f32 * k);
         let area = ui.max_rect();
+        // "Ajustar" (escala 0): a maior escala inteira que cabe na área livre.
+        let k = if self.scale < 1.0 {
+            (area.width() / SCREEN_WIDTH as f32)
+                .min(area.height() / SCREEN_HEIGHT as f32)
+                .floor()
+                .max(1.0)
+        } else {
+            self.scale.round()
+        };
+        let size = egui::vec2(SCREEN_WIDTH as f32 * k, SCREEN_HEIGHT as f32 * k);
         // Alinha ao pixel físico pra a escala inteira não borrar.
         let ppp = ui.ctx().pixels_per_point();
         let min = ((area.center() - size / 2.0) * ppp).round() / ppp;
@@ -2663,6 +2626,33 @@ impl AuroraApp {
         frames
     }
 
+    /// Acelerado. Com multiplicador, roda N× os frames que o ritmo normal
+    /// rodaria (e o som, se ligado, toca acelerado); no "Máximo", roda frames
+    /// sem som até gastar o orçamento de tempo desta atualização de tela, sem
+    /// ficar preso em "N frames × refresh".
+    fn run_fast(&mut self) {
+        if self.ff_mult == 0 {
+            let start = Instant::now();
+            let mut n = 0;
+            loop {
+                self.step_frame(true);
+                n += 1;
+                if n >= FAST_FORWARD_MAX_FRAMES || start.elapsed() >= FAST_FORWARD_BUDGET {
+                    break;
+                }
+            }
+            self.pacer.reset();
+            return;
+        }
+        let frames = self.pacer.tick(Instant::now()) * self.ff_mult;
+        if let Some(audio) = &mut self.audio {
+            audio.set_speed(self.pacer.speed() * self.ff_mult as f64);
+        }
+        for _ in 0..frames {
+            self.step_frame(!self.ff_sound);
+        }
+    }
+
     /// Aplica o remapeamento em andamento: Esc cancela; senão grava a primeira
     /// tecla (rebind de teclado) ou o `pad_event` capturado (rebind de gamepad).
     fn apply_rebind(
@@ -2688,14 +2678,24 @@ impl AuroraApp {
                 if let Some(key) = key {
                     self.input.keys[idx] = key;
                     self.rebinding = None;
-                    self.set_status(format!("{} → tecla {}", GBA_NAMES[idx], key.name()));
+                    self.set_status(format!(
+                        "{} → {} {}",
+                        settings::button_label(idx),
+                        t("tecla", "key", "tecla"),
+                        key.name()
+                    ));
                 }
             }
             Rebind::Pad(idx) => {
                 if let Some(b) = pad_event {
                     self.input.pads[idx] = Some(b);
                     self.rebinding = None;
-                    self.set_status(format!("{} → pad {}", GBA_NAMES[idx], pad_name(b)));
+                    self.set_status(format!(
+                        "{} → {} {}",
+                        settings::button_label(idx),
+                        t("controle", "controller", "mando"),
+                        pad_name(b)
+                    ));
                 }
             }
         }
@@ -2740,104 +2740,6 @@ impl AuroraApp {
         } else {
             Active::Builtin(self.shader_kind)
         }
-    }
-
-    /// Janela de vídeo: escala (inteira) + efeito de shader.
-    fn video_window(&mut self, ctx: &egui::Context, gl: Option<&Arc<eframe::glow::Context>>) {
-        let mut open = self.show_video;
-        egui::Window::new("🎨 Vídeo")
-            .open(&mut open)
-            .resizable(false)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Escala:");
-                    ui.add(
-                        egui::Slider::new(&mut self.scale, 1.0..=6.0)
-                            .step_by(1.0)
-                            .suffix("×"),
-                    );
-                });
-                ui.label(
-                    egui::RichText::new("Escala inteira mantém os pixels nítidos e o aspecto 3:2.")
-                        .weak()
-                        .small(),
-                );
-                ui.separator();
-                if self.shader.is_some() {
-                    let active_label = if let Some(mp) = self.shader_multipass {
-                        mp.label()
-                    } else if self.use_custom {
-                        self.custom_label.as_str()
-                    } else {
-                        self.shader_kind.label()
-                    };
-                    egui::ComboBox::from_label("Shader")
-                        .selected_text(active_label)
-                        .show_ui(ui, |ui| {
-                            for kind in ShaderKind::ALL {
-                                let sel = self.shader_multipass.is_none()
-                                    && !self.use_custom
-                                    && self.shader_kind == kind;
-                                if ui.selectable_label(sel, kind.label()).clicked() {
-                                    self.shader_kind = kind;
-                                    self.use_custom = false;
-                                    self.shader_multipass = None;
-                                }
-                            }
-                            for mp in MultipassKind::ALL {
-                                let sel = self.shader_multipass == Some(mp);
-                                if ui.selectable_label(sel, mp.label()).clicked() {
-                                    self.shader_multipass = Some(mp);
-                                    self.use_custom = false;
-                                }
-                            }
-                            if !self.custom_label.is_empty()
-                                && ui
-                                    .selectable_label(
-                                        self.use_custom,
-                                        format!("Custom: {}", self.custom_label),
-                                    )
-                                    .clicked()
-                            {
-                                self.use_custom = true;
-                                self.shader_multipass = None;
-                            }
-                        });
-                    if ui.button("Importar .frag…").clicked() {
-                        self.import_shader(gl);
-                    }
-                    if let Some(err) = &self.shader_error {
-                        ui.label(
-                            egui::RichText::new(format!("Falhou: {err}"))
-                                .color(egui::Color32::LIGHT_RED)
-                                .small(),
-                        );
-                    }
-                    ui.separator();
-                    egui::ComboBox::from_label("Upscale")
-                        .selected_text(self.upscale.label())
-                        .show_ui(ui, |ui| {
-                            for u in Upscale::ALL {
-                                ui.selectable_value(&mut self.upscale, u, u.label());
-                            }
-                        });
-                    ui.label(
-                        egui::RichText::new(
-                            "Filtro HQx de pixel-art (CPU), aplicado antes do shader.",
-                        )
-                        .weak()
-                        .small(),
-                    );
-                } else {
-                    ui.label(
-                        egui::RichText::new("Shaders indisponíveis (backend sem OpenGL).")
-                            .weak()
-                            .small(),
-                    );
-                }
-            });
-        self.show_video = open;
     }
 
     /// Copia o framebuffer da PPU (RGBA8) para a textura egui.
@@ -2907,6 +2809,14 @@ impl eframe::App for AuroraApp {
             if f12 {
                 self.screenshot();
             }
+            if self.space_toggle
+                && self.rom_path.is_some()
+                && !self.hunting
+                && ctx.input(|i| i.key_pressed(egui::Key::Space))
+            {
+                self.ff_toggle = !self.ff_toggle;
+                self.pacer.reset();
+            }
         }
 
         if self.hunting {
@@ -2918,7 +2828,7 @@ impl eframe::App for AuroraApp {
                 self.refresh_texture();
             }
             ctx.request_repaint();
-        } else if self.running && self.view == View::Game {
+        } else if self.running && self.view == View::Game && !self.settings_open {
             if configuring {
                 // Remapeando controles: roda no ritmo normal, sem repassar input.
                 self.run_paced();
@@ -2929,20 +2839,8 @@ impl eframe::App for AuroraApp {
                     self.rewind_step();
                     self.gba.bus.apu.buffer.clear();
                     self.pacer.reset();
-                } else if fast_forward || self.ff_toggle {
-                    // Acelera: roda frames (sem o gate de áudio) até gastar o
-                    // orçamento de tempo desta janela de update. Assim o ganho não
-                    // fica preso em "N frames fixos × refresh" — usa toda a CPU.
-                    let start = Instant::now();
-                    let mut n = 0;
-                    loop {
-                        self.step_frame(true);
-                        n += 1;
-                        if n >= FAST_FORWARD_MAX_FRAMES || start.elapsed() >= FAST_FORWARD_BUDGET {
-                            break;
-                        }
-                    }
-                    self.pacer.reset();
+                } else if (fast_forward && !self.space_toggle) || self.ff_toggle {
+                    self.run_fast();
                 } else {
                     let ran = self.run_paced();
                     if let Some(trace) = &mut self.pacing_trace {
@@ -2987,18 +2885,15 @@ impl eframe::App for AuroraApp {
         self.status_bar(ctx);
 
         // Janelas (quando abertas).
-        if self.show_input_config {
-            self.input_config_window(ctx);
+        self.settings_window(ctx, gl.as_ref());
+        if self.rebinding.is_some() {
             // Repinta sem parar pra capturar a tecla/botão do remapeamento.
             ctx.request_repaint();
         }
         if self.show_hunt_help {
             self.hunt_help_window(ctx);
         }
-        // Vídeo recebe o contexto GL pra compilar shaders importados na hora.
-        if self.show_video {
-            self.video_window(ctx, gl.as_ref());
-        }
+
         // Repinta de tempos em tempos pra lista de parceiros na LAN refletir os
         // anúncios que vão chegando.
         if self.show_link {
@@ -3036,7 +2931,18 @@ impl eframe::App for AuroraApp {
     /// periodicamente e ao fechar).
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("input_config", self.input.serialize());
-        storage.set_string("video_scale", format!("{:.0}", self.scale));
+        let scale = if self.scale < 1.0 {
+            "fit".to_string()
+        } else {
+            format!("{:.0}", self.scale)
+        };
+        storage.set_string("video_scale", scale);
+        let flag = |b: bool| if b { "1" } else { "0" }.to_string();
+        storage.set_string("sound_on", flag(self.sound_on));
+        storage.set_string("volume", self.volume.to_string());
+        storage.set_string("ff_sound", flag(self.ff_sound));
+        storage.set_string("ff_mult", self.ff_mult.to_string());
+        storage.set_string("space_toggle", flag(self.space_toggle));
         if let Some(mp) = self.shader_multipass {
             storage.set_string("video_shader", mp.key().to_string());
         } else if self.use_custom {
