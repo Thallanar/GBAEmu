@@ -312,6 +312,7 @@ class MainActivity : Activity(), Host {
     @Volatile private var statSpecies = 0
     @Volatile private var statBestSV = 0xFFFF
     @Volatile private var currentTargetName = ""
+    @Volatile private var currentTargetIndex = 0
 
     // Vistas da caça (painel do retrato, sobreposição da paisagem, aviso de shiny).
     private lateinit var huntViews: HuntViews
@@ -1432,6 +1433,7 @@ class MainActivity : Activity(), Host {
     /** Pede à thread GL pra começar a caça no alvo `i`. */
     private fun beginHunt(i: Int) {
         currentTargetName = huntTargets[i]
+        currentTargetIndex = i
         statAttempts = 0
         statSpecies = 0
         statBestSV = 0xFFFF
@@ -1841,6 +1843,22 @@ class MainActivity : Activity(), Host {
         }
     }
 
+    /** Prêmio do cassino sem moedas: a caça parou; explica quanto falta. */
+    private fun onHuntNoCoins() {
+        hunting = false
+        val name = currentTargetName
+        val price = NativeBridge.huntPrice(handle, currentTargetIndex)
+        val coins = NativeBridge.huntCoins(handle).coerceAtLeast(0)
+        runOnUiThread {
+            stopHuntUI()
+            AlertDialog.Builder(this)
+                .setTitle(tr(R.string.hunt_no_coins_title))
+                .setMessage(tr(R.string.hunt_no_coins_msg, name, price, coins))
+                .setPositiveButton(tr(R.string.ok), null)
+                .show()
+        }
+    }
+
     /** Grava o `.sav` em disco se houve alteração desde a última gravação. */
     private fun flushBackup() {
         val code = currentGameCode ?: return
@@ -2169,6 +2187,7 @@ class MainActivity : Activity(), Host {
                     when (step) {
                         NativeBridge.HUNT_SHINY -> onHuntFinished()
                         NativeBridge.HUNT_PARTY_FULL -> onHuntPartyFull()
+                        NativeBridge.HUNT_NOT_ENOUGH_COINS -> onHuntNoCoins()
                     }
                 } else {
                     val speed = ffSpeed

@@ -637,6 +637,49 @@ mod android_impl {
                 TargetKind::Starter => 1,
                 TargetKind::Gift => 2,
                 TargetKind::Wild => 3,
+                TargetKind::GameCorner => 4,
+            })
+    }
+
+    /// Moedas do cassino no save carregado (-1 se o jogo não tem ou o save ainda
+    /// não carregou). Pro aviso de moedas insuficientes.
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntCoins(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jint {
+        let Some(emu) = emu(handle) else {
+            return -1;
+        };
+        let Some(profile) = emu.profile else {
+            return -1;
+        };
+        auroragba_shiny::read_coins(&mut emu.gba, profile).map_or(-1, jint::from)
+    }
+
+    /// Preço em moedas do alvo `i` (0 se não é prêmio do cassino).
+    ///
+    /// # Safety
+    /// `handle` válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_huntPrice(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        i: jint,
+    ) -> jint {
+        emu(handle)
+            .and_then(|e| e.profile)
+            .and_then(|p| p.targets.get(i as usize))
+            .map_or(0, |t| match t.method {
+                auroragba_shiny::games::HuntMethod::GameCornerPrize { price, .. } => {
+                    jint::from(price)
+                }
+                _ => 0,
             })
     }
 
@@ -792,6 +835,10 @@ mod android_impl {
                 emu.hunting = false;
                 HUNT_PARTY_FULL
             }
+            CheckResult::NotEnoughCoins => {
+                emu.hunting = false;
+                HUNT_NOT_ENOUGH_COINS
+            }
             CheckResult::NotReady | CheckResult::NotShiny => HUNT_CONTINUE,
         }
     }
@@ -800,6 +847,7 @@ mod android_impl {
     const HUNT_CONTINUE: jint = 0;
     const HUNT_SHINY: jint = 1;
     const HUNT_PARTY_FULL: jint = 2;
+    const HUNT_NOT_ENOUGH_COINS: jint = 3;
 
     /// Número de tentativas (resets) da caça atual.
     ///

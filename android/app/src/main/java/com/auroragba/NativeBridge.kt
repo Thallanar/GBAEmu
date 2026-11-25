@@ -105,14 +105,22 @@ object NativeBridge {
 
     /**
      * Roda um lote de `batch` frames da caça. Devolve [HUNT_CONTINUE],
-     * [HUNT_SHINY] (achou; a caça parou) ou [HUNT_PARTY_FULL] (presente com o
-     * time cheio; a caça parou).
+     * [HUNT_SHINY] (achou; a caça parou), [HUNT_PARTY_FULL] (presente com o
+     * time cheio; a caça parou) ou [HUNT_NOT_ENOUGH_COINS] (prêmio do cassino
+     * sem moedas; a caça parou).
      */
     external fun huntStep(handle: Long, batch: Int): Int
 
     const val HUNT_CONTINUE = 0
     const val HUNT_SHINY = 1
     const val HUNT_PARTY_FULL = 2
+    const val HUNT_NOT_ENOUGH_COINS = 3
+
+    /** Moedas do cassino no save carregado (-1 se indisponível). */
+    external fun huntCoins(handle: Long): Int
+
+    /** Preço em moedas do alvo `i` (0 se não é prêmio do cassino). */
+    external fun huntPrice(handle: Long, i: Int): Int
 
     /** Tentativas (resets) da caça atual. */
     external fun huntAttempts(handle: Long): Long

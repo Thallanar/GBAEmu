@@ -1367,6 +1367,31 @@ impl AuroraApp {
             self.set_status(msg);
             self.hunt_warning = Some(msg.into());
         }
+        if result == CheckResult::NotEnoughCoins {
+            // Prêmio do cassino sem moedas: o jogo recusaria a troca pra sempre.
+            self.hunting = false;
+            self.running = true;
+            self.hunt_stopped = Some(Instant::now());
+            let price = match target.method {
+                auroragba_shiny::games::HuntMethod::GameCornerPrize { price, .. } => price,
+                _ => 0,
+            };
+            let coins = auroragba_shiny::read_coins(&mut self.gba, profile).unwrap_or(0);
+            let name = target.display_name(i18n::get());
+            let msg = format!(
+                "{name} {} {price} {}, {} {coins}. {}",
+                t("custa", "costs", "cuesta"),
+                t("moedas", "coins", "monedas"),
+                t("e o save tem", "and the save has", "y la partida tiene"),
+                t(
+                    "Junte mais moedas, salve em frente ao balcão e comece de novo.",
+                    "Get more coins, save in front of the counter and start again.",
+                    "Consigue más monedas, guarda frente al mostrador y empieza de nuevo.",
+                )
+            );
+            self.set_status(msg.clone());
+            self.hunt_warning = Some(msg);
+        }
         if result == CheckResult::Shiny {
             // Achou! Devolve o controle no momento pós-seleção: o jogo entra na
             // batalha sozinho e o inicial shiny aparece (com os sparkles). O

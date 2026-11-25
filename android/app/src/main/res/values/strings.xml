@@ -176,6 +176,10 @@
     <string name="hunt_group_starter">Starters</string>
     <string name="hunt_group_gift">Gifts</string>
     <string name="hunt_group_wild">Wild</string>
+    <string name="hunt_group_casino">Game Corner · Celadon prizes</string>
+    <string name="hunt_casino_tip">Save in front of the Pokémon prize clerk, with enough coins for %1$s and a free party slot. The app picks the prize from the list on its own; coins aren\'t spent.</string>
+    <string name="hunt_no_coins_title">Not enough coins</string>
+    <string name="hunt_no_coins_msg">%1$s costs %2$d coins and the save has %3$d. Get more coins, save in front of the counter and start again.</string>
     <string name="hunt_go">Hunt %1$s</string>
     <string name="hunt_label_hunting">Hunting</string>
     <string name="hunt_running">Running</string>

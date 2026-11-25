@@ -62,6 +62,11 @@ fn kind_title(kind: TargetKind) -> &'static str {
         TargetKind::Starter => t("Iniciais", "Starters", "Iniciales"),
         TargetKind::Gift => t("Presentes", "Gifts", "Regalos"),
         TargetKind::Wild => t("Selvagem", "Wild", "Salvajes"),
+        TargetKind::GameCorner => t(
+            "Cassino · prêmios de Celadon",
+            "Game Corner · Celadon prizes",
+            "Casino · premios de Celadon",
+        ),
     }
 }
 
@@ -71,6 +76,11 @@ fn kind_single(kind: TargetKind) -> &'static str {
         TargetKind::Starter => t("Inicial", "Starter", "Inicial"),
         TargetKind::Gift => t("Presente", "Gift", "Regalo"),
         TargetKind::Wild => t("Selvagem", "Wild", "Salvaje"),
+        TargetKind::GameCorner => t(
+            "Prêmio do cassino",
+            "Game Corner prize",
+            "Premio del casino",
+        ),
     }
 }
 
@@ -98,6 +108,19 @@ fn prep_tip(target: &TargetDef, name: &str) -> String {
             "Guarda la partida frente a quien da el regalo, con un hueco libre en el equipo.",
         )
         .to_string(),
+        TargetKind::GameCorner => format!(
+            "{} {name} {}",
+            t(
+                "Salve o jogo na frente do atendente dos prêmios Pokémon, com moedas pro",
+                "Save the game in front of the Pokémon prize clerk, with enough coins for",
+                "Guarda la partida frente al encargado de los premios Pokémon, con monedas para",
+            ),
+            t(
+                "e um espaço livre no time. O app escolhe o prêmio na lista sozinho, e as moedas não se gastam: cada tentativa recomeça do save.",
+                "and a free party slot. The app picks the prize from the list on its own, and coins aren't spent: every attempt starts over from the save.",
+                "y un espacio libre en el equipo. La app elige el premio de la lista sola, y las monedas no se gastan: cada intento empieza de nuevo desde la partida.",
+            )
+        ),
         TargetKind::Wild => t(
             "Fique parado na grama com o primeiro do time saudável. A caça gira no lugar até aparecer um shiny.",
             "Stand still in the grass with a healthy lead Pokémon. The hunt spins in place until a shiny shows up.",
@@ -354,6 +377,7 @@ impl AuroraApp {
                     TargetKind::Legendary,
                     TargetKind::Starter,
                     TargetKind::Gift,
+                    TargetKind::GameCorner,
                     TargetKind::Wild,
                 ] {
                     let group: Vec<(usize, &TargetDef)> = targets
@@ -366,8 +390,11 @@ impl AuroraApp {
                     }
                     ui.add_space(4.0);
                     widgets::section_label(ui, kind_title(kind));
-                    let w = (ui.available_width() - 12.0) / 3.0;
-                    for row in group.chunks(3) {
+                    // Três colunas; duas no painel estreito (janela mínima), senão
+                    // nomes como "Charmander" quebram no meio.
+                    let cols = if ui.available_width() < 300.0 { 2 } else { 3 };
+                    let w = (ui.available_width() - 6.0 * (cols as f32 - 1.0)) / cols as f32;
+                    for row in group.chunks(cols) {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             for (i, target) in row {

@@ -18,6 +18,7 @@ class HuntTarget(val name: String, val kind: Int) {
         const val STARTER = 1
         const val GIFT = 2
         const val WILD = 3
+        const val GAME_CORNER = 4
     }
 }
 
@@ -80,6 +81,8 @@ class HuntTargetScreen(act: Activity, host: Host) {
         private var selected = 0
         private val goButton = ui.accentButton("") { start() }
         private val tiles = mutableListOf<android.widget.TextView>()
+        // Dica do topo: a de sempre, ou a do cassino quando o alvo é um prêmio.
+        private val tip = ui.text("", 13f, 0xFFD6E9F7.toInt())
 
         init {
             dialog.setOnDismissListener { host.onHunterClosed(closingToMenu) }
@@ -92,12 +95,13 @@ class HuntTargetScreen(act: Activity, host: Host) {
                     background = ui.rounded(0x1A78C8FF, 12, 0x5978C8FF)
                     setPadding(ui.dp(14), ui.dp(12), ui.dp(14), ui.dp(12))
                     addView(ui.icon(R.drawable.ic_info, Pal.ACCENT, 20))
-                    addView(ui.text(t(R.string.hunt_save_first), 13f, 0xFFD6E9F7.toInt()), ui.lp(0, Ui.WRAP, 1f))
+                    addView(tip, ui.lp(0, Ui.WRAP, 1f))
                 })
                 val groups = listOf(
                     HuntTarget.LEGENDARY to R.string.hunt_group_legendary,
                     HuntTarget.STARTER to R.string.hunt_group_starter,
                     HuntTarget.GIFT to R.string.hunt_group_gift,
+                    HuntTarget.GAME_CORNER to R.string.hunt_group_casino,
                     HuntTarget.WILD to R.string.hunt_group_wild,
                 )
                 for ((kind, titleRes) in groups) {
@@ -153,7 +157,13 @@ class HuntTargetScreen(act: Activity, host: Host) {
                 tile.background = ui.touchable(ui.rounded(if (on) Pal.ACCENT_SOFT else Pal.SURFACE, 12, if (on) Pal.ACCENT else Pal.SURFACE, 2))
                 tile.setTextColor(if (on) Pal.ACCENT else Pal.TEXT)
             }
-            goButton.text = t(R.string.hunt_go, targets.getOrNull(selected)?.name ?: "")
+            val target = targets.getOrNull(selected)
+            goButton.text = t(R.string.hunt_go, target?.name ?: "")
+            tip.text = if (target?.kind == HuntTarget.GAME_CORNER) {
+                t(R.string.hunt_casino_tip, target.name)
+            } else {
+                t(R.string.hunt_save_first)
+            }
         }
 
         private fun start() {

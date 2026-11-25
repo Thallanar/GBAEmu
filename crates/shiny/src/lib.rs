@@ -32,6 +32,37 @@ use games::{Approach, GameProfile, HuntMethod, TargetDef};
 /// está ativa (`gTasks[i].func == input_func`), i.e. a bag está aberta aceitando
 /// input. Fora disso é no-op, então não há clobber em cutscene nem chute de
 /// frame. O A do loop, ao registrar uma borda, confirma a seleção já forçada.
+/// Prêmio do cassino: força o cursor da lista de prêmios no alvo enquanto ela
+/// está aberta (cursor máximo = o da lista). O mesmo struct de menu serve o
+/// SIM/NÃO da confirmação, que tem outro máximo, então ele fica intocado.
+fn force_prize_cursor(gba: &mut Gba, profile: &GameProfile, target: &TargetDef) {
+    let HuntMethod::GameCornerPrize { index, .. } = target.method else {
+        return;
+    };
+    let Some(menu) = profile.prize_menu else {
+        return;
+    };
+    if gba.bus.read_u8(menu.max_addr) == menu.max {
+        gba.bus.write_u8(menu.cursor_addr, index);
+    }
+}
+
+/// Moedas do cassino do jogador (`None` se o jogo não tem o endereço mapeado ou
+/// o save ainda não carregou). No FR/LG ficam cifradas com XOR pela chave do
+/// SaveBlock2; os dois blocos são achados pelos ponteiros.
+pub fn read_coins(gba: &mut Gba, profile: &GameProfile) -> Option<u16> {
+    let store = profile.coins?;
+    let block1 = gba.bus.read_u32(store.block1_ptr);
+    let block2 = gba.bus.read_u32(store.block2_ptr);
+    let in_ewram = |p: u32| (0x0200_0000..0x0204_0000).contains(&p);
+    if !in_ewram(block1) || !in_ewram(block2) {
+        return None;
+    }
+    let raw = gba.bus.read_u16(block1 + store.coins_offset);
+    let key = gba.bus.read_u16(block2 + store.key_offset);
+    Some(raw ^ key)
+}
+
 fn force_starter_cursor(gba: &mut Gba, profile: &GameProfile, target: &TargetDef) {
     if target.method != HuntMethod::Starter {
         return;
@@ -204,6 +235,9 @@ pub enum CheckResult {
     /// caça não o enxerga, e o A-mash seguiria até a tela de apelido. A caça
     /// deve parar e pedir pro jogador liberar um slot.
     PartyFull,
+    /// Prêmio do cassino sem moedas suficientes: o jogo recusa a troca e nenhum
+    /// Pokémon chega, então a caça entraria em loop. Ela para e avisa.
+    NotEnoughCoins,
 }
 
 /// Driver da caça. Mantém o estado entre tentativas para a UI exibir.
@@ -525,6 +559,7 @@ impl Hunter {
             // Força o cursor do inicial pro alvo quando a bag está aberta (no-op
             // pros demais alvos/telas).
             force_starter_cursor(gba, profile, target);
+            force_prize_cursor(gba, profile, target);
             // Passo em direção ao lendário que não espera interação (no-op nos
             // demais métodos).
             self.drive_approach(gba, target);
@@ -557,7 +592,7 @@ impl Hunter {
         profile: &GameProfile,
         target: &TargetDef,
     ) -> Option<CheckResult> {
-        if target.method != HuntMethod::StaticGift || self.gift_baseline.is_some() {
+        if !target.method.is_gift() || self.gift_baseline.is_some() {
             return None;
         }
         let occ = party_occupancy(gba, profile.player_party);
@@ -566,6 +601,12 @@ impl Hunter {
         }
         if occ.iter().all(|&v| v) {
             return Some(CheckResult::PartyFull);
+        }
+        // Prêmio do cassino: com o save carregado, as moedas já dá pra ler.
+        if let HuntMethod::GameCornerPrize { price, .. } = target.method {
+            if read_coins(gba, profile).is_some_and(|coins| coins < price) {
+                return Some(CheckResult::NotEnoughCoins);
+            }
         }
         self.gift_baseline = Some(occ);
         None
@@ -580,7 +621,7 @@ impl Hunter {
     /// - Demais métodos: lê o slot fixo (player/enemy slot 0) e exige checksum
     ///   válido e, se o alvo especificar espécie, que ela bata.
     fn ready_base(&self, gba: &mut Gba, profile: &GameProfile, target: &TargetDef) -> Option<u32> {
-        if target.method == HuntMethod::StaticGift {
+        if target.method.is_gift() {
             let baseline = self.gift_baseline?;
             return find_new_party_mon(gba, profile.player_party, target.species, &baseline);
         }
@@ -662,6 +703,7 @@ impl Hunter {
             // Com a bag aberta, força o cursor pro inicial alvo (malha fechada);
             // no-op nas demais telas e pros demais alvos.
             force_starter_cursor(gba, profile, target);
+            force_prize_cursor(gba, profile, target);
 
             // Passo em direção ao lendário que vem pra cima do jogador em vez de
             // esperar um A (no-op nos demais métodos).
@@ -676,9 +718,9 @@ impl Hunter {
             gba.run_frame();
             self.frames_this_attempt += 1;
 
-            if self.observe_gift_party(gba, profile, target) == Some(CheckResult::PartyFull) {
+            if let Some(stop) = self.observe_gift_party(gba, profile, target) {
                 self.clear_inputs(gba);
-                return CheckResult::PartyFull;
+                return stop;
             }
 
             if let Some(base) = self.ready_base(gba, profile, target) {
@@ -864,6 +906,7 @@ impl Hunter {
             HuntMethod::SoftResetLegendary
                 | HuntMethod::SoftResetApproach(_)
                 | HuntMethod::StaticGift
+                | HuntMethod::GameCornerPrize { .. }
         ) {
             self.soft_reset(gba);
         }
@@ -889,6 +932,64 @@ mod tests {
     use games::{Slot, StarterCursor, StarterMenu, TargetDef};
 
     #[test]
+    fn prize_cursor_only_forced_on_the_prize_list_and_coins_decode() {
+        use crate::games::{CoinStore, PrizeMenu};
+        let profile = GameProfile {
+            code: "TEST",
+            name: "test",
+            player_party: 0x0200_0000,
+            enemy_party: 0x0200_1000,
+            rng_addr: None,
+            starter_menu: None,
+            battle_flag: None,
+            action_cursor: None,
+            prize_menu: Some(PrizeMenu {
+                cursor_addr: 0x0203_ADE6,
+                max_addr: 0x0203_ADE8,
+                max: 5,
+            }),
+            coins: Some(CoinStore {
+                block1_ptr: 0x0300_5008,
+                coins_offset: 0x294,
+                block2_ptr: 0x0300_500C,
+                key_offset: 0xAF8,
+            }),
+            targets: &[],
+        };
+        let dratini = TargetDef {
+            name: "Dratini (cassino)",
+            species: 147,
+            slot: Slot::Player,
+            method: HuntMethod::GameCornerPrize {
+                index: 2,
+                price: 2800,
+            },
+            cursor: StarterCursor::Center,
+        };
+        let mut gba = Gba::new();
+
+        // SIM/NÃO (máximo 1): o cursor não é tocado.
+        gba.bus.write_u8(0x0203_ADE8, 1);
+        gba.bus.write_u8(0x0203_ADE6, 0);
+        force_prize_cursor(&mut gba, &profile, &dratini);
+        assert_eq!(gba.bus.read_u8(0x0203_ADE6), 0);
+
+        // Lista de prêmios (máximo 5): força a posição do alvo.
+        gba.bus.write_u8(0x0203_ADE8, 5);
+        force_prize_cursor(&mut gba, &profile, &dratini);
+        assert_eq!(gba.bus.read_u8(0x0203_ADE6), 2);
+
+        // Moedas: sem save carregado (ponteiros fora da EWRAM) não dá pra ler.
+        assert_eq!(read_coins(&mut gba, &profile), None);
+        // Valores do save real do usuário: 0x75DD XOR 0x613E = 5347.
+        gba.bus.write_u32(0x0300_5008, 0x0202_5554);
+        gba.bus.write_u32(0x0300_500C, 0x0202_45B0);
+        gba.bus.write_u16(0x0202_5554 + 0x294, 0x75DD);
+        gba.bus.write_u16(0x0202_45B0 + 0xAF8, 0x613E);
+        assert_eq!(read_coins(&mut gba, &profile), Some(5347));
+    }
+
+    #[test]
     fn force_starter_cursor_only_writes_when_menu_open() {
         let cursor_addr = 0x0300_5E08;
         let func_addr = cursor_addr - 8;
@@ -905,6 +1006,8 @@ mod tests {
             }),
             battle_flag: None,
             action_cursor: None,
+            prize_menu: None,
+            coins: None,
             targets: &[],
         };
         let mudkip = TargetDef {
@@ -1047,6 +1150,8 @@ mod tests {
             starter_menu: None,
             battle_flag: None,
             action_cursor: None,
+            prize_menu: None,
+            coins: None,
             targets: &[],
         };
         let mut h = Hunter::new();
@@ -1138,6 +1243,8 @@ mod tests {
             starter_menu: None,
             battle_flag: None,
             action_cursor: None,
+            prize_menu: None,
+            coins: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -1179,6 +1286,8 @@ mod tests {
             starter_menu: None,
             battle_flag: None,
             action_cursor: None,
+            prize_menu: None,
+            coins: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -1258,6 +1367,8 @@ mod tests {
             starter_menu: None,
             battle_flag: None,
             action_cursor: None,
+            prize_menu: None,
+            coins: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -1308,6 +1419,8 @@ mod tests {
             starter_menu: None,
             battle_flag: None,
             action_cursor: None,
+            prize_menu: None,
+            coins: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -1512,6 +1625,8 @@ mod tests {
         let mut h = Hunter::new();
         let blind = GameProfile {
             action_cursor: None,
+            prize_menu: None,
+            coins: None,
             ..*games::detect("BPEE").unwrap()
         };
         let pressed =
