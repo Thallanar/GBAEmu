@@ -1913,14 +1913,17 @@ impl AuroraApp {
     /// A tela do jogo, em escala inteira, centralizada na área livre.
     fn game_view(&mut self, ui: &mut egui::Ui, gl: Option<&Arc<eframe::glow::Context>>) {
         let area = ui.max_rect();
-        // "Ajustar" (escala 0): a maior escala inteira que cabe na área livre.
+        // A maior escala inteira que cabe na área livre: é o "Ajustar" (escala
+        // 0) e também o teto da escala fixa, pra a tela nunca passar da área
+        // (com o painel do Hunter aberto numa janela estreita, invadia o painel).
+        let fit = (area.width() / SCREEN_WIDTH as f32)
+            .min(area.height() / SCREEN_HEIGHT as f32)
+            .floor()
+            .max(1.0);
         let k = if self.scale < 1.0 {
-            (area.width() / SCREEN_WIDTH as f32)
-                .min(area.height() / SCREEN_HEIGHT as f32)
-                .floor()
-                .max(1.0)
+            fit
         } else {
-            self.scale.round()
+            self.scale.round().min(fit)
         };
         let size = egui::vec2(SCREEN_WIDTH as f32 * k, SCREEN_HEIGHT as f32 * k);
         // Alinha ao pixel físico pra a escala inteira não borrar.
