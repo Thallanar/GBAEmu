@@ -93,6 +93,8 @@ class MainActivity : Activity(), Host {
         const val KEY_PAD_OPACITY = "pad_opacity"
         const val KEY_PAD_HAPTICS = "pad_haptics"
         const val KEY_PAD_HIDE = "pad_hide_with_controller"
+        const val KEY_PAD_LAYOUT_P = "pad_layout_portrait"
+        const val KEY_PAD_LAYOUT_L = "pad_layout_landscape"
 
         // Filtros de upscale. `Triple(key, fator, rótulo)`: `key` casa com
         // `Upscale::key` do nativo (carrega algoritmo + fator); `fator` dimensiona
@@ -189,6 +191,7 @@ class MainActivity : Activity(), Host {
     // link ativo o jogo segue rodando: o parceiro depende do nosso ritmo.
     @Volatile private var menuPaused = false
     private var settings: SettingsScreen? = null
+    private var layoutEditor: LayoutEditor? = null
     private var states: StatesScreen? = null
     // Nome da ROM carregada (sem `.gba`), pro cabeçalho do menu.
     private var currentRomName: String? = null
@@ -699,6 +702,7 @@ class MainActivity : Activity(), Host {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         applyLayout()
+        layoutEditor?.relayout()
     }
 
     /**
@@ -1112,6 +1116,17 @@ class MainActivity : Activity(), Host {
         get() = padHidePref
         set(v) { padHidePref = v; savePadPrefs(); updatePadHidden() }
 
+    override fun openLayoutEditor(onDone: () -> Unit) {
+        layoutEditor = LayoutEditor(this, this, controls, onSave = { p, l ->
+            controls.layoutPortrait = p
+            controls.layoutLandscape = l
+            savePadPrefs()
+        }, onClose = {
+            layoutEditor = null
+            onDone()
+        }).also { it.show() }
+    }
+
     // ── Controles na tela ────────────────────────────────────────────────────
 
     private fun loadPadPrefs() {
@@ -1122,6 +1137,8 @@ class MainActivity : Activity(), Host {
         controls.opacity = p.getInt(KEY_PAD_OPACITY, 27).coerceIn(10, 60) / 100f
         controls.haptics = p.getBoolean(KEY_PAD_HAPTICS, false)
         padHidePref = p.getBoolean(KEY_PAD_HIDE, true)
+        controls.layoutPortrait = PadLayout.decode(p.getString(KEY_PAD_LAYOUT_P, null))
+        controls.layoutLandscape = PadLayout.decode(p.getString(KEY_PAD_LAYOUT_L, null))
     }
 
     private fun savePadPrefs() {
@@ -1131,6 +1148,8 @@ class MainActivity : Activity(), Host {
             .putInt(KEY_PAD_OPACITY, Math.round(controls.opacity * 100))
             .putBoolean(KEY_PAD_HAPTICS, controls.haptics)
             .putBoolean(KEY_PAD_HIDE, padHidePref)
+            .putString(KEY_PAD_LAYOUT_P, controls.layoutPortrait.encode())
+            .putString(KEY_PAD_LAYOUT_L, controls.layoutLandscape.encode())
             .apply()
     }
 

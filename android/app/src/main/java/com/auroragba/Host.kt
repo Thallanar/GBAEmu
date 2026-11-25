@@ -55,6 +55,8 @@ interface Host {
     var padOpacity: Int
     var padHaptics: Boolean
     var padHideWithController: Boolean
+    /** Abre o editor de layout; [onDone] roda quando ele fecha (salvo ou não). */
+    fun openLayoutEditor(onDone: () -> Unit)
 
     fun languageTag(): String
     fun setLanguage(tag: String)

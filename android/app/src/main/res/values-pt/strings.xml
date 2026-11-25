@@ -137,6 +137,23 @@
     <string name="pad_opacity">Opacidade</string>
     <string name="pad_haptics">Vibrar ao tocar</string>
     <string name="pad_haptics_sub">Toque curto a cada botão pressionado</string>
+    <!-- Editor de layout -->
+    <string name="iface_edit_layout">Editar layout</string>
+    <string name="iface_edit_layout_sub">Mover e redimensionar cada botão</string>
+    <string name="editor_title">Editar layout</string>
+    <string name="editor_save">Salvar</string>
+    <string name="editor_portrait">Retrato</string>
+    <string name="editor_landscape">Paisagem</string>
+    <string name="editor_hint">Arraste para mover · toque para escolher</string>
+    <string name="editor_restore">Restaurar padrão</string>
+    <string name="part_l">Botão L</string>
+    <string name="part_r">Botão R</string>
+    <string name="part_menu">Botão Menu</string>
+    <string name="part_select">Select</string>
+    <string name="part_start">Start</string>
+    <string name="part_dpad">Direcional</string>
+    <string name="part_a">Botão A</string>
+    <string name="part_b">Botão B</string>
     <string name="pad_hide">Esconder com controle físico</string>
     <string name="pad_hide_sub">Somem enquanto um controle estiver conectado; o botão Menu fica</string>
     <string name="states_title">Estados</string>
