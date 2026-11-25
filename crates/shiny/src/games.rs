@@ -48,6 +48,59 @@ pub enum HuntMethod {
     /// os diálogos. **Exige um slot de time livre** — com o time cheio o presente vai
     /// pro PC (outro endereço/formato), e a varredura não o encontra.
     StaticGift,
+    /// Prêmio do balcão do cassino (Celadon, FR/LG): é um presente por script
+    /// (mesmo `CreateMon(Random())` na hora da troca), então funciona como o
+    /// [`HuntMethod::StaticGift`] — soft-reset, A-mash, varredura do time. A
+    /// diferença é a lista de prêmios: a caça força o cursor dela em `index`
+    /// (ver [`PrizeMenu`]) e confere se as moedas cobrem `price` (ver
+    /// [`CoinStore`]); sem moedas o jogo recusa a troca e a caça pararia em loop.
+    GameCornerPrize { index: u8, price: u16 },
+}
+
+impl HuntMethod {
+    /// Presente por script (o Pokémon chega no time do jogador): o
+    /// [`HuntMethod::StaticGift`] e o prêmio do cassino.
+    pub fn is_gift(self) -> bool {
+        matches!(
+            self,
+            HuntMethod::StaticGift | HuntMethod::GameCornerPrize { .. }
+        )
+    }
+}
+
+/// Lista de prêmios do cassino (um `multichoice` do jogo, na struct de menu
+/// genérica). O mesmo struct serve o SIM/NÃO da confirmação, então o Hunter só
+/// força o cursor quando o "cursor máximo" bate com o da lista de prêmios.
+/// Achado empiricamente no FireRed (rev 1) com o save do usuário no balcão.
+#[derive(Debug, Clone, Copy)]
+pub struct PrizeMenu {
+    /// Byte do cursor (`sMenu.cursorPos`): 0 = primeiro prêmio.
+    pub cursor_addr: u32,
+    /// Byte do cursor máximo (`sMenu.maxCursorPos`).
+    pub max_addr: u32,
+    /// Valor do cursor máximo na lista de prêmios (5 prêmios + "não, obrigado").
+    pub max: u8,
+    /// `(endereço, valor)` que indica "texto parado esperando o A" (estado da
+    /// impressora de texto). Com o A martelado, um toque no meio do "Qual
+    /// prêmio?" termina o texto e o menu nasce já escolhendo o 1º prêmio, antes
+    /// de dar pra forçar o cursor — então no cassino o A só é tocado com texto
+    /// esperando, com a lista aberta ou depois de uma pausa longa.
+    pub text_wait: (u32, u8),
+}
+
+/// Onde o jogo guarda as moedas do cassino. No FR/LG elas ficam no SaveBlock1,
+/// cifradas com XOR pela chave do SaveBlock2; os dois blocos mudam de lugar na
+/// memória, então a leitura vai pelos ponteiros (`gSaveBlock1Ptr`/`2Ptr`).
+#[derive(Debug, Clone, Copy)]
+pub struct CoinStore {
+    /// Endereço do ponteiro do SaveBlock1.
+    pub block1_ptr: u32,
+    /// Offset das moedas (u16 cifrado) dentro do SaveBlock1.
+    pub coins_offset: u32,
+    /// Endereço do ponteiro do SaveBlock2.
+    pub block2_ptr: u32,
+    /// Offset da chave (u16 baixo) dentro do SaveBlock2.
+    pub key_offset: u32,
 }
 
 /// Para onde o Hunter deve dar o passo de aproximação no
@@ -133,6 +186,8 @@ pub enum TargetKind {
     Gift,
     /// Selvagem na grama.
     Wild,
+    /// Prêmios do balcão do cassino (FR/LG).
+    GameCorner,
 }
 
 impl TargetDef {
@@ -147,6 +202,7 @@ impl TargetDef {
             HuntMethod::StaticGift if self.name.contains("(inicial)") => TargetKind::Starter,
             HuntMethod::StaticGift => TargetKind::Gift,
             HuntMethod::WildSpin => TargetKind::Wild,
+            HuntMethod::GameCornerPrize { .. } => TargetKind::GameCorner,
         }
     }
 
@@ -190,6 +246,15 @@ pub struct GameProfile {
     /// ele está em CORRER (malha fechada) — às cegas, um ▼ perdido levava o ►
     /// pra BAG e o A abria a bag. `None` = não mapeado ⇒ fuga às cegas.
     pub action_cursor: Option<u32>,
+    /// Lista de prêmios do cassino. `None` = sem prêmios mapeados.
+    pub prize_menu: Option<PrizeMenu>,
+    /// Moedas do cassino. `None` = não mapeado (a caça não confere as moedas).
+    pub coins: Option<CoinStore>,
+    /// Flag "retrospectiva rodando" (o "Previously on your quest…" do FR/LG ao
+    /// carregar o save): vale 1 enquanto ela passa. A caça toca B pra pulá-la
+    /// — sem isso cada tentativa perde uns 200 frames. `None` = sem retrospectiva
+    /// (R/S/E) ou não mapeado.
+    pub quest_log: Option<u32>,
     /// Alvos de caça suportados neste jogo.
     pub targets: &'static [TargetDef],
 }
@@ -231,6 +296,9 @@ const EMERALD: GameProfile = GameProfile {
     battle_flag: Some((0x0300_26F9, 0x02)),
     // Achado empiricamente na ROM real (► ▼ ◄ ▲ no menu ⇒ 0,1,3,2,0).
     action_cursor: Some(0x0202_44AC),
+    prize_menu: None,
+    coins: None,
+    quest_log: None,
     targets: &[
         // Lendários estáticos (soft-reset na frente). Índices INTERNOS do Gen 3
         // (≠ dex nacional): a cauda de Hoenn é REORDENADA — não é um offset fixo.
@@ -469,6 +537,9 @@ const RUBY: GameProfile = GameProfile {
     starter_menu: Some(RS_STARTER_MENU),
     battle_flag: Some(RS_BATTLE_FLAG),
     action_cursor: Some(RS_ACTION_CURSOR),
+    prize_menu: None,
+    coins: None,
+    quest_log: None,
     targets: &[
         TargetDef {
             name: "Groudon",
@@ -497,6 +568,9 @@ const SAPPHIRE: GameProfile = GameProfile {
     starter_menu: Some(RS_STARTER_MENU),
     battle_flag: Some(RS_BATTLE_FLAG),
     action_cursor: Some(RS_ACTION_CURSOR),
+    prize_menu: None,
+    coins: None,
+    quest_log: None,
     targets: &[
         TargetDef {
             name: "Kyogre",
@@ -535,8 +609,11 @@ const SAPPHIRE: GameProfile = GameProfile {
 // Índices INTERNOS Gen 3: todos os alvos de Kanto são ≤251, faixa em que o
 // índice interno = nº da Dex nacional (só a cauda de Hoenn é reordenada).
 
-/// Alvos comuns a FireRed e LeafGreen (não há exclusivo de versão entre eles).
-const KANTO_TARGETS: &[TargetDef] = &[
+/// Alvos comuns a FireRed e LeafGreen, mais os de uma versão só (`$extra`, ex.:
+/// os prêmios do cassino, que mudam entre as versões).
+macro_rules! kanto_targets {
+    ($($extra:expr),* $(,)?) => {
+        &[
     // Iniciais (presente do Oak, Ball na mesa).
     TargetDef {
         name: "Bulbasaur (inicial)",
@@ -655,7 +732,36 @@ const KANTO_TARGETS: &[TargetDef] = &[
         method: HuntMethod::WildSpin,
         cursor: StarterCursor::Center,
     },
+            $($extra,)*
+        ]
+    };
+}
+
+/// Prêmio do cassino de Celadon: presente na posição `index` da lista, por
+/// `price` moedas.
+const fn prize(name: &'static str, species: u16, index: u8, price: u16) -> TargetDef {
+    TargetDef {
+        name,
+        species,
+        slot: Slot::Player,
+        method: HuntMethod::GameCornerPrize { index, price },
+        cursor: StarterCursor::Center,
+    }
+}
+
+/// FireRed: Kanto + prêmios do cassino (ordem e preços lidos da tela do jogo,
+/// FR rev 1: Abra 180, Clefairy 500, Dratini 2800, Scyther 5500, Porygon 9999).
+const FIRERED_TARGETS: &[TargetDef] = kanto_targets![
+    prize("Abra (cassino)", 63, 0, 180),
+    prize("Clefairy (cassino)", 35, 1, 500),
+    prize("Dratini (cassino)", 147, 2, 2800),
+    prize("Scyther (cassino)", 123, 3, 5500),
+    prize("Porygon (cassino)", 137, 4, 9999),
 ];
+
+/// LeafGreen: por ora sem os prêmios do cassino (a lista dele difere — Pinsir no
+/// lugar do Scyther — e o menu ainda não foi conferido num save real).
+const LEAFGREEN_TARGETS: &[TargetDef] = kanto_targets![];
 
 /// `gMain` do FRLG fica em 0x030030F0; o `struct Main` tem o MESMO layout do
 /// Emerald (`inBattle` = bit 1 do byte em +0x439).
@@ -676,13 +782,38 @@ const FIRERED: GameProfile = GameProfile {
     starter_menu: None,
     battle_flag: Some(FRLG_BATTLE_FLAG),
     action_cursor: Some(FRLG_ACTION_CURSOR),
-    targets: KANTO_TARGETS,
+    // Lista de prêmios do cassino e moedas: achados no FireRed rev 1 com o save
+    // do usuário no balcão (cursor 0..4 ao descer; cursor máximo 5 na lista e
+    // 1 no SIM/NÃO; moedas = SaveBlock1+0x294 XOR chave em SaveBlock2+0xAF8).
+    prize_menu: Some(PrizeMenu {
+        cursor_addr: 0x0203_ADE6,
+        max_addr: 0x0203_ADE8,
+        max: 5,
+        // Achado no mesmo save: 3 com o texto esperando o A; 0 escrevendo ou
+        // sem texto.
+        text_wait: (0x0300_222B, 3),
+    }),
+    coins: Some(CoinStore {
+        block1_ptr: 0x0300_5008,
+        coins_offset: 0x294,
+        block2_ptr: 0x0300_500C,
+        key_offset: 0xAF8,
+    }),
+    // Achado no FireRed rev 1: 1 do início ao fim da retrospectiva; um B uns
+    // frames depois de ela começar a encerra (~140 frames a menos por tentativa).
+    quest_log: Some(0x0203_1DD8),
+    targets: FIRERED_TARGETS,
 };
 
-/// Pokémon LeafGreen (BPGE). Mesmos endereços e alvos do FireRed.
+/// Pokémon LeafGreen (BPGE). Mesmos endereços do FireRed; alvos sem o cassino
+/// por enquanto (ver [`LEAFGREEN_TARGETS`]).
 const LEAFGREEN: GameProfile = GameProfile {
     code: "BPGE",
     name: "Pokémon LeafGreen",
+    prize_menu: None,
+    // A pular quando conferido num save do LeafGreen.
+    quest_log: None,
+    targets: LEAFGREEN_TARGETS,
     ..FIRERED
 };
 
@@ -781,6 +912,41 @@ mod tests {
                 "{name}: presente cai no time do jogador"
             );
         }
+    }
+
+    #[test]
+    fn firered_has_game_corner_prizes_in_list_order() {
+        let fr = detect("BPRE").unwrap();
+        let prizes: Vec<(&str, u16, u8, u16)> = fr
+            .targets
+            .iter()
+            .filter_map(|t| match t.method {
+                HuntMethod::GameCornerPrize { index, price } => {
+                    assert_eq!(t.kind(), TargetKind::GameCorner);
+                    Some((t.name, t.species, index, price))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            prizes,
+            vec![
+                ("Abra (cassino)", 63, 0, 180),
+                ("Clefairy (cassino)", 35, 1, 500),
+                ("Dratini (cassino)", 147, 2, 2800),
+                ("Scyther (cassino)", 123, 3, 5500),
+                ("Porygon (cassino)", 137, 4, 9999),
+            ]
+        );
+        assert!(fr.prize_menu.is_some() && fr.coins.is_some());
+        // O LeafGreen ainda não tem os prêmios (lista diferente, sem save conferido).
+        let lg = detect("BPGE").unwrap();
+        assert!(lg.prize_menu.is_none());
+        assert!(!lg
+            .targets
+            .iter()
+            .any(|t| t.kind() == TargetKind::GameCorner));
+        assert_eq!(lg.targets.len() + 5, fr.targets.len());
     }
 
     #[test]

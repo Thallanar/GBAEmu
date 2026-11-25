@@ -147,6 +147,43 @@ pub fn help_for(profile: &GameProfile, target: &TargetDef, lang: Lang) -> Help {
             ),
             None,
         ),
+        HuntMethod::GameCornerPrize { price, .. } => (
+            lang.pick(["Prêmios do cassino", "Game Corner prizes", "Premios del casino"]),
+            format!(
+                "{}{price}{}",
+                lang.pick([
+                    "1. No cassino de Celadon, entre no prédio de prêmios e pare em frente ao \
+                     atendente dos prêmios Pokémon, virado para ele.\n\
+                     2. Tenha moedas para o prêmio (",
+                    "1. In Celadon's Game Corner, go into the prize building and stand in front \
+                     of the Pokémon prize clerk, facing them.\n\
+                     2. Have enough coins for the prize (",
+                    "1. En el casino de Celadon, entra en el edificio de premios y ponte frente \
+                     al encargado de los premios Pokémon, mirándolo.\n\
+                     2. Ten monedas para el premio (",
+                ]),
+                lang.pick([
+                    " moedas) e UMA vaga livre no time.\n\
+                     3. Salve o jogo ali e clique em ▶ Iniciar caça.\n\n\
+                     O Hunter reinicia, escolhe o prêmio na lista sozinho, troca as moedas e \
+                     confere se o Pokémon é shiny. As moedas não se gastam: cada tentativa \
+                     recomeça do save. Sem moedas suficientes, a caça para e avisa.",
+                    " coins) and ONE free party slot.\n\
+                     3. Save the game there and start the hunt.\n\n\
+                     The Hunter resets, picks the prize from the list on its own, trades the \
+                     coins and checks whether the Pokémon is shiny. Coins aren't spent: every \
+                     attempt starts over from the save. Without enough coins, the hunt stops and \
+                     tells you.",
+                    " monedas) y UN espacio libre en el equipo.\n\
+                     3. Guarda la partida ahí e inicia la caza.\n\n\
+                     El Hunter reinicia, elige el premio de la lista solo, cambia las monedas y \
+                     comprueba si el Pokémon es shiny. Las monedas no se gastan: cada intento \
+                     empieza de nuevo desde la partida. Sin monedas suficientes, la caza se \
+                     detiene y te avisa.",
+                ])
+            ),
+            None,
+        ),
         HuntMethod::SoftResetLegendary => (
             lang.pick(["Lendários e estáticos", "Legendaries and statics", "Legendarios y estáticos"]),
             format!(

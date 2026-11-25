@@ -175,6 +175,10 @@
     <string name="hunt_group_starter">Iniciales</string>
     <string name="hunt_group_gift">Regalos</string>
     <string name="hunt_group_wild">Salvaje</string>
+    <string name="hunt_group_casino">Casino · premios de Celadon</string>
+    <string name="hunt_casino_tip">Guarda frente al encargado de los premios Pokémon, con monedas para %1$s y un espacio libre en el equipo. La app elige el premio de la lista sola; las monedas no se gastan.</string>
+    <string name="hunt_no_coins_title">Monedas insuficientes</string>
+    <string name="hunt_no_coins_msg">%1$s cuesta %2$d monedas y la partida tiene %3$d. Consigue más monedas, guarda frente al mostrador y empieza de nuevo.</string>
     <string name="hunt_go">Cazar %1$s</string>
     <string name="hunt_label_hunting">Cazando</string>
     <string name="hunt_running">En marcha</string>
