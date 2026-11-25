@@ -288,6 +288,8 @@ pub struct Hunter {
     gift_baseline: Option<[bool; PARTY_SIZE as usize]>,
     /// Cassino: frame (da tentativa) em que começou o último toque de A.
     prize_tap: Option<u32>,
+    /// Frame (da tentativa) em que a retrospectiva do FR/LG começou.
+    recap_seen: Option<u32>,
 }
 
 /// Frame (contado desde o reset) em que injetamos a seed do RNG do jogo. Tem que
@@ -327,6 +329,12 @@ const MASH_PERIOD: u32 = 8;
 /// pausa (frames). Cobre o "Qual prêmio?" escrevendo na velocidade de texto mais
 /// lenta (27 letras × 8 frames), pra nenhum toque cair no meio dele.
 const PRIZE_IDLE_GAP: u32 = 240;
+
+/// Retrospectiva do FR/LG: o B só é lido uns frames depois de ela começar; um
+/// toque no primeiro frame é ignorado. Se não pegar, repete a cada
+/// [`RECAP_RETRY`] frames.
+const RECAP_SKIP_DELAY: u32 = 5;
+const RECAP_RETRY: u32 = 64;
 
 /// Frame (desde o reset) a partir do qual o [`HuntMethod::SoftResetApproach`]
 /// começa a tentar o passo de aproximação. Antes disso o jogo ainda está no
@@ -450,6 +458,7 @@ impl Hunter {
             flee_frames: 0,
             gift_baseline: None,
             prize_tap: None,
+            recap_seen: None,
         };
         // Sorteia a seed da 1ª tentativa já no boot (a 1ª caça não passa por
         // soft_reset antes do primeiro encontro).
@@ -569,6 +578,25 @@ impl Hunter {
         false
     }
 
+    /// Retrospectiva do FR/LG ([`GameProfile::quest_log`]): enquanto ela roda,
+    /// toca B pra pulá-la (o A fica solto). Devolve `true` se ela está rodando.
+    fn drive_recap_skip(&mut self, gba: &mut Gba, profile: &GameProfile) -> bool {
+        let Some(flag) = profile.quest_log else {
+            return false;
+        };
+        if gba.bus.read_u8(flag) != 1 {
+            gba.bus.io.joypad.set_button(Button::B, false);
+            return false;
+        }
+        let f = self.frames_this_attempt;
+        let start = *self.recap_seen.get_or_insert(f);
+        let since = f - start;
+        let tap =
+            since >= RECAP_SKIP_DELAY && (since - RECAP_SKIP_DELAY) % RECAP_RETRY < MASH_PERIOD;
+        gba.bus.io.joypad.set_button(Button::B, tap);
+        true
+    }
+
     pub fn soft_reset(&mut self, gba: &mut Gba) {
         // Solta tudo antes do reset: sem isso um passo de aproximação em curso
         // (ou o A do mash) vazaria segurado pra tela de título da tentativa nova.
@@ -577,6 +605,7 @@ impl Hunter {
         self.frames_this_attempt = 0;
         self.gift_baseline = None;
         self.prize_tap = None;
+        self.recap_seen = None;
         self.reroll_seed();
     }
 
@@ -594,6 +623,7 @@ impl Hunter {
         self.seed_injected = false;
         self.gift_baseline = None;
         self.prize_tap = None;
+        self.recap_seen = None;
         for _ in 0..max_frames {
             self.maybe_inject_seed(gba, profile);
             // Força o cursor do inicial pro alvo quando a bag está aberta (no-op
@@ -604,7 +634,8 @@ impl Hunter {
             // demais métodos).
             self.drive_approach(gba, target);
             // Tapa A (ver `tick`): cobre título → continuar → bag → diálogos.
-            let press = self.press_a(gba, profile, target);
+            let in_recap = self.drive_recap_skip(gba, profile);
+            let press = !in_recap && self.press_a(gba, profile, target);
             gba.bus.io.joypad.set_button(Button::A, press);
             gba.run_frame();
             self.frames_this_attempt += 1;
@@ -753,7 +784,8 @@ impl Hunter {
             // escolhe "Continuar", abre a bag, confirma o inicial (já forçado) e
             // avança diálogos — tudo com A. Tap (não segurar) pra cada prompt
             // registrar uma borda de tecla.
-            let press = self.press_a(gba, profile, target);
+            let in_recap = self.drive_recap_skip(gba, profile);
+            let press = !in_recap && self.press_a(gba, profile, target);
             gba.bus.io.joypad.set_button(Button::A, press);
             gba.run_frame();
             self.frames_this_attempt += 1;
@@ -972,6 +1004,45 @@ mod tests {
     use games::{Slot, StarterCursor, StarterMenu, TargetDef};
 
     #[test]
+    fn recap_is_skipped_with_a_delayed_b_tap() {
+        let profile = GameProfile {
+            code: "TEST",
+            name: "test",
+            player_party: 0x0200_0000,
+            enemy_party: 0x0200_1000,
+            rng_addr: None,
+            starter_menu: None,
+            battle_flag: None,
+            action_cursor: None,
+            prize_menu: None,
+            coins: None,
+            quest_log: Some(0x0203_1DD8),
+            targets: &[],
+        };
+        let mut gba = Gba::new();
+        let mut h = Hunter::new();
+        let b_down = |gba: &mut Gba| gba.bus.io.joypad.keyinput() & (1 << Button::B as u16) == 0;
+        // Sem retrospectiva: não interfere.
+        assert!(!h.drive_recap_skip(&mut gba, &profile));
+        // Retrospectiva ligou no frame 100: B solto nos primeiros frames...
+        gba.bus.write_u8(0x0203_1DD8, 1);
+        h.frames_this_attempt = 100;
+        assert!(h.drive_recap_skip(&mut gba, &profile));
+        assert!(!b_down(&mut gba));
+        // ...pressionado a partir do atraso, por MASH_PERIOD frames...
+        h.frames_this_attempt = 100 + RECAP_SKIP_DELAY;
+        assert!(h.drive_recap_skip(&mut gba, &profile));
+        assert!(b_down(&mut gba));
+        h.frames_this_attempt = 100 + RECAP_SKIP_DELAY + MASH_PERIOD;
+        h.drive_recap_skip(&mut gba, &profile);
+        assert!(!b_down(&mut gba));
+        // ...e solto quando ela termina.
+        gba.bus.write_u8(0x0203_1DD8, 0);
+        assert!(!h.drive_recap_skip(&mut gba, &profile));
+        assert!(!b_down(&mut gba));
+    }
+
+    #[test]
     fn prize_hunt_never_taps_a_while_text_is_printing() {
         use crate::games::PrizeMenu;
         let profile = GameProfile {
@@ -990,6 +1061,7 @@ mod tests {
                 text_wait: (0x0300_222B, 3),
             }),
             coins: None,
+            quest_log: None,
             targets: &[],
         };
         let prize = TargetDef {
@@ -1050,6 +1122,7 @@ mod tests {
                 block2_ptr: 0x0300_500C,
                 key_offset: 0xAF8,
             }),
+            quest_log: None,
             targets: &[],
         };
         let dratini = TargetDef {
@@ -1104,6 +1177,7 @@ mod tests {
             action_cursor: None,
             prize_menu: None,
             coins: None,
+            quest_log: None,
             targets: &[],
         };
         let mudkip = TargetDef {
@@ -1248,6 +1322,7 @@ mod tests {
             action_cursor: None,
             prize_menu: None,
             coins: None,
+            quest_log: None,
             targets: &[],
         };
         let mut h = Hunter::new();
@@ -1341,6 +1416,7 @@ mod tests {
             action_cursor: None,
             prize_menu: None,
             coins: None,
+            quest_log: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -1384,6 +1460,7 @@ mod tests {
             action_cursor: None,
             prize_menu: None,
             coins: None,
+            quest_log: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -1465,6 +1542,7 @@ mod tests {
             action_cursor: None,
             prize_menu: None,
             coins: None,
+            quest_log: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -1517,6 +1595,7 @@ mod tests {
             action_cursor: None,
             prize_menu: None,
             coins: None,
+            quest_log: None,
             targets: &[],
         };
         let target = TargetDef {
@@ -1723,6 +1802,7 @@ mod tests {
             action_cursor: None,
             prize_menu: None,
             coins: None,
+            quest_log: None,
             ..*games::detect("BPEE").unwrap()
         };
         let pressed =

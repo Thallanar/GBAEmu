@@ -250,6 +250,11 @@ pub struct GameProfile {
     pub prize_menu: Option<PrizeMenu>,
     /// Moedas do cassino. `None` = não mapeado (a caça não confere as moedas).
     pub coins: Option<CoinStore>,
+    /// Flag "retrospectiva rodando" (o "Previously on your quest…" do FR/LG ao
+    /// carregar o save): vale 1 enquanto ela passa. A caça toca B pra pulá-la
+    /// — sem isso cada tentativa perde uns 200 frames. `None` = sem retrospectiva
+    /// (R/S/E) ou não mapeado.
+    pub quest_log: Option<u32>,
     /// Alvos de caça suportados neste jogo.
     pub targets: &'static [TargetDef],
 }
@@ -293,6 +298,7 @@ const EMERALD: GameProfile = GameProfile {
     action_cursor: Some(0x0202_44AC),
     prize_menu: None,
     coins: None,
+    quest_log: None,
     targets: &[
         // Lendários estáticos (soft-reset na frente). Índices INTERNOS do Gen 3
         // (≠ dex nacional): a cauda de Hoenn é REORDENADA — não é um offset fixo.
@@ -533,6 +539,7 @@ const RUBY: GameProfile = GameProfile {
     action_cursor: Some(RS_ACTION_CURSOR),
     prize_menu: None,
     coins: None,
+    quest_log: None,
     targets: &[
         TargetDef {
             name: "Groudon",
@@ -563,6 +570,7 @@ const SAPPHIRE: GameProfile = GameProfile {
     action_cursor: Some(RS_ACTION_CURSOR),
     prize_menu: None,
     coins: None,
+    quest_log: None,
     targets: &[
         TargetDef {
             name: "Kyogre",
@@ -791,6 +799,9 @@ const FIRERED: GameProfile = GameProfile {
         block2_ptr: 0x0300_500C,
         key_offset: 0xAF8,
     }),
+    // Achado no FireRed rev 1: 1 do início ao fim da retrospectiva; um B uns
+    // frames depois de ela começar a encerra (~140 frames a menos por tentativa).
+    quest_log: Some(0x0203_1DD8),
     targets: FIRERED_TARGETS,
 };
 
@@ -800,6 +811,8 @@ const LEAFGREEN: GameProfile = GameProfile {
     code: "BPGE",
     name: "Pokémon LeafGreen",
     prize_menu: None,
+    // A pular quando conferido num save do LeafGreen.
+    quest_log: None,
     targets: LEAFGREEN_TARGETS,
     ..FIRERED
 };
