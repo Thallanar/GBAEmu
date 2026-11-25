@@ -21,6 +21,8 @@ pub const FAINT: Color32 = Color32::from_rgb(0x8C, 0x8C, 0x96);
 pub const OFF: Color32 = Color32::from_rgb(0x5A, 0x5A, 0x66);
 pub const ACCENT: Color32 = Color32::from_rgb(0x78, 0xC8, 0xFF);
 pub const ON_ACCENT: Color32 = Color32::from_rgb(0x0B, 0x22, 0x33);
+pub const DANGER: Color32 = Color32::from_rgb(0xE0, 0x78, 0x7A);
+pub const DANGER_TEXT: Color32 = Color32::from_rgb(0xF4, 0xA3, 0xA4);
 /// Destaque suave (fundo de item ativo): o azul a ~16% sobre o escuro.
 pub const ACCENT_SOFT: Color32 = Color32::from_rgba_premultiplied(0x13, 0x20, 0x29, 0x29);
 
