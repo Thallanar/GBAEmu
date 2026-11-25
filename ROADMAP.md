@@ -400,7 +400,6 @@ Otimizações estruturais do interpretador, medidas em release headless.
 - [ ] Decidir o que fazer com o **link Android↔PC** no Wi-Fi (ainda engasga):
       marcar como experimental ou esconder até a Fase Link resolver a latência.
 - [ ] LeafGreen: cassino e pulo da retrospectiva conferidos num save real.
-- [ ] Revisar `BUGS.md` (o salto de vsync a 144 Hz no desktop aparece aberto).
 
 **Ficha da loja:**
 
