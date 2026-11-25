@@ -392,3 +392,70 @@ pub fn row<R>(
     })
     .inner
 }
+
+/// Estilo de [`wide_button`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ButtonKind {
+    Accent,
+    Outline,
+    Danger,
+    Disabled,
+}
+
+/// Botão de tamanho fixo (os do rodapé dos painéis ocupam a largura toda).
+pub fn wide_button(ui: &mut egui::Ui, label: &str, size: egui::Vec2, kind: ButtonKind) -> Response {
+    let sense = if kind == ButtonKind::Disabled {
+        Sense::hover()
+    } else {
+        Sense::click()
+    };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
+    let hovered = resp.hovered() && kind != ButtonKind::Disabled;
+    let (bg, fg, border) = match kind {
+        ButtonKind::Accent => (
+            if hovered {
+                theme::ACCENT.gamma_multiply(0.9)
+            } else {
+                theme::ACCENT
+            },
+            theme::ON_ACCENT,
+            None,
+        ),
+        ButtonKind::Outline => (
+            if hovered {
+                theme::SURFACE2
+            } else {
+                Color32::TRANSPARENT
+            },
+            theme::TEXT,
+            Some(theme::BORDER),
+        ),
+        ButtonKind::Danger => (
+            if hovered {
+                theme::SURFACE
+            } else {
+                Color32::TRANSPARENT
+            },
+            theme::DANGER_TEXT,
+            Some(theme::DANGER),
+        ),
+        ButtonKind::Disabled => (theme::SURFACE2, theme::FAINT, None),
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, 12.0, bg);
+    if let Some(b) = border {
+        p.rect_stroke(rect.shrink(0.75), 12.0, Stroke::new(1.5_f32, b));
+    }
+    p.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        theme::bold(15.0),
+        fg,
+    );
+    if kind == ButtonKind::Disabled {
+        resp
+    } else {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    }
+}
