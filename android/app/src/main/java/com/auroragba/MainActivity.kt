@@ -152,6 +152,9 @@ class MainActivity : Activity(), Host {
         const val FLUSH_EVERY_FRAMES = 300
         // Frames de emulação por draw durante a caça (acelera o hunt; ~8× a 60Hz).
         const val HUNT_BATCH = 8
+        // Orçamento de CPU por draw no fast-forward (emulação + upscale). Fica
+        // abaixo dos 16,7 ms do vsync pra sobrar pro upload/draw GL e o swap.
+        const val FF_BUDGET_NANOS = 13_000_000L
         // Slots de save state em disco (`<code>.ss1`..`.ss8`), igual ao desktop.
         const val SAVE_SLOTS = 8
         val MATCH = FrameLayout.LayoutParams.MATCH_PARENT
@@ -2025,6 +2028,14 @@ class MainActivity : Activity(), Host {
         private var frames = 0
         private val audioBuf = ShortArray(8192)
         private val frameNanos = (1_000_000_000.0 / 59.7275).toLong()
+        // Custo médio (EMA) de um frame do fast-forward sem tela e do frame
+        // visível (emulação + upscale + cópia), pro orçamento de tempo do draw.
+        private var skipCostNanos = 0L
+        private var visibleCostNanos = 0L
+
+        /** Média móvel exponencial (peso 1/8 pra amostra nova). */
+        private fun ema(avg: Long, sample: Long): Long =
+            if (avg == 0L) sample else avg + (sample - avg) / 8
 
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             if (handle == 0L) handle = NativeBridge.create()
@@ -2195,19 +2206,32 @@ class MainActivity : Activity(), Host {
                     // Fast-forward: roda os frames extras ANTES do frame visível,
                     // descartando o áudio deles. O pacing lá embaixo segue ancorado
                     // no write bloqueante do áudio do último frame (1 frame de
-                    // áudio por draw) → velocidade = speed× exata, com o som
-                    // virando "fita acelerada" (toca 1 a cada speed frames).
-                    repeat(speed - 1) {
-                        buf.clear()
-                        NativeBridge.renderFrame(handle, buf)
+                    // áudio por draw), com o som virando "fita acelerada".
+                    //
+                    // Os extras usam `runFrame` (sem upscale nem cópia: ninguém os
+                    // vê) e respeitam um orçamento de tempo: só começa outro se ele
+                    // + o frame visível ainda cabem em FF_BUDGET_NANOS. Com o
+                    // aparelho quente (throttling) a velocidade cai um pouco em vez
+                    // de o draw estourar o vsync e o áudio secar (travadas).
+                    var ran = 0
+                    while (ran < speed - 1 &&
+                        System.nanoTime() - start + skipCostNanos + visibleCostNanos <= FF_BUDGET_NANOS
+                    ) {
+                        val t0 = System.nanoTime()
+                        NativeBridge.runFrame(handle)
                         while (NativeBridge.drainAudio(handle, audioBuf) > 0) { /* descarta */ }
+                        skipCostNanos = ema(skipCostNanos, System.nanoTime() - t0)
+                        ran++
                     }
+                    val t0 = System.nanoTime()
                     buf.clear()
                     NativeBridge.renderFrame(handle, buf)
                     buf.rewind()
-                    frames += speed
-                    // "Cruzou um múltiplo": com speed > 1 o == 0 podia nunca bater.
-                    if (frames % FLUSH_EVERY_FRAMES < speed) flushBackup()
+                    visibleCostNanos = ema(visibleCostNanos, System.nanoTime() - t0)
+                    ran++
+                    frames += ran
+                    // "Cruzou um múltiplo": com ran > 1 o == 0 podia nunca bater.
+                    if (frames % FLUSH_EVERY_FRAMES < ran) flushBackup()
                 }
                 // Dimensões do frame conforme o fator de upscale (nativo já
                 // entregou o buffer ampliado). Realoca a textura quando muda.

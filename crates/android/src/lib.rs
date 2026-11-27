@@ -233,6 +233,30 @@ mod android_impl {
         let Some(emu) = emu(handle) else {
             return;
         };
+        step_frame(emu);
+        emu.write_framebuffer(&env, &buffer);
+    }
+
+    /// Roda um frame SEM copiar o framebuffer (nem aplicar o upscale). O
+    /// fast-forward usa isso nos frames que não vão pra tela: o filtro (HQ4x
+    /// ~2 ms) só precisa rodar no frame visível.
+    ///
+    /// # Safety
+    /// `handle` precisa ser válido.
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_com_auroragba_NativeBridge_runFrame(
+        _env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) {
+        if let Some(emu) = emu(handle) {
+            step_frame(emu);
+        }
+    }
+
+    /// Avança um frame (link ou solo) e limita o buffer de áudio. Comum a
+    /// `renderFrame` e `runFrame`.
+    fn step_frame(emu: &mut Emu) {
         // Recolhe uma conexão de link que tenha ficado pronta (na thread de
         // emulação, dona do `Emu`).
         poll_link(emu);
@@ -256,8 +280,6 @@ mod android_impl {
         if buf.len() > cap {
             buf.drain(..buf.len() - cap);
         }
-
-        emu.write_framebuffer(&env, &buffer);
     }
 
     /// Copia o framebuffer atual pro `ByteBuffer` sem avançar a emulação. O Shiny
