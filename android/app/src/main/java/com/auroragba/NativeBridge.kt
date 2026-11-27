@@ -29,6 +29,12 @@ object NativeBridge {
      */
     external fun renderFrame(handle: Long, buffer: ByteBuffer)
 
+    /**
+     * Roda um frame sem copiar o framebuffer nem aplicar o upscale. Usado nos
+     * frames do fast-forward que não vão pra tela.
+     */
+    external fun runFrame(handle: Long)
+
     /** Atualiza os botões (bits do KEYINPUT: 0=A,1=B,2=Sel,3=Start,4=R,5=L,6=Up,7=Down,8=R,9=L). */
     external fun setButtons(handle: Long, mask: Int)
 
